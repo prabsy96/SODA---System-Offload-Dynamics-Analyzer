@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "soda"
+version = "0.1.0"
+authors = [
+    { name = "Prabhu Vellaisamy", email = "pvellais@andrew.cmu.edu" },
+]
+description = "SODA: System Offload Dynamics Analyzer"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+] 
+dependencies = [
+    "numpy>=2.0.0",
+    "transformers>=4.51.3",
+    "torch>=2.7.0",
+]
+
+[project.scripts]
+soda = "soda.cli:run_analysis"

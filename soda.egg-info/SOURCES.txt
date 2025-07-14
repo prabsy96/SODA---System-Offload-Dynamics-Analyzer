@@ -1,0 +1,9 @@
+LICENSE
+README.md
+pyproject.toml
+soda.egg-info/PKG-INFO
+soda.egg-info/SOURCES.txt
+soda.egg-info/dependency_links.txt
+soda.egg-info/entry_points.txt
+soda.egg-info/requires.txt
+soda.egg-info/top_level.txt
