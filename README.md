@@ -31,6 +31,7 @@ Please cite as *P. Vellaisamy, T. Labonte, S. Chakraborty, M. Turner, S. Sury an
 git clone https://github.com/prabsy96/soda.git
 cd soda
 pip install -r requirements.txt
+```
 
 ## Quickstart
 
