@@ -1,10 +1,15 @@
 # SODA — System-Offload-Dynamics-Analyzer
 
-[![CI](https://github.com/prabsy96/soda/actions/workflows/ci.yml/badge.svg)](https://github.com/prabsy96/soda/actions/workflows/ci.yml)
+![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?style=flat&logo=pytorch&logoColor=white)
+![CUDA](https://img.shields.io/badge/CUDA-enabled-green?logo=nvidia&logoColor=white)
+![Profiler](https://img.shields.io/badge/PyTorch%20Profiler-supported-blueviolet)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)
+![Citable](https://img.shields.io/badge/Citable-ISPASS%202025-brightgreen)
+![System Analysis](https://img.shields.io/badge/System%20Profiler-Enabled-blue)
 
-SODA is a lightweight tool for analyzing the system-level performance dynamics of PyTorch models. It captures and dissects CPU-GPU interactions during model inference, providing insights into kernel launch overhead, execution dependencies, and opportunities for operator fusion. It is a minimal, simplified variant inspired by the in-depth analysis of the **SKIP** tool.
+
+SODA is a lightweight tool for analyzing the system-level performance dynamics of PyTorch models. It analyzes CPU-GPU interactions during model inference, providing insights into kernel launch overhead, execution dependencies, and opportunities for operator fusion. It is a variant inspired by the **SKIP** tool.
 
 ### 1. Overview
 
@@ -21,12 +26,13 @@ Please cite as *P. Vellaisamy, T. Labonte, S. Chakraborty, M. Turner, S. Sury an
 ## Installation
 
 **Clone the repository:**
+    
     ```bash
-    git clone [https://github.com/your-username/soda.git](https://github.com/your-username/soda.git)
+    git clone https://github.com/prabsy96/soda.git
     cd soda
-    ```
     pip install -r requirements.txt
-
+    ```
+    
 ## Quickstart
 
 Run the analysis on a model (e.g., `gpt2`) using synthetic data. The following command will generate trace files and summary reports in the `soda_results/` directory.
