@@ -3,24 +3,33 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "soda"
+name = "soda-profiler"
 version = "0.1.0"
-authors = [
-    { name = "Prabhu Vellaisamy", email = "pvellais@andrew.cmu.edu" },
-]
-description = "SODA: System Offload Dynamics Analyzer"
+description = "SODA: System-Offload-Dynamics-Analyzer for PyTorch models."
 readme = "README.md"
+license = { file="LICENSE" }
 requires-python = ">=3.9"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
-] 
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Benchmark",
+]
 dependencies = [
-    "numpy>=2.0.0",
-    "transformers>=4.51.3",
-    "torch>=2.7.0",
+    "accelerate==1.9.0",
+    "matplotlib==3.9.2",
+    "networkx==3.4.2",
+    "numpy==1.26.4",
+    "torch==2.7.1",
+    "transformers==4.51.0",
 ]
 
 [project.scripts]
-soda = "soda.cli:run_analysis"
+soda = "soda.main:main"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]

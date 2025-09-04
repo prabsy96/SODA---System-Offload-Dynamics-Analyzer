@@ -1,0 +1,1 @@
+Thanks for checking out SODA! Contributions are welcome. If you're contributing from outside the CMU team, please fork the repo, create a dev branch for your changes, and open a pull request when you're ready.
