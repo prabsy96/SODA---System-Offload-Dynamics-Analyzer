@@ -26,13 +26,12 @@ Please cite as *P. Vellaisamy, T. Labonte, S. Chakraborty, M. Turner, S. Sury an
 ## Installation
 
 **Clone the repository:**
-    
-    ```bash
-    git clone https://github.com/prabsy96/soda.git
-    cd soda
-    pip install -r requirements.txt
-    ```
-    
+
+```bash
+git clone https://github.com/prabsy96/soda.git
+cd soda
+pip install -r requirements.txt
+
 ## Quickstart
 
 Run the analysis on a model (e.g., `gpt2`) using synthetic data. The following command will generate trace files and summary reports in the `soda_results/` directory.
