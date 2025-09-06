@@ -42,16 +42,23 @@ Please cite as
 ```bash
 git clone https://github.com/prabsy96/soda.git
 cd soda
-pip install -r requirements.txt
+pip install .
 ```
 
 ## Quickstart
 
 Run the analysis on a model (e.g., `gpt2`) using synthetic data. The following command will generate trace files and summary reports in the `soda_results/` directory.
 
+For interactive jobs:
 ```bash
 # Run from the root of the repository
 ./examples/quickstart.sh
 ```
 
-Please note that you require CUDA support. All experiments were performed on CUDA 12.2.
+For sbatch jobs (you might need to change specifications based on the cluster specs):
+```bash
+# Run from the root
+sbatch ./examples/sbatch.sh
+```
+
+Please note that current version requires CUDA support. All experiments were performed on CUDA 12.2.
