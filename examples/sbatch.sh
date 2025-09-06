@@ -1,34 +1,32 @@
 #!/bin/bash
-# see https://slurm.schedmd.com/sbatch.html for options
-
 # Jobname
 #SBATCH -J run_tool # Updated job name for clarity
 # Output and error files
 #SBATCH -o run_tool.out
 #SBATCH -e run_tool.err
 
-# Job time limit (currently 15mins) - WARNING: This is very short for a training job.
-# You may need to increase this significantly (e.g., #SBATCH -t 1-02:00:00 for 1 day 2 hours).
-#SBATCH -t 00:15
+# Job time limit (1 day 4 hours). Max for HGPU partition is 2 days.
+#SBATCH -t 1-04:00:00
+
+# Specify the HGPU partition for H200 nodes
+#SBATCH -p HGPU
 
 # Node configuration
 #SBATCH --nodes 1                 # Request 1 full node
 
-# CPU configuration
-#SBATCH --ntasks 1                # Run a single task (your main script process)
-#SBATCH --cpus-per-task=96        # Request all 96 CPU cores on the node (2x48-core CPUs)
-                                  # for your single task. Your script/application
-                                  # needs to be able to utilize these cores.
+# Task configuration
+#SBATCH --ntasks 1                # Run a single task
 
-# Memory configuration
-#SBATCH --mem=512G                # Request all 512GB of system RAM on the node.
-                                  # Ensure your application can manage/utilize this amount,
-                                  # and be mindful of potential OS overhead if issues arise.
-                                  # (Alternatively, --mem=0 with --exclusive might be used
-                                  # on some systems to request all available memory).
+# --- MODIFIED RESOURCE ALLOCATION ---
+# GPU allocation: Request 1 H200 GPU
+#SBATCH --gres=gpu:H200:1
 
-# GPU allocation
-#SBATCH --gres=gpu:H100:1         # Request 1 H100 GPU.
+# CPU allocation: Request 1 CPU core for the GPU, per HGPU partition policy
+#SBATCH --cpus-per-gpu=1
+
+# Memory allocation: Request 32GB of RAM for the GPU, per HGPU partition policy
+#SBATCH --mem-per-gpu=32G
+# --- END MODIFICATIONS ---
 
 # --- Execution Block ---
 
@@ -38,15 +36,32 @@
  module list # Optional: lists loaded modules for debugging
 
 # Activate your environment
- echo "Activating environment..."
- # source ~/Samsung/Tool/env/bin/activate # Ensure this path is correct relative to your job's working directory or use an absolute path.
+echo "Activating environment..."
+export PATH=~/miniconda3/bin:$PATH
+source ~/miniconda3/etc/profile.d/conda.sh
+conda init bash
+conda activate base
+
+# Verify activation
+echo "Conda environment: $CONDA_DEFAULT_ENV"
+echo "Python path: $(which python)"
+echo "Python version: $(python --version)"
+
+# Install dependencies if not present
+if ! python -c "import torch, torchvision, transformers, accelerate, matplotlib, numpy"; then
+    echo "Installing dependencies..."
+    conda install -c conda-forge accelerate matplotlib numpy transformers -y
+    conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia -y
+fi
 
 # Run your script
-cd ../
 echo "Running script..."
 if [ ! -f "pyproject.toml" ]; then
-    echo "Error: Please run this script from the root directory of the SODA repository."
-    exit 1
+    cd ../
+    if [ ! -f "pyproject.toml" ]; then
+        echo "Error: Unable to locate the root directory of the SODA repository."
+        exit 1
+    fi
 fi
 python -m soda.main \
   --model gpt2 \

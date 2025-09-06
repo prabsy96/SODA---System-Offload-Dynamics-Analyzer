@@ -21,7 +21,19 @@ This tool is derived from and directly inspired by the research presented in the
 
 > *Characterizing and Optimizing LLM Inference Workloads on CPU-GPU Coupled Architectures*. [Prabhu Vellaisamy, Thomas Labonte, Sourav Chakraborty, Matthew Turner, Samantika Sury, John Paul Shen] ISPASS 2025. 
 
-Please cite as *P. Vellaisamy, T. Labonte, S. Chakraborty, M. Turner, S. Sury and J. P. Shen, "Characterizing and Optimizing LLM Inference Workloads on CPU-GPU Coupled Architectures," 2025 IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS), Ghent, Belgium, 2025, pp. 49-61, doi: 10.1109/ISPASS64960.2025.00015.*
+Please cite as 
+````
+@INPROCEEDINGS{11096369,
+  author={Vellaisamy, Prabhu and Labonte, Thomas and Chakraborty, Sourav and Turner, Matt and Sury, Samantika and Shen, John Paul},
+  booktitle={2025 IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS)}, 
+  title={Characterizing and Optimizing LLM Inference Workloads on CPU-GPU Coupled Architectures}, 
+  year={2025},
+  volume={},
+  number={},
+  pages={49-61},
+  keywords={Couplings;Measurement;Computer architecture;Software;Service-oriented architecture;Performance analysis;Resource management;Kernel;Queueing analysis;Optimization;Accelerators;AI;coupling;benchmarking},
+  doi={10.1109/ISPASS64960.2025.00015}}
+````
 
 ## Installation
 
@@ -40,3 +52,6 @@ Run the analysis on a model (e.g., `gpt2`) using synthetic data. The following c
 ```bash
 # Run from the root of the repository
 ./examples/quickstart.sh
+```
+
+Please note that you require CUDA support. All experiments were performed on CUDA 12.2.

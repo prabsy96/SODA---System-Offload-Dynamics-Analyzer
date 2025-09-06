@@ -1,5 +1,114 @@
-accelerate==1.9.0
-matplotlib==3.9.2
+accelerate==0.28.0
+aiohappyeyeballs @ file:///home/conda/feedstock_root/build_artifacts/aiohappyeyeballs_1741775197943/work
+aiohttp==3.9.5
+aiosignal==1.3.1
+antlr4-python3-runtime==4.9.3
+attrs @ file:///home/conda/feedstock_root/build_artifacts/attrs_1741918516150/work
+brotlicffi @ file:///croot/brotlicffi_1736182461069/work
+certifi @ file:///home/conda/feedstock_root/build_artifacts/certifi_1754231422783/work/certifi
+cffi @ file:///croot/cffi_1736182485317/work
+charset-normalizer @ file:///croot/charset-normalizer_1721748349566/work
+cmake==3.28.3
+colorama @ file:///home/conda/feedstock_root/build_artifacts/colorama_1733218098505/work
+contextlib2==21.6.0
+contourpy==1.2.0
+cycler==0.12.1
+datasets @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_datasets_1755878391/work
+Deprecated==1.2.14
+dill @ file:///home/conda/feedstock_root/build_artifacts/dill_1706434688412/work
+filelock @ file:///croot/filelock_1744281381737/work
+fonttools==4.50.0
+frozenlist==1.4.1
+fsspec @ file:///home/conda/feedstock_root/build_artifacts/fsspec_1741403990995/work
+gmpy2 @ file:///croot/gmpy2_1738085463648/work
+h5py==3.11.0
+hf-xet @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_hf-xet_1756524959/work
+huggingface_hub @ file:///home/conda/feedstock_root/build_artifacts/huggingface_hub_1756439529165/work
+idna @ file:///croot/idna_1714398848350/work
+intel-extension-for-pytorch==2.2.0
+intel-extension-for-transformers==1.3.2
+Jinja2 @ file:///croot/jinja2_1741710844255/work
+joblib==1.3.2
+kiwisolver==1.4.5
+lit==18.1.1
+MarkupSafe @ file:///croot/markupsafe_1738584038848/work
+matplotlib==3.8.3
+mkl-service==2.4.0
+mkl_fft @ file:///io/mkl313/mkl_fft_1730824109137/work
+mkl_random @ file:///io/mkl313/mkl_random_1730823916628/work
+mpmath==1.3.0
+multidict==6.0.5
+multiprocess @ file:///home/conda/feedstock_root/build_artifacts/multiprocess_1724954612691/work
+munkres==1.1.4
+networkx==3.2.1
+neural-compressor==2.4.1
 numpy==1.26.4
-torch==2.7.1
-transformers==4.51.0
+nvidia-cublas-cu11==11.10.3.66
+nvidia-cublas-cu12==12.1.3.1
+nvidia-cuda-cupti-cu11==11.7.101
+nvidia-cuda-cupti-cu12==12.1.105
+nvidia-cuda-nvrtc-cu11==11.7.99
+nvidia-cuda-nvrtc-cu12==12.1.105
+nvidia-cuda-runtime-cu11==11.7.99
+nvidia-cuda-runtime-cu12==12.1.105
+nvidia-cudnn-cu11==8.5.0.96
+nvidia-cudnn-cu12==8.9.2.26
+nvidia-cufft-cu11==10.9.0.58
+nvidia-cufft-cu12==11.0.2.54
+nvidia-curand-cu11==10.2.10.91
+nvidia-curand-cu12==10.3.2.106
+nvidia-cusolver-cu11==11.4.0.1
+nvidia-cusolver-cu12==11.4.5.107
+nvidia-cusparse-cu11==11.7.4.91
+nvidia-cusparse-cu12==12.1.0.106
+nvidia-nccl-cu11==2.14.3
+nvidia-nccl-cu12==2.19.3
+nvidia-nvjitlink-cu12==12.4.99
+nvidia-nvtx-cu11==11.7.91
+nvidia-nvtx-cu12==12.1.105
+omegaconf==2.3.0
+opencv-python-headless==4.9.0.80
+packaging @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_packaging_1745345660/work
+pandas==2.2.1
+pillow==10.2.0
+propcache @ file:///home/conda/feedstock_root/build_artifacts/propcache_1744524942571/work
+psutil @ file:///home/conda/feedstock_root/build_artifacts/psutil_1755851309447/work
+py-cpuinfo==9.0.0
+pyarrow==15.0.2
+pyarrow-hotfix==0.6
+pycocotools==2.0.7
+pycparser @ file:///tmp/build/80754af9/pycparser_1636541352034/work
+pyparsing==3.1.2
+PySide6==6.9.2
+PySocks @ file:///work/ci_py311/pysocks_1676822712504/work
+python-dateutil==2.9.0.post0
+pytz @ file:///home/conda/feedstock_root/build_artifacts/pytz_1742920838005/work
+PyYAML @ file:///croot/pyyaml_1728657952215/work
+regex==2023.12.25
+requests @ file:///croot/requests_1756709366904/work
+safetensors @ file:///home/conda/feedstock_root/build_artifacts/safetensors_1756440403595/work
+schema==0.7.5
+scikit-learn==1.4.1.post1
+scipy==1.12.0
+sentencepiece==0.2.0
+shiboken6==6.9.2
+six @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_six_1753199211/work
+sympy==1.12
+threadpoolctl==3.4.0
+tokenizers @ file:///home/conda/feedstock_root/build_artifacts/tokenizers_1756521331075/work/bindings/python
+torch==2.0.1
+torchao==0.1
+torchaudio==2.5.1
+torchtune==0.1.0
+torchvision==0.20.1
+tornado @ file:///home/conda/feedstock_root/build_artifacts/tornado_1756854923821/work
+tqdm==4.66.2
+transformers @ file:///home/conda/feedstock_root/build_artifacts/transformers_1756537450064/work
+triton==2.0.0
+typing_extensions @ file:///croot/typing_extensions_1756280817316/work
+tzdata==2024.1
+unicodedata2 @ file:///home/conda/feedstock_root/build_artifacts/unicodedata2_1756494475418/work
+urllib3 @ file:///croot/urllib3_1750775463400/work
+wrapt==1.16.0
+xxhash==3.4.1
+yarl==1.9.4
