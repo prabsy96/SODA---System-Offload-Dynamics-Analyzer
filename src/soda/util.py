@@ -315,11 +315,39 @@ class TraceModel:
         for kernel in kernel_list:
             if kernel["Correlation"] in correlation_map:
                 dependencies.append((kernel, correlation_map[kernel["Correlation"]]))
+        if not kernel_list:
+            true_gpu_busy_time = 0.0
+        else:
+            intervals = sorted(
+                    [[k['Begin'], k['Begin'] + k.get('Dur', 0)] for k in kernel_list],
+                    key=lambda x: x[0]
+            )
 
-        exec_time = sum(k["Dur"] for k in kernel_list)
-        num_kernels = len(kernel_list)
+            merged = [intervals[0]]
+            for current_start, current_end in intervals[1:]:
+                _, last_end = merged[-1]
+                if current_start < last_end:
+                    merged[-1][1] = max(last_end, current_end)
+                else:
+                    merged.append([current_start, current_end])
+            true_gpu_busy_time = sum(end-start for start, end in merged)
+
+            num_kernels = len(kernel_list)
+
+            end_to_end_gpu_time = 0.0
+
+            if all_gpu_events:
+                first_event = min(all_gpu_events, key=lambda x: x['Begin'])
+                last_event = max(all_gpu_events, key=lambda x: x['Begin'] + x.get('Dur', 0))
+                end_to_end_gpu_time = (last_event['Begin'] + last_event.get('Dur', 0)) - first_event['Begin']
+
+
+
+        # exec_time = sum(k["Dur"] for k in kernel_list)
+        # num_kernels = len(kernel_list)
         
         # Calculate idle time
+        """
         idle_time = 0.0
         if num_kernels > 1:
             sorted_kernels = sorted(kernel_list, key=lambda x: x["Begin"])
@@ -334,12 +362,14 @@ class TraceModel:
         if cuda_runtime_list:
             last_runtime = max(cuda_runtime_list, key=lambda x: x["Begin"] + x["Dur"])
             end_time = last_runtime["Begin"] + last_runtime["Dur"]
+        """
+        idle_time = max(0.0, end_to_end_gpu_time - true_gpu_busy_time)
 
         kernel_only_file = self.path / "OnlyGPUKernels.json"
         with open(kernel_only_file, "w") as f:
             json.dump(kernel_list, f, indent=4)
 
-        return dependencies, exec_time, num_kernels, end_time, idle_time, str(kernel_only_file)
+        return dependencies, true_gpu_busy_time, num_kernels, end_to_end_gpu_time, idle_time, str(kernel_only_file)
 
     def LaunchTax(self, dependence: List[Tuple], kernel_count: int) -> float:
         """
@@ -360,7 +390,7 @@ class TraceModel:
 
         return total_launch_overhead
     
-    def OperationalIntensity(self, file: str):
+    def AKD(self, file: str):
         """
         Calculates and saves the operational intensity (average kernel duration) for each unique kernel.
         
@@ -382,7 +412,7 @@ class TraceModel:
         # Sort by Average Kernel Duration (AKD)
         descending_stats = sorted(kernel_stats.items(), key=lambda item: item[1]["AKD"], reverse=True)
         
-        output_file = self.path / "OperationalIntensity.json"
+        output_file = self.path / "AKD.json"
         with open(output_file, "w", encoding='utf-8') as f:
             json.dump(descending_stats, f, indent=4)
 
