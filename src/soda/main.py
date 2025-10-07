@@ -162,7 +162,7 @@ def main() -> int:
 
         runtime = end_time - begin_time
         launch_time = trace_obj.LaunchTax(dependence_list, num_kernels)
-        trace_obj.OperationalIntensity(kernel_only_file)
+        trace_obj.AKD(kernel_only_file)
 
         logging.info("--- Performance Metrics ---")
         logging.info(f"Inference runtime (ms): {runtime / 1000:.4f}")
