@@ -1,35 +1,41 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "soda-profiler"
+name = "soda"
 version = "0.1.0"
-description = "SODA: System-Offload-Dynamics-Analyzer for PyTorch models."
+description = "System-Offload-Dynamics-Analyzer (SODA): analyze CPU–GPU dynamics of PyTorch models."
 readme = "README.md"
-license = { file="LICENSE" }
-requires-python = ">=3.9"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "SODA Developers" }]
 classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Topic :: System :: Benchmark",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux"
 ]
 dependencies = [
-    "accelerate==1.9.0",
-    "matplotlib==3.9.2",
-    "numpy>=2.0.0",
-    "torch==2.4.1",
-    "torchvision==0.19.1",
-    "transformers>=4.55.0",
+  # Installed via pip in slurm_run.sh
+  "transformers",
+  "accelerate",
+  "vllm",
+  "flashinfer-python",
+  # NOTE: PyTorch + CUDA are installed via conda:
+  # pytorch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 pytorch-cuda=12.1
 ]
 
+[project.urls]
+Homepage = "https://github.com/prabsy96/soda"
+Repository = "https://github.com/prabsy96/soda"
+
 [project.scripts]
-soda = "soda.main:main"
+soda-cli = "soda.main:main"
 
-[tool.ruff]
-line-length = 100
+[tool.setuptools]
+package-dir = { "" = "src" }
 
-[tool.ruff.lint]
-select = ["E", "F", "W", "I"]
+[tool.setuptools.packages.find]
+where = ["src"]

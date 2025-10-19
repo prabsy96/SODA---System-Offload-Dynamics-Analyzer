@@ -4,7 +4,7 @@
 ![CUDA](https://img.shields.io/badge/CUDA-enabled-green?logo=nvidia&logoColor=white)
 ![Profiler](https://img.shields.io/badge/PyTorch%20Profiler-supported-blueviolet)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)
+![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)
 ![Citable](https://img.shields.io/badge/Citable-ISPASS%202025-brightgreen)
 ![System Analysis](https://img.shields.io/badge/System%20Profiler-Enabled-blue)
 
@@ -40,9 +40,18 @@ Please cite as
 **Clone the repository:**
 
 ```bash
+# Create env
+conda create -y -n soda-311 python=3.11
+conda activate soda-311
+
+# Install CUDA-enabled PyTorch (cu121 build)
+conda install -y -c pytorch -c nvidia pytorch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 pytorch-cuda=12.1
+
+# Clone and install Python deps
 git clone https://github.com/prabsy96/soda.git
 cd soda
-pip install .
+pip install -r requirements.txt
+pip install -e .
 ```
 
 ## Quickstart
