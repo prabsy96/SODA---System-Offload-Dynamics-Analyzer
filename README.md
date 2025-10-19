@@ -70,4 +70,9 @@ For sbatch jobs (you might need to change specifications based on the cluster sp
 sbatch ./examples/sbatch.sh
 ```
 
-Please note that current version requires CUDA support. All experiments were performed on CUDA 12.2.
+## Updates
+
+- 2025-10-19
+  - Validated on CUDA 12.6 with PyTorch 2.9.0, torchvision 0.24.0, torchaudio 2.9.0 (H200/ HGPU partition).
+  - Added SLURM batch example and guidance for non-interactive conda environments.
+  - Improved GPU probe and logging in example scripts.
