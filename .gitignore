@@ -35,3 +35,7 @@ graph.png
 *.log
 *.out
 *.err
+
+# Output directories 
+output
+results
