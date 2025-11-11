@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Compare PyTorch and bare-metal GEMM kernel launch tax.
+Compare PyTorch and baremetal GEMM kernel launch tax.
 
 Joins results from framework/pytorch/output/unique_gemm_kernel_chains.json and
 baremetal/output/baremetal_gemm_runs.json, verifies kernel matching,
@@ -13,7 +13,7 @@ import os
 import sys
 
 # Module-level variable for microbench directory (set in __main__)
-_microbench_dir = None
+microbench_dir = None
 
 
 def normalize_kernel_name(name):
@@ -82,7 +82,7 @@ def load_pytorch_results(pytorch_file):
 
 def load_baremetal_results(baremetal_file):
     """
-    Load bare-metal results.
+    Load baremetal results.
     
     Returns: dict mapping job_id -> {kernel, stats}
     """
@@ -159,7 +159,7 @@ def verify_kernel_match(pytorch_kernel, baremetal_kernel):
 
 def compare_results(pytorch_results, baremetal_results):
     """
-    Compare PyTorch and bare-metal results.
+    Compare PyTorch and baremetal results.
     
     Returns: list of match entries
     """
@@ -167,7 +167,7 @@ def compare_results(pytorch_results, baremetal_results):
     
     for job_id in sorted(pytorch_results.keys()):
         if job_id not in baremetal_results:
-            print(f"Warning: Job {job_id} not found in bare-metal results", file=sys.stderr)
+            print(f"Warning: Job {job_id} not found in baremetal results", file=sys.stderr)
             continue
         
         pytorch = pytorch_results[job_id]
@@ -224,7 +224,7 @@ def compare_results(pytorch_results, baremetal_results):
 def print_summary(matches):
     """Print comparison summary to stdout."""
     print("\n" + "="*80)
-    print("PyTorch vs Bare-Metal GEMM Launch Tax Comparison")
+    print("PyTorch vs Baremetal GEMM Launch Tax Comparison")
     print("="*80)
     
     # Per-kernel summary
@@ -261,15 +261,15 @@ def compare(pytorch_file, baremetal_file, output_file):
     """
     Main comparison function.
     """
-    rel_pytorch = os.path.relpath(pytorch_file, _microbench_dir) if _microbench_dir else pytorch_file
+    rel_pytorch = os.path.relpath(pytorch_file, microbench_dir) if microbench_dir else pytorch_file
     print(f"Loading PyTorch results from {rel_pytorch}...")
     pytorch_results = load_pytorch_results(pytorch_file)
     print(f"  Loaded {len(pytorch_results)} PyTorch kernel chains")
     
-    rel_baremetal = os.path.relpath(baremetal_file, _microbench_dir) if _microbench_dir else baremetal_file
-    print(f"Loading bare-metal results from {rel_baremetal}...")
+    rel_baremetal = os.path.relpath(baremetal_file, microbench_dir) if microbench_dir else baremetal_file
+    print(f"Loading baremetal results from {rel_baremetal}...")
     baremetal_results = load_baremetal_results(baremetal_file)
-    print(f"  Loaded {len(baremetal_results)} bare-metal runs")
+    print(f"  Loaded {len(baremetal_results)} baremetal runs")
     
     # Compare
     print("Comparing results...")
@@ -292,26 +292,29 @@ def compare(pytorch_file, baremetal_file, output_file):
     with open(output_file, 'w') as f:
         json.dump(output_data, f, indent=2)
     
-    rel_output = os.path.relpath(output_file, _microbench_dir) if _microbench_dir else output_file
+    rel_output = os.path.relpath(output_file, microbench_dir) if microbench_dir else output_file
     print(f"\nComparison results written to {rel_output}")
 
 
 if __name__ == "__main__":
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    _microbench_dir = os.path.dirname(script_dir)  # Set module-level variable
+    # Check if env.sh has been sourced
+    if not os.environ.get("SODA_ENV_LOADED"):
+        print("Error: SODA environment not loaded.", file=sys.stderr)
+        print("Please run: source env.sh", file=sys.stderr)
+        sys.exit(1)
     
-    pytorch_file = os.path.join(_microbench_dir, "framework", "pytorch", "output", "unique_gemm_kernel_chains.json")
-    baremetal_file = os.path.join(_microbench_dir, "baremetal", "output", "baremetal_gemm_runs.json")
-    output_file = os.path.join(_microbench_dir, "baremetal", "output", "bm_vs_framework_report.json")
+    # Get paths from environment
+    pytorch_file = os.environ["PYTORCH_UNIQUE_KERNELS"]
+    baremetal_file = os.environ["BAREMETAL_RUNS"]
+    output_file = os.environ["BAREMETAL_REPORT"]
+    microbench_dir = os.environ.get("MICROBENCH_DIR")
     
     if not os.path.exists(pytorch_file):
-        rel_path = os.path.relpath(pytorch_file, _microbench_dir) if _microbench_dir else pytorch_file
-        print(f"Error: PyTorch results not found: {rel_path}", file=sys.stderr)
+        print(f"Error: PyTorch results not found: {pytorch_file}", file=sys.stderr)
         sys.exit(1)
     
     if not os.path.exists(baremetal_file):
-        rel_path = os.path.relpath(baremetal_file, _microbench_dir) if _microbench_dir else baremetal_file
-        print(f"Error: Bare-metal results not found: {rel_path}", file=sys.stderr)
+        print(f"Error: Baremetal results not found: {baremetal_file}", file=sys.stderr)
         print("Run run_bm_suite.py first", file=sys.stderr)
         sys.exit(1)
     

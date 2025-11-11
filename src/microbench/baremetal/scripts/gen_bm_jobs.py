@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Generate bare-metal GEMM jobs from PyTorch unique kernel chains.
+Generate baremetal GEMM jobs from PyTorch unique kernel chains.
 
 Parses microbench/framework/pytorch/output/unique_gemm_kernel_chains.json and emits
 microbench/baremetal/output/jobs.json with all parameters needed to reproduce
-each GEMM in bare-metal cuBLASLt.
+each GEMM in baremetal cuBLASLt.
 """
 
 import json
@@ -12,7 +12,7 @@ import os
 import sys
 
 # Module-level variable for microbench directory (set in __main__)
-_microbench_dir = None
+microbench_dir = None
 
 
 def parse_dtype(dtype_str):
@@ -200,7 +200,7 @@ def extract_gemm_params(chain):
 
 def generate_jobs(input_file, output_file):
     """
-    Parse PyTorch unique kernel chains and generate bare-metal jobs.
+    Parse PyTorch unique kernel chains and generate baremetal jobs.
     """
     # Read PyTorch unique kernel chains
     with open(input_file, 'r') as f:
@@ -269,21 +269,25 @@ def generate_jobs(input_file, output_file):
     with open(output_file, 'w') as f:
         json.dump(output_data, f, indent=2)
     
-    rel_path = os.path.relpath(output_file, _microbench_dir) if _microbench_dir else output_file
+    rel_path = os.path.relpath(output_file, microbench_dir) if microbench_dir else output_file
     print(f"Generated {len(jobs)} jobs -> {rel_path}")
     return len(jobs)
 
 
 if __name__ == "__main__":
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    _microbench_dir = os.path.dirname(script_dir)  # Set module-level variable
+    # Check if env.sh has been sourced
+    if not os.environ.get("SODA_ENV_LOADED"):
+        print("Error: SODA environment not loaded.", file=sys.stderr)
+        print("Please run: source env.sh", file=sys.stderr)
+        sys.exit(1)
     
-    input_file = os.path.join(_microbench_dir, "framework", "pytorch", "output", "unique_gemm_kernel_chains.json")
-    output_file = os.path.join(_microbench_dir, "baremetal", "output", "jobs.json")
+    # Get paths from environment
+    input_file = os.environ["PYTORCH_UNIQUE_KERNELS"]
+    output_file = os.environ["BAREMETAL_JOBS"]
+    microbench_dir = os.environ.get("MICROBENCH_DIR")  
     
     if not os.path.exists(input_file):
-        rel_path = os.path.relpath(input_file, _microbench_dir) if _microbench_dir else input_file
-        print(f"Error: Input file not found: {rel_path}", file=sys.stderr)
+        print(f"Error: Input file not found: {input_file}", file=sys.stderr)
         sys.exit(1)
     
     generate_jobs(input_file, output_file)

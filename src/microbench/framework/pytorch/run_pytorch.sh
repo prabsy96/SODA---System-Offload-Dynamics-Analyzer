@@ -4,28 +4,35 @@
 
 set -e
 
-# Get script directory and activate venv
+# Check if SODA environment is loaded
+if [ -z "$SODA_ENV_LOADED" ]; then
+    echo "Error: SODA environment not loaded."
+    echo "Please run: source env.sh"
+    exit 1
+fi
+
+# Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Go up 4 levels: pytorch -> framework -> microbench -> src -> soda
-SODA_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-VENV_PATH="$SODA_ROOT/.venv"
 
 # Activate virtual environment
-if [ -d "$VENV_PATH" ]; then
-    source "$VENV_PATH/bin/activate"
-    echo "Using Python: $(which python)"
-    echo "Python version: $(python --version)"
-    echo ""
-else
-    echo "Warning: Virtual environment not found at $VENV_PATH"
-    echo "Using system Python: $(which python3)"
-    echo ""
+if [ ! -d "$PYTHON_VENV" ]; then
+    echo "Error: Virtual environment not found at $PYTHON_VENV"
+    echo "Create it with: python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
+    exit 1
 fi
+
+source "$PYTHON_VENV/bin/activate"
+
+echo "=============================================="
+echo "PyTorch GEMM Profiling"
+echo "=============================================="
+echo "Using Python: $(which python)"
+echo "Python version: $(python --version)"
+echo ""
 
 cd "$SCRIPT_DIR"
 
-# Use local /tmp for HuggingFace cache 
-export HF_HOME=/tmp/hf_cache_$USER
+# HuggingFace cache is already set in env.sh
 mkdir -p "$HF_HOME"
 
 echo "=== Phase 1: Extract Kernel Chains ==="
@@ -46,6 +53,6 @@ python scripts/plot_kernel_tax.py output/replayed_gemm_kernel_chains.json --out 
 echo ""
 echo "=============================================="
 echo "Done! Check results in:"
-echo "  $SCRIPT_DIR/output/"
+echo "  $PYTORCH_OUTPUT"
 echo "=============================================="
 

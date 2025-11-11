@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Run bare-metal GEMM suite under nsys profiling and aggregate results.
+Run baremetal GEMM suite under nsys profiling and aggregate results.
 
 Reads jobs from baremetal/output/jobs.json, builds C++ binary, runs each job
 under nsys profiling, parses traces, computes kernel launch tax statistics,
@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 
 # Module-level variable for microbench directory (set in __main__)
-_microbench_dir = None
+microbench_dir = None
 
 
 def build_binary(baremetal_dir):
@@ -123,7 +123,7 @@ def run_job_under_nsys(job, binary_path, output_dir):
         return None, None
     
     # Print relative path
-    rel_path = os.path.relpath(sqlite_path, _microbench_dir) if _microbench_dir else sqlite_path
+    rel_path = os.path.relpath(sqlite_path, microbench_dir) if microbench_dir else sqlite_path
     print(f"\t** Job {job_id} completed, trace exported to {rel_path}")
     return qdrep_path, sqlite_path
 
@@ -153,7 +153,7 @@ def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
         conn = sqlite3.connect(sqlite_path)
         cursor = conn.cursor()
     except Exception as e:
-        rel_path = os.path.relpath(sqlite_path, _microbench_dir) if _microbench_dir else sqlite_path
+        rel_path = os.path.relpath(sqlite_path, microbench_dir) if microbench_dir else sqlite_path
         print(f"Error opening sqlite database {rel_path}: {e}", file=sys.stderr)
         return None
     
@@ -206,12 +206,12 @@ def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
     conn.close()
     
     if not cuda_launches:
-        rel_path = os.path.relpath(sqlite_path, _microbench_dir) if _microbench_dir else sqlite_path
+        rel_path = os.path.relpath(sqlite_path, microbench_dir) if microbench_dir else sqlite_path
         print(f"Warning: No CUDA launch events found in {rel_path}", file=sys.stderr)
         return None
     
     if not kernels:
-        rel_path = os.path.relpath(sqlite_path, _microbench_dir) if _microbench_dir else sqlite_path
+        rel_path = os.path.relpath(sqlite_path, microbench_dir) if microbench_dir else sqlite_path
         print(f"Warning: No kernel events found in {rel_path}", file=sys.stderr)
         return None
     
@@ -245,7 +245,7 @@ def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
     
     # Compute statistics
     if not kernel_tax_values:
-        rel_path = os.path.relpath(sqlite_path, _microbench_dir) if _microbench_dir else sqlite_path
+        rel_path = os.path.relpath(sqlite_path, microbench_dir) if microbench_dir else sqlite_path
         print(f"Warning: No matched kernel-launch pairs found in {rel_path}", file=sys.stderr)
         return None
     
@@ -298,14 +298,14 @@ def collect_gpu_info():
 
 def run_suite(jobs_file, baremetal_dir, output_file):
     """
-    Run the entire bare-metal GEMM suite.
+    Run the entire baremetal GEMM suite.
     """
     # Load jobs
     with open(jobs_file, 'r') as f:
         jobs_data = json.load(f)
     
     jobs = jobs_data.get("jobs", [])
-    rel_path = os.path.relpath(jobs_file, _microbench_dir) if _microbench_dir else jobs_file
+    rel_path = os.path.relpath(jobs_file, microbench_dir) if microbench_dir else jobs_file
     print(f"Loaded {len(jobs)} jobs from {rel_path}")
     
     # Build binary
@@ -364,22 +364,26 @@ def run_suite(jobs_file, baremetal_dir, output_file):
     with open(output_file, 'w') as f:
         json.dump(output_data, f, indent=2)
     
-    rel_path = os.path.relpath(output_file, _microbench_dir) if _microbench_dir else output_file
+    rel_path = os.path.relpath(output_file, microbench_dir) if microbench_dir else output_file
     print(f"\nCompleted {len(runs)} jobs -> {rel_path}")
     return True
 
 
 if __name__ == "__main__":
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    _microbench_dir = os.path.dirname(script_dir)  # Set module-level variable
+    # Check if env.sh has been sourced
+    if not os.environ.get("SODA_ENV_LOADED"):
+        print("Error: SODA environment not loaded.", file=sys.stderr)
+        print("Please run: source env.sh", file=sys.stderr)
+        sys.exit(1)
     
-    jobs_file = os.path.join(_microbench_dir, "baremetal", "output", "jobs.json")
-    baremetal_dir = os.path.join(_microbench_dir, "baremetal")
-    output_file = os.path.join(_microbench_dir, "baremetal", "output", "baremetal_gemm_runs.json")
+    # Get paths from environment
+    baremetal_dir = os.environ["BAREMETAL_MICROBENCH_DIR"]
+    jobs_file = os.environ["BAREMETAL_JOBS"]
+    output_file = os.environ["BAREMETAL_RUNS"]
+    microbench_dir = os.environ.get("MICROBENCH_DIR")
     
     if not os.path.exists(jobs_file):
-        rel_path = os.path.relpath(jobs_file, _microbench_dir) if _microbench_dir else jobs_file
-        print(f"Error: Jobs file not found: {rel_path}", file=sys.stderr)
+        print(f"Error: Jobs file not found: {jobs_file}", file=sys.stderr)
         print("Run gen_bm_jobs.py first", file=sys.stderr)
         sys.exit(1)
     
