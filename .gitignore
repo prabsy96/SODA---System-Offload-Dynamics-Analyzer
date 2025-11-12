@@ -35,3 +35,16 @@ graph.png
 *.log
 *.out
 *.err
+
+# Output directories 
+output
+results
+
+# Microbench-specific
+*.nsys-rep
+*.qdrep
+*.sqlite
+*.nvvp
+traces/
+*.tmp
+temp_*.json

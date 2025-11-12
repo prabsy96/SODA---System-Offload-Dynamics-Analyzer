@@ -56,16 +56,20 @@ fi
 
 # Run your script
 echo "Running script..."
-if [ ! -f "pyproject.toml" ]; then
-    cd ../
-    if [ ! -f "pyproject.toml" ]; then
-        echo "Error: Unable to locate the root directory of the SODA repository."
-        exit 1
-    fi
+
+# Check if SODA environment is loaded
+if [ -z "$SODA_ENV_LOADED" ]; then
+    echo "Error: SODA environment not loaded."
+    echo "Please run: source env.sh"
+    exit 1
 fi
+
+# Change to SODA root
+cd "$SODA_ROOT"
+
 python -m soda.main \
   --model gpt2 \
-  --output-dir ./soda_results \
+  --output-dir "$SODA_RESULTS" \
   --batch_size 1 \
   --seq_len 128 \
   --fusion 2 3 \
