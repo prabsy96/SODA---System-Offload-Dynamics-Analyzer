@@ -98,8 +98,57 @@ print_soda_env() {
     echo "=================================="
 }
 
-# Optional: Print confirmation when sourced
-if [ "${SODA_ENV_VERBOSE:-0}" = "1" ]; then
-    echo "SODA environment loaded from: $SODA_ROOT"
-fi
+# Print SODA banner when sourced
+print_soda_banner() {
+    # ANSI color codes for pastel colors
+    PASTEL_RED='\033[38;5;217m'      # Pastel pink/red
+    PASTEL_ORANGE='\033[38;5;223m'   # Pastel peach/orange
+    PASTEL_YELLOW='\033[38;5;229m'   # Pastel yellow
+    PASTEL_GREEN='\033[38;5;157m'    # Pastel mint/green
+    BLUE='\033[38;5;33m'              # Previous nice blue
+    RESET='\033[0m'                   # Reset color
+    WHITE='\033[1;37m'                # Bright white
+    
+    # CMU brand color (official red) - hex #C41230, RGB: 196, 18, 48
+    CMU_RED='\033[38;2;196;18;48m'
+    
+    # Banner width (63 characters between borders)
+    BANNER_WIDTH=63
+    
+    # Helper function to center content in banner line
+    format_banner_line() {
+        local content="$1"
+        # Strip ANSI escape sequences to count visible characters
+        local visible=$(echo -e "$content" | sed 's/\x1b\[[0-9;]*m//g')
+        local visible_len=${#visible}
+        local total_padding=$((BANNER_WIDTH - visible_len))
+        local left_padding=$((total_padding / 2))
+        local right_padding=$((total_padding - left_padding))
+        local left_spaces=$(printf "%*s" $left_padding "")
+        local right_spaces=$(printf "%*s" $right_padding "")
+        echo -e "${WHITE}║${RESET}${left_spaces}${content}${right_spaces}${WHITE}║${RESET}"
+    }
+    
+    echo -e "${WHITE}╔═══════════════════════════════════════════════════════════════╗${RESET}"
+    format_banner_line ""
+    format_banner_line "${PASTEL_RED}███████╗${RESET} ${PASTEL_ORANGE}██████╗${RESET} ${PASTEL_YELLOW}██████╗${RESET}  ${PASTEL_GREEN}█████╗${RESET}"
+    format_banner_line "${PASTEL_RED}██╔════╝${RESET}${PASTEL_ORANGE}██╔═══██╗${RESET}${PASTEL_YELLOW}██╔══██╗${RESET}${PASTEL_GREEN}██╔══██╗${RESET}"
+    format_banner_line "${PASTEL_RED}███████╗${RESET}${PASTEL_ORANGE}██║   ██║${RESET}${PASTEL_YELLOW}██║  ██║${RESET}${PASTEL_GREEN}███████║${RESET}"
+    format_banner_line "${PASTEL_RED}╚════██║${RESET}${PASTEL_ORANGE}██║   ██║${RESET}${PASTEL_YELLOW}██║  ██║${RESET}${PASTEL_GREEN}██╔══██║${RESET}"
+    format_banner_line "${PASTEL_RED}███████║${RESET}${PASTEL_ORANGE}╚██████╔╝${RESET}${PASTEL_YELLOW}██████╔╝${RESET}${PASTEL_GREEN}██║  ██║${RESET}"
+    format_banner_line "${PASTEL_RED}╚══════╝${RESET} ${PASTEL_ORANGE}╚═════╝${RESET} ${PASTEL_YELLOW}╚═════╝${RESET} ${PASTEL_GREEN}╚═╝  ╚═╝${RESET}"
+    format_banner_line ""
+    format_banner_line "${BLUE}System Offload Dynamics Analyzer${RESET}"
+    format_banner_line "${CMU_RED}Carnegie Mellon University${RESET}"
+    echo -e "${WHITE}╚═══════════════════════════════════════════════════════════════╝${RESET}"
+}
 
+# Print banner (unless SODA_ENV_QUIET is set)
+if [ -z "${SODA_ENV_QUIET:-}" ]; then
+    print_soda_banner
+    echo ""
+    echo "Get started:"
+    echo "  * print_soda_env    - Show all environment variables and paths"
+    echo "  * activate_venv     - Activate Python virtual environment"
+    echo ""
+fi
