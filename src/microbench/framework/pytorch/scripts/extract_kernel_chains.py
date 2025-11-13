@@ -323,7 +323,8 @@ def build_kernel_chains(kernels, cpu_ops, cuda_launches):
         
         kernel_tax = None
         if kernel.get('ts') is not None and cuda_launch and cuda_launch.get('ts') is not None:
-            kernel_tax = abs(kernel['ts'] - cuda_launch['ts'])
+            kernel_tax = kernel['ts'] - cuda_launch['ts']
+            assert kernel_tax >= 0, f"Negative kernel tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={cuda_launch['ts']}, tax={kernel_tax}"
         
         kernel_chains.append({
             "kernel": kernel,

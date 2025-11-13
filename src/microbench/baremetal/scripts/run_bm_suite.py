@@ -231,7 +231,8 @@ def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
                 skipped += 1
                 continue
             
-            kernel_tax_us = abs(kernel["ts"] - cuda_launch["ts"])
+            kernel_tax_us = kernel["ts"] - cuda_launch["ts"]
+            assert kernel_tax_us >= 0, f"Negative kernel tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={cuda_launch['ts']}, tax={kernel_tax_us}"
             kernel_tax_values.append(kernel_tax_us)
             
             # Capture kernel info from first kernel (all should be same)
