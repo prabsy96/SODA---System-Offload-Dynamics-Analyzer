@@ -1,6 +1,11 @@
 #!/bin/bash
 # Quickstart example for SODA
 
+# Check running from root directory
+if [ ! -f "pyproject.toml" ]; then
+    echo "Error: Please run this script from the root directory of the SODA repository."
+    exit 1
+fi
 
 # Check if SODA environment is loaded
 if [ -z "$SODA_ENV_LOADED" ]; then
@@ -9,11 +14,15 @@ if [ -z "$SODA_ENV_LOADED" ]; then
     exit 1
 fi
 
-# Check running from root directory
-if [ ! -f "pyproject.toml" ]; then
-    echo "Error: Please run this script from the root directory of the SODA repository."
+
+# Activate virtual environment
+if [ ! -d "$PYTHON_VENV" ]; then
+    echo "Error: Virtual environment not found at $PYTHON_VENV"
+    echo "Create it with: python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
     exit 1
 fi
+
+source "$PYTHON_VENV/bin/activate"
 
 # Run SODA
 python -m soda.main \
