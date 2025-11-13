@@ -44,7 +44,7 @@ struct GemmParams {
     int runs;
     int batch;  // For bmm, default 1
 };
-
+    
 void parse_args(int argc, char** argv, GemmParams& params) {
     // Defaults
     params.m = 0;
@@ -298,8 +298,9 @@ void run_gemm(const GemmParams& params) {
                                       &beta, d_C, C_desc, d_C, C_desc,
                                       &heuristic.algo, workspace, workspace_size,
                                       0));  // Use default stream
+        CHECK_CUDA(cudaDeviceSynchronize());  // Clear queue for next iteration
     }
-    CHECK_CUDA(cudaDeviceSynchronize());
+    CHECK_CUDA(cudaDeviceSynchronize()); // Final synchronization because why not 
     
     // Measurement runs (under nsys profiling)
     // Synchronize between iterations to measure best-case launch overhead
@@ -312,7 +313,7 @@ void run_gemm(const GemmParams& params) {
                                       0));
         CHECK_CUDA(cudaDeviceSynchronize());  // Clear queue for next iteration
     }
-    // Final synchronization is done in the loop
+    CHECK_CUDA(cudaDeviceSynchronize()); // Final synchronization because why not
     
     // Cleanup
     CHECK_CUDA(cudaFree(workspace));
