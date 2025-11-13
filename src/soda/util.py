@@ -200,7 +200,7 @@ class TraceModel:
         with open(file_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
-    def generateCPUSpecificOPs(self, file: str) -> float:
+    def generate_cpu_specific_ops(self, file: str) -> float:
         """
         Parses the trace file to extract CPU operator metrics.
 
@@ -237,7 +237,7 @@ class TraceModel:
 
         return float(cpu_ops[0]["begin"])
 
-    def generateGPUSpecificOPs(self, file: str) -> Tuple[List[Dict], List[Dict]]:
+    def generate_gpu_specific_ops(self, file: str) -> Tuple[List[Dict], List[Dict]]:
         """
         Extracts GPU kernel and CUDA runtime events from trace.
     
@@ -294,7 +294,7 @@ class TraceModel:
         
         return gpu_ops, runtime_ops
 
-    def GenDependency(self, all_gpu_events: Tuple[List[Dict], List[Dict]]) -> Tuple:
+    def generate_dependencies(self, all_gpu_events: Tuple[List[Dict], List[Dict]]) -> Tuple:
         """
         Analyzes dependencies between CUDA runtime calls and kernel launches.
 
@@ -412,7 +412,7 @@ class TraceModel:
 
 
 
-    def LaunchTax(self, dependence: List[Tuple]) -> float: 
+    def calculate_launch_tax(self, dependence: List[Tuple]) -> float: 
         """
         Calculates the total and average launch overhead (tax).
 
@@ -438,12 +438,12 @@ class TraceModel:
 
         return total_overhead_us
     
-    def AKD(self, kernel_events: List[Dict]) -> Dict[str, float]:
+    def get_average_kernel_duration(self, kernel_events: List[Dict]) -> Dict[str, float]:
         """
         Calculates and saves the operational intensity (average kernel duration) for each unique kernel.
         
         Returns:
-        Dict mapping kernel name → average duration in milliseconds
+        Dict mapping kernel name -> average duration in milliseconds
         """
         kernel_stats = defaultdict(lambda: {"total_dur": 0.0, "count": 0})
     
@@ -462,7 +462,7 @@ class TraceModel:
         
         return akd_map
 
-    def topKkernels(self, kernel_events: List[Dict], k: int = 3):
+    def get_top_k_kernels(self, kernel_events: List[Dict], k: int = 3):
         """
         Identifies the top-k most frequent and time-consuming kernels.
         

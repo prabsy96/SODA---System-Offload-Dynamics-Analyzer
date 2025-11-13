@@ -158,18 +158,18 @@ def main() -> int:
         logging.info("Analyzing trace data to generate reports...")
         
         # Get all GPU events
-        gpu_events = trace_obj.generateGPUSpecificOPs(json_file)
+        gpu_events = trace_obj.generate_gpu_specific_ops(json_file)
         
         # Analyze dependencies and metrics
         (dependencies, total_kernel_exec_time, num_kernels, num_ops,
          end_to_end_gpu_time, gpu_idle_time, merged_busy_time,
-         kernel_events, stream_info) = trace_obj.GenDependency(gpu_events)
+         kernel_events, stream_info) = trace_obj.generate_dependencies(gpu_events)
         
         # Calculate launch overhead
-        launch_overhead = trace_obj.LaunchTax(dependencies)
+        launch_overhead = trace_obj.calculate_launch_tax(dependencies)
         
-        # Calculate AKD
-        akd_results = trace_obj.AKD(kernel_events)
+        # Calculate average kernel duration
+        akd_results = trace_obj.get_average_kernel_duration(kernel_events)
         
         # Calculate GPU utilization
         gpu_utilization = (merged_busy_time / end_to_end_gpu_time * 100) if end_to_end_gpu_time > 0 else 0.0
@@ -200,7 +200,7 @@ def main() -> int:
             )
         
         # Top-K kernels
-        trace_obj.topKkernels(kernel_events)
+        trace_obj.get_top_k_kernels(kernel_events)
         
         # Fusion analysis
         if args.fusion:
