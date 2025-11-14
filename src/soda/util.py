@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import random
+import re
 import time
 from collections import defaultdict, deque
 from pathlib import Path
@@ -26,11 +27,49 @@ import torch
 import torch.nn as nn
 import transformers
 from torch.profiler import ProfilerActivity, profile
-import heapq
 
 # Configure logging
 log = logging.getLogger(__name__)
 
+
+def get_clean_kernel_name(kernel_name: str) -> str:
+    """
+    Extract a clean kernel name from the full signature.
+    
+    Args:
+        kernel_name: Full kernel name (may be a C++ function signature).
+    
+    Returns:
+        Clean kernel name (just the kernel name, no namespace or template parameters).
+    
+    Examples:
+        "void at::native::vectorized_elementwise_kernel<4, ...>" 
+        -> "vectorized_elementwise_kernel"
+        
+        "void at::native::(anonymous namespace)::elementwise_kernel<...>"
+        -> "elementwise_kernel"
+        
+        "turing_fp16_s1688gemm_fp16_128x128_ldg8_f2f_stages_32x1_nn"
+        -> "turing_fp16_s1688gemm_fp16_128x128_ldg8_f2f_stages_32x1_nn"
+    """
+    # Extract everything before '<' (removes template parameters)
+    # This handles cases where '(' appears in template params like "(anonymous namespace)"
+    if '<' in kernel_name:
+        clean_kernel_name = kernel_name.split('<')[0].strip()
+    elif '(' in kernel_name:
+        # If no '<' but has '(', extract before '(' (function parameters)
+        clean_kernel_name = kernel_name.split('(')[0].strip()
+    else:
+        clean_kernel_name = kernel_name
+    
+    # Remove 'void' prefix if present
+    clean_kernel_name = clean_kernel_name.replace('void', '').strip()
+    
+    # Extract just the kernel name (last part after '::')
+    if '::' in clean_kernel_name:
+        clean_kernel_name = clean_kernel_name.split('::')[-1]
+    
+    return clean_kernel_name.strip()
 
 class Model:
     """Handles loading of Hugging Face models with specific configurations."""
@@ -256,7 +295,7 @@ class TraceModel:
             
             if cat in ("kernel", "gpu_memcpy", "gpu_memset"):
                 event_data = {
-                    "Name": v.get("name"),
+                    "Name": get_clean_kernel_name(v.get("name", "")) if cat == "kernel" else v.get("name", ""),
                     "Type": cat,
                     "Begin": float(v.get("ts", 0)),
                     "Dur": float(v.get("dur", 0)),
@@ -471,7 +510,7 @@ class TraceModel:
             k: Number of top kernels to report.
         """
         if not kernel_events:
-            logging.warning("No kernel events to analyze.")
+            print("Warning: No kernel events to analyze.")
             return
         
         kernel_data = defaultdict(lambda: {"frequency": 0, "duration": 0.0, "type": None, "streams": set()})
@@ -490,20 +529,20 @@ class TraceModel:
         # Top k by duration
         top_k_dur = heapq.nlargest(k, kernel_data.items(), key=lambda item: item[1]["duration"])
         
-        logging.info(f"--- Top-{k} Kernels by Frequency ---")
+        print(f"--- Top-{k} Kernels by Frequency ---")
         for i, (name, data) in enumerate(top_k_freq, 1):
             streams = list(data["streams"]) if data["streams"] else ["N/A"]
-            logging.info(
+            print(
                 f"#{i}: {name} "
                 f"(Frequency: {int(data['frequency'])}, "
                 f"Total Duration: {data['duration'] / 1000:.4f} ms, "
                 f"Streams: {streams})"
             )
         
-        logging.info(f"--- Top-{k} Kernels by Duration ---")
+        print(f"--- Top-{k} Kernels by Duration ---")
         for i, (name, data) in enumerate(top_k_dur, 1):
             streams = list(data["streams"]) if data["streams"] else ["N/A"]
-            logging.info(
+            print(
                 f"#{i}: {name} "
                 f"(Total Duration: {data['duration'] / 1000:.4f} ms, "
                 f"Frequency: {int(data['frequency'])}, "
