@@ -6,9 +6,10 @@ This tool is inspired by the principles of detailed system analysis seen in tool
 """
 
 import argparse
-import logging
+import builtins
 import os
 import sys
+import traceback
 from pathlib import Path
 from typing import List, Optional
 
@@ -17,35 +18,33 @@ import torch
 
 from . import util
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] [%(levelname)s] - %(message)s",
-    stream=sys.stdout,
-)
-
 def set_seed(seed: int) -> None:
-    """Set random seeds for reproducibility."""
+    """
+    Set seed for reproducibility.
+    
+    Args:
+        seed: Seed value to ensure deterministic behavior.
+    """
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-def main() -> int:
-    """Main entry point for the SODA CLI."""
+def get_args_parser() -> argparse.ArgumentParser:
+    """Create and return argument parser."""
     parser = argparse.ArgumentParser(
-        description="SODA: System-Offload-Dynamics-Analyzer. A profiler for PyTorch models.",
+        description="SODA: System Offload Dynamics Analyzer.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "-m",
         "--model",
         required=True,
-        help="Hugging Face model identifier to load and analyze.",
+        help="Hugging Face model name or path for profiling and analysis.",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("./soda_results"),
-        help="Directory to save analysis artifacts (traces, reports, etc.).",
+        default=Path(os.environ["SODA_RESULTS"]),
+        help="Output directory for analysis artifacts (traces, reports, etc.)",
     )
     parser.add_argument(
         "-c",
@@ -55,20 +54,23 @@ def main() -> int:
         help="Execution mode for the model.",
     )
     parser.add_argument(
-        "-d", "--device", default="cuda", choices=["cpu", "cuda"], help="Device to run the model on."
+        "-d", "--device", default="cuda", choices=["cpu", "cuda"], 
+        help="Device to run the model on."
     )
     parser.add_argument(
         "-p",
         "--precision",
         default="float16",
         choices=["float32", "float16", "bfloat16"],
-        help="Precision for model weights and operations.",
+        help="Precision for model weights and operations",
     )
     parser.add_argument(
-        "-sl", "--seq_len", type=int, default=512, help="Sequence length for synthetic input."
+        "-sl", "--seq_len", type=int, default=512, 
+        help="Sequence length for synthetic input."
     )
     parser.add_argument(
-        "-bs", "--batch_size", type=int, default=1, help="Batch size for synthetic input."
+        "-bs", "--batch_size", type=int, default=1, 
+        help="Batch size for synthetic input."
     )
     parser.add_argument(
         "-f",
@@ -90,25 +92,74 @@ def main() -> int:
     parser.add_argument(
         "--version", action="version", version="%(prog)s 0.1.0"
     )
+    
+    return parser
 
-    args = parser.parse_args()
-
-    # --- Argument Validation and Setup ---
+def validate_args(args: argparse.Namespace) -> None:
+    """Validate parsed arguments."""
     if args.device == "cpu" and args.precision == "float16":
-        logging.warning("float16 is not supported on CPU. Forcing float32.")
+        print("Warning: float16 is not supported on CPU. Forcing float32.")
         args.precision = "float32"
 
     if not torch.cuda.is_available() and args.device == "cuda":
-        logging.error("CUDA is not available. Please select --device cpu.")
-        return 1
+        print("Error: CUDA is not available. Please select --device cpu.", file=sys.stderr)
+        sys.exit(1)
 
+def setup_logging(output_dir: Path) -> tuple:
+    """
+    Setup logging: redirect print to both stdout and log file.
+    
+    Args:
+        output_dir: Directory where log file will be created.
+    
+    Returns:
+        Tuple of (log_path, output_file, original_print) for cleanup.
+    """
+    log_path = output_dir / "soda.log"
+    output_file = open(log_path, "w")
+    
+    original_print = builtins.print
+    
+    def print_and_write(*args_print, **kwargs):
+        """Print to stdout and write to file."""
+        original_print(*args_print, **kwargs)
+        line = ' '.join(str(arg) for arg in args_print)
+        output_file.write(line + '\n')
+        output_file.flush()
+    
+    builtins.print = print_and_write
+    
+    # Print initial message 
+    print(f"Results will be saved to: {output_dir.resolve()}")
+    
+    return log_path, output_file, original_print
+
+def main() -> int:
+    """Main entry point for the SODA CLI."""
+
+    # Check if env.sh has been sourced and loaded
+    if not os.environ.get("SODA_ENV_LOADED"):
+        print("Error: SODA environment not loaded.", file=sys.stderr)
+        print("Please run: source env.sh", file=sys.stderr)
+        sys.exit(1)
+    
+    # Parse and validate arguments
+    parser = get_args_parser()
+    args = parser.parse_args()
+    validate_args(args)
+
+    # Set seed for reproducibility
     set_seed(args.seed)
+
+    # Create output directory if it doesn't exist
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    logging.info(f"Results will be saved to: {args.output_dir.resolve()}")
+    
+    # Setup logging: redirect print to both stdout and log file
+    log_path, output_file, original_print = setup_logging(args.output_dir)
 
     try:
         # --- Model Loading ---
-        logging.info(f"Loading model: {args.model} with precision {args.precision}...")
+        print(f"Loading model: {args.model} with precision {args.precision}...")
         model_obj = util.Model(
             model_name=args.model,
             device=args.device,
@@ -122,10 +173,10 @@ def main() -> int:
         else:
             model, tokenizer = model_obj.load_decoder()
             is_decoder = True
-        logging.info("Model loaded successfully.")
+        print("Model loaded successfully.")
 
         # --- Synthetic Data Generation ---
-        logging.info(f"Generating synthetic input: batch_size={args.batch_size}, seq_len={args.seq_len}")
+        print(f"Generating synthetic input: batch_size={args.batch_size}, seq_len={args.seq_len}")
         token_ids = {
             "input_ids": torch.randint(
                 1, tokenizer.vocab_size, size=(args.batch_size, args.seq_len), device=args.device
@@ -145,17 +196,17 @@ def main() -> int:
         )
 
         #  Single warm-up and trace run is performed.
-        logging.info("Starting model profiling run...")
+        print("Starting model profiling run...")
         if is_decoder:
             json_file = trace_obj.trace_forward_pass_for_decoder(
                 token_ids, tokenizer, args.batch_size, args.seq_len
             )
         else:
             json_file = trace_obj.trace_forward_pass_for_encoder(token_ids, tokenizer)
-        logging.info(f"Chrome trace file generated at: {json_file}")
+        print(f"Chrome trace file generated at: {json_file}")
 
         # --- Data Processing and Reporting ---
-        logging.info("Analyzing trace data to generate reports...")
+        print("Analyzing trace data to generate reports...")
         
         # Get all GPU events
         gpu_events = trace_obj.generate_gpu_specific_ops(json_file)
@@ -175,25 +226,25 @@ def main() -> int:
         gpu_utilization = (merged_busy_time / end_to_end_gpu_time * 100) if end_to_end_gpu_time > 0 else 0.0
         
         # --- Enhanced Reporting ---
-        logging.info("--- Performance Metrics ---")
-        logging.info(f"Inference runtime (ms): {end_to_end_gpu_time / 1000:.4f}")
-        logging.info(f"Total kernel execution time (ms): {total_kernel_exec_time / 1000:.4f}")
-        logging.info(f"GPU busy time (concurrent-aware) (ms): {merged_busy_time / 1000:.4f}")
-        logging.info(f"GPU idle time (ms): {gpu_idle_time / 1000:.4f}")
-        logging.info(f"GPU utilization: {gpu_utilization:.2f}%")
-        logging.info(f"Total launch overhead (TKLQT) (ms): {launch_overhead / 1000:.4f}")
-        logging.info(f"Number of kernels: {num_kernels}")
-        logging.info(f"Total GPU operations: {num_ops}")
-        logging.info(f"Active streams: {len(stream_info)}")
+        print("--- Performance Metrics ---")
+        print(f"Inference runtime (ms): {end_to_end_gpu_time / 1000:.4f}")
+        print(f"Total kernel execution time (ms): {total_kernel_exec_time / 1000:.4f}")
+        print(f"GPU busy time (concurrent-aware) (ms): {merged_busy_time / 1000:.4f}")
+        print(f"GPU idle time (ms): {gpu_idle_time / 1000:.4f}")
+        print(f"GPU utilization: {gpu_utilization:.2f}%")
+        print(f"Total launch overhead (TKLQT) (ms): {launch_overhead / 1000:.4f}")
+        print(f"Number of kernels: {num_kernels}")
+        print(f"Total GPU operations: {num_ops}")
+        print(f"Active streams: {len(stream_info)}")
         
         if num_kernels > 0:
-            logging.info(f"Avg. launch overhead per kernel (ms): {(launch_overhead / num_kernels) / 1000:.4f}")
-            logging.info(f"Avg. execution time per kernel (ms): {(total_kernel_exec_time / num_kernels) / 1000:.4f}")
+            print(f"Avg. launch overhead per kernel (ms): {(launch_overhead / num_kernels) / 1000:.4f}")
+            print(f"Avg. execution time per kernel (ms): {(total_kernel_exec_time / num_kernels) / 1000:.4f}")
         
         # --- Per-Stream Breakdown ---
-        logging.info("--- Per-Stream Analysis ---")
+        print("--- Per-Stream Analysis ---")
         for stream_id, data in stream_info.items():
-            logging.info(
+            print(
                 f"  Stream {stream_id}: {data['op_count']} ops "
                 f"({data['kernel_count']} kernels), "
                 f"Busy Time: {data['merged_busy_time'] / 1000:.4f} ms"
@@ -204,7 +255,7 @@ def main() -> int:
         
         # Fusion analysis
         if args.fusion:
-            logging.info("--- Kernel Fusion Analysis ---")
+            print("--- Kernel Fusion Analysis ---")
             for f in args.fusion:
                 trace_obj.kernelchains(dependencies, f, args.prox_score)
         
@@ -239,19 +290,31 @@ def main() -> int:
             kernel_events=kernel_events,
         )
         
-        logging.info("Analysis complete.")
+        print("Analysis complete.")
+        print(f"\nLog output saved to {log_path}")
+        
+        # Restore original print and close log file
+        builtins.print = original_print
+        output_file.close()
+        
         return 0
 
     except FileNotFoundError as e:
-        logging.error(f"File not found: {e}")
+        builtins.print = original_print
+        output_file.close()
+        print(f"Error: File not found: {e}", file=sys.stderr)
         return 1
     except RuntimeError as e:
-        logging.error(f"Runtime error during profiling: {e}")
+        builtins.print = original_print
+        output_file.close()
+        print(f"Error: Runtime error during profiling: {e}", file=sys.stderr)
         return 1
     except Exception as e:
-        logging.error(f"Unexpected error: {e}", exc_info=True)
+        builtins.print = original_print
+        output_file.close()
+        print(f"Error: Unexpected error: {e}", file=sys.stderr)
+        traceback.print_exc()
         return 1
-
 
 if __name__ == "__main__":
     sys.exit(main())
