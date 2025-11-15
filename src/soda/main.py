@@ -211,10 +211,21 @@ def main() -> int:
         # Get all GPU events
         gpu_events = trace_obj.generate_gpu_specific_ops(json_file)
         
-        # Analyze dependencies and metrics
-        (dependencies, total_kernel_exec_time, num_kernels, num_ops,
-         end_to_end_gpu_time, gpu_idle_time, merged_busy_time,
-         kernel_events, stream_info) = trace_obj.generate_dependencies(gpu_events)
+        (dependencies, kernel_events) = trace_obj.generate_dependencies(gpu_events, json_file)
+        
+        # Analyze per-stream metrics
+        gpu_ops, _ = gpu_events
+        stream_info = trace_obj.analyze_per_stream(gpu_ops)
+        
+        # Calculate metrics 
+        total_gpu_time_span = trace_obj.calculate_total_gpu_time_span(json_file)
+        true_gpu_busy_time = trace_obj.calculate_true_gpu_busy_time(json_file)
+        gpu_utilization = trace_obj.calculate_gpu_utilization(json_file)
+        gpu_idle_time = max(0.0, total_gpu_time_span - true_gpu_busy_time)
+        total_kernel_exec_time = trace_obj.calculate_total_kernel_exec_time(json_file)
+        
+        num_kernels = len(kernel_events)
+        num_ops = len(gpu_ops)
         
         # Calculate launch overhead
         launch_overhead = trace_obj.calculate_launch_tax(dependencies)
@@ -222,14 +233,12 @@ def main() -> int:
         # Calculate average kernel duration
         akd_results = trace_obj.get_average_kernel_duration(kernel_events)
         
-        # Calculate GPU utilization
-        gpu_utilization = (merged_busy_time / end_to_end_gpu_time * 100) if end_to_end_gpu_time > 0 else 0.0
         
         # --- Enhanced Reporting ---
         print("--- Performance Metrics ---")
-        print(f"Inference runtime (ms): {end_to_end_gpu_time / 1000:.4f}")
+        print(f"Inference runtime (ms): {total_gpu_time_span / 1000:.4f}")
         print(f"Total kernel execution time (ms): {total_kernel_exec_time / 1000:.4f}")
-        print(f"GPU busy time (concurrent-aware) (ms): {merged_busy_time / 1000:.4f}")
+        print(f"GPU busy time (concurrent-aware) (ms): {true_gpu_busy_time / 1000:.4f}")
         print(f"GPU idle time (ms): {gpu_idle_time / 1000:.4f}")
         print(f"GPU utilization: {gpu_utilization:.2f}%")
         print(f"Total launch overhead (TKLQT) (ms): {launch_overhead / 1000:.4f}")
@@ -247,7 +256,7 @@ def main() -> int:
             print(
                 f"  Stream {stream_id}: {data['op_count']} ops "
                 f"({data['kernel_count']} kernels), "
-                f"Busy Time: {data['merged_busy_time'] / 1000:.4f} ms"
+                f"Busy Time: {data['true_gpu_busy_time'] / 1000:.4f} ms"
             )
         
         # Top-K kernels
@@ -261,9 +270,9 @@ def main() -> int:
         
         # --- Export Metrics to JSON ---
         metrics_dict = {
-            "inference_runtime_ms": end_to_end_gpu_time / 1000,
+            "inference_runtime_ms": total_gpu_time_span / 1000,
             "total_kernel_execution_ms": total_kernel_exec_time / 1000,
-            "gpu_busy_time_ms": merged_busy_time / 1000,
+            "gpu_busy_time_ms": true_gpu_busy_time / 1000,
             "gpu_idle_time_ms": gpu_idle_time / 1000,
             "gpu_utilization_percent": gpu_utilization,
             "total_launch_overhead_ms": launch_overhead / 1000,

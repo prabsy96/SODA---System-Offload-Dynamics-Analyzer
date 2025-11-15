@@ -239,43 +239,6 @@ class TraceModel:
         with open(file_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
-    def generate_cpu_specific_ops(self, file: str) -> float:
-        """
-        Parses the trace file to extract CPU operator metrics.
-
-        Args:
-            file: Path to the Chrome trace JSON file.
-
-        Returns:
-            The timestamp of the first CPU operation.
-        """
-        trace_obj = self._load_trace_file(Path(file))
-        trace_events = trace_obj.get("traceEvents", [])
-
-        cpu_ops = [
-            {
-                "name": v.get("name"),
-                "begin": v.get("ts"),
-                "dur": v.get("dur"),
-            }
-            for v in trace_events
-            if v.get("cat") == "cpu_op"
-        ]
-
-        # Save all CPU ops
-        with open(self.path / "cpuSpecificOPs.json", "w", encoding="utf-8") as f:
-            json.dump({"cpu_ops": cpu_ops}, f, indent=4)
-
-        # Save unique CPU ops
-        unique_cpu_ops = sorted(list({op["name"] for op in cpu_ops}))
-        with open(self.path / "uniqueCpuOPs.json", "w", encoding="utf-8") as f:
-            f.write("\n".join(unique_cpu_ops))
-
-        if not cpu_ops:
-            return 0.0
-
-        return float(cpu_ops[0]["begin"])
-
     def generate_gpu_specific_ops(self, file: str) -> Tuple[List[Dict], List[Dict]]:
         """
         Extracts GPU kernel and CUDA runtime events from trace.
@@ -333,71 +296,157 @@ class TraceModel:
         
         return gpu_ops, runtime_ops
 
-    def generate_dependencies(self, all_gpu_events: Tuple[List[Dict], List[Dict]]) -> Tuple:
+    def calculate_total_gpu_time_span(self, file: str) -> float:
         """
-        Analyzes dependencies between CUDA runtime calls and kernel launches.
-
-        Args:
-            file: Path to the JSON file with GPU metrics.
-
-        Returns:
-            A tuple containing:
-            - A list of (kernel, cuda_runtime) dependencies.
-            - Total kernel execution time.
-            - Number of kernels.
-            - End timestamp.
-            - Total idle time between kernels.
-            - Path to the kernels-only JSON file.
-        """
-
-        gpu_ops, runtime_ops = all_gpu_events
-
-        # Global timing analysis
-
-        min_start = min(float(evt["Begin"]) for evt in gpu_ops)
-        max_end = max(float(evt["Begin"]) + float(evt.get("Dur", 0)) for evt in gpu_ops)
-        end_to_end_gpu_time = max_end - min_start
-
-        log.info(f"Analyzing {len(gpu_ops)} GPU events from profiled run.")
-
-        kernel_events = [evt for evt in gpu_ops if evt.get("Type") == "kernel"]
-
-        corr_runtime = {}
-
-        # Dependency Linking
-        for rt in runtime_ops:
-            corr = rt.get("Correlation")
-            if corr is not None:
-                corr_runtime[corr] = rt
-
-        dependencies = []
-        for kernel in gpu_ops:
-            corr = kernel.get("Correlation")
-            if corr in corr_runtime:
-                dependencies.append((kernel, corr_runtime[corr]))
-
-        # Merge overlapping kernels
-        if not kernel_events:
-            merged_busy_time = 0.0
-        else:
-            intervals = sorted([
-                (float(k["Begin"]), float(k["Begin"]) + float(k.get("Dur", 0)))
-                for k in kernel_events
-            ])
-            merged = [intervals[0]]
-            for current_start, current_end in intervals[1:]:
-                last_start, last_end = merged[-1]
-                if current_start < last_end:
-                    merged[-1] = (last_start, max(last_end, current_end))
-                else:
-                    merged.append((current_start, current_end))
-            merged_busy_time = sum(end - start for start, end in merged)
+        Calculates the end-to-end GPU time span by finding min start and max end
+        across GPU execution events (kernel, gpu_memcpy, gpu_memset).
         
-        gpu_idle_time = max(0.0, end_to_end_gpu_time - merged_busy_time)
+        Measures the extreme time window of GPU execution (from first to last GPU event).
+        Excludes cuda_runtime (CPU-side calls).
+        
+        Args:
+            file: Path to the Chrome trace JSON file.
+            
+        Returns:
+            Time span in microseconds (max_end - min_start).
+        """
+        trace_obj = self._load_trace_file(Path(file))
+        trace_events = trace_obj.get("traceEvents", [])
+        
+        gpu_timestamps = []
+        for event in trace_events:
+            cat = event.get("cat", "")
+            if cat in ("kernel", "gpu_memcpy", "gpu_memset"):
+                start_time = float(event.get("ts", 0))
+                dur = float(event.get("dur", 0))
+                end_time = start_time + dur
+                gpu_timestamps.append((start_time, end_time))
+        
+        if not gpu_timestamps:
+            return 0.0
+        
+        min_start = min(start_time for start_time, _ in gpu_timestamps)
+        max_end = max(end_time for _, end_time in gpu_timestamps)
+        
+        return max_end - min_start
 
-        # Per-Stream Analysis
+    def calculate_total_kernel_exec_time(self, file: str) -> float:
+        """
+        Calculates total kernel execution time by summing durations of all kernel events.
+        
+        Args:
+            file: Path to the Chrome trace JSON file.
+            
+        Returns:
+            Total kernel execution time in microseconds.
+        """
+        trace_obj = self._load_trace_file(Path(file))
+        trace_events = trace_obj.get("traceEvents", [])
+        
+        total_exec_time = 0.0
+        for event in trace_events:
+            if event.get("cat", "") == "kernel":
+                dur = float(event.get("dur", 0))
+                total_exec_time += dur
+        
+        return total_exec_time
+
+    def calculate_true_gpu_busy_time(self, file: str) -> float:
+        """
+        Calculates GPU busy time by merging overlapping GPU event intervals.
+        
+        Accounts for concurrent GPU execution across all streams by merging
+        overlapping time intervals. Includes kernel, gpu_memcpy, and gpu_memset
+        events. If events run concurrently on different streams, their overlapping 
+        time is counted once.
+        
+        Args:
+            file: Path to the Chrome trace JSON file.
+            
+        Returns:
+            Merged GPU busy time in microseconds.
+        """
+        trace_obj = self._load_trace_file(Path(file))
+        trace_events = trace_obj.get("traceEvents", [])
+        
+        # Extract GPU event intervals (kernel, gpu_memcpy, gpu_memset) 
+        gpu_event_intervals = []
+        for event in trace_events:
+            if event.get("cat", "") in ("kernel", "gpu_memcpy", "gpu_memset"):
+                start_time = float(event.get("ts", 0))
+                dur = float(event.get("dur", 0))
+                end_time = start_time + dur
+                gpu_event_intervals.append((start_time, end_time))
+        
+        # Edge case: no GPU events
+        if not gpu_event_intervals:
+            return 0.0
+        
+        # Sort by start time
+        gpu_event_intervals = sorted(gpu_event_intervals)
+        
+        # Merge overlapping GPU event intervals
+        merged_intervals = [gpu_event_intervals[0]]
+        for current_start, current_end in gpu_event_intervals[1:]:
+            last_start, last_end = merged_intervals[-1]
+            if current_start < last_end:
+                # Overlapping: merge intervals
+                merged_intervals[-1] = (last_start, max(last_end, current_end))
+            else:
+                # Non-overlapping: add new interval
+                merged_intervals.append((current_start, current_end))
+        
+        # Calculate total GPU busy time: sum of durations of all merged intervals
+        # Each merged interval represents a continuous period of GPU activity
+        true_gpu_busy_time = 0.0
+        for start_time, end_time in merged_intervals:
+            interval_duration = end_time - start_time
+            true_gpu_busy_time += interval_duration
+        
+        return true_gpu_busy_time
+
+    def calculate_gpu_utilization(self, file: str) -> float:
+        """
+        Calculates GPU utilization percentage.
+        
+        Args:
+            file: Path to the Chrome trace JSON file.
+            
+        Returns:
+            GPU utilization as a percentage (0.0 to 100.0).
+        """
+        # Calculate denominator: time span of GPU execution events only 
+        total_gpu_time_span = self.calculate_total_gpu_time_span(file)
+        # Avoid division by zero
+        if total_gpu_time_span == 0.0:
+            return 0.0
+        
+        # Calculate numerator: non overlapping busy time of GPU execution events
+        true_gpu_busy_time = self.calculate_true_gpu_busy_time(file)
+        
+        # Calculate GPU utilization percentage
+        gpu_utilization = (true_gpu_busy_time / total_gpu_time_span)
+        gpu_utilization = gpu_utilization * 100.0
+
+        return gpu_utilization
+
+    def analyze_per_stream(self, gpu_ops: List[Dict]) -> Dict:
+        """
+        Analyzes GPU operations grouped by stream.
+        
+        For each stream, calculates:
+        - Total operations and kernel count
+        - Total kernel execution time (sum of durations)
+        - True GPU busy time (merged overlapping intervals)
+        
+        Args:
+            gpu_ops: List of GPU operation events (kernel, gpu_memcpy, gpu_memset).
+            
+        Returns:
+            Dictionary mapping stream_id to stream metrics.
+        """
         stream_info = defaultdict(lambda: {
-            "ops": [], "total_kernel_exec_time": 0.0, "merged_busy_time": 0.0,
+            "ops": [], "total_kernel_exec_time": 0.0, "true_gpu_busy_time": 0.0,
             "op_count": 0, "kernel_count": 0
         })
         
@@ -428,28 +477,49 @@ class TraceModel:
                         s_merged[-1] = (sl_start, max(sl_end, s_end))
                     else:
                         s_merged.append((s_start, s_end))
-                stream_info[stream_id]["merged_busy_time"] = sum(
+                stream_info[stream_id]["true_gpu_busy_time"] = sum(
                     end - start for start, end in s_merged
                 )
         
-        # Final Aggregate Metrics
-        total_kernel_exec_time = sum(float(k.get("Dur", 0)) for k in kernel_events)
-        num_kernels = len(kernel_events)
-        num_ops = len(gpu_ops)
+        return dict(stream_info)
+
+    def generate_dependencies(self, all_gpu_events: Tuple[List[Dict], List[Dict]], file: str) -> Tuple:
+        """
+        Analyzes dependencies between CUDA runtime calls and kernel launches.
+
+        Args:
+            all_gpu_events: Tuple of (gpu_ops, runtime_ops) lists.
+            file: Path to the JSON trace file.
+
+        Returns:
+            A tuple containing:
+            - A list of (kernel, cuda_runtime) dependencies.
+            - List of kernel events.
+        """
+
+        gpu_ops, runtime_ops = all_gpu_events
+
+        print(f"Analyzing {len(gpu_ops)} GPU events from profiled run.")
+
+        kernel_events = [evt for evt in gpu_ops if evt.get("Type") == "kernel"]
+
+        corr_runtime = {}
+        # Dependency Linking
+        for rt in runtime_ops:
+            corr = rt.get("Correlation")
+            if corr is not None:
+                corr_runtime[corr] = rt
+
+        dependencies = []
+        for kernel in gpu_ops:
+            corr = kernel.get("Correlation")
+            if corr in corr_runtime:
+                dependencies.append((kernel, corr_runtime[corr]))
         
         return (
             dependencies,
-            total_kernel_exec_time,
-            num_kernels,
-            num_ops,
-            end_to_end_gpu_time,
-            gpu_idle_time,
-            merged_busy_time,
-            kernel_events,
-            dict(stream_info)
+            kernel_events
         )
-
-
 
     def calculate_launch_tax(self, dependence: List[Tuple]) -> float: 
         """
@@ -650,7 +720,7 @@ class TraceModel:
                 str(stream_id): {
                     "total_ops": data["op_count"],
                     "kernel_count": data["kernel_count"],
-                    "busy_time_ms": data["merged_busy_time"] / 1000,
+                    "busy_time_ms": data["true_gpu_busy_time"] / 1000,
                     "total_kernel_exec_time_ms": data["total_kernel_exec_time"] / 1000,
                 }
                 for stream_id, data in stream_info.items()
