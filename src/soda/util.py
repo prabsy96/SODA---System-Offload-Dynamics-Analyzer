@@ -239,62 +239,98 @@ class TraceModel:
         with open(file_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
-    def generate_gpu_specific_ops(self, file: str) -> Tuple[List[Dict], List[Dict]]:
+    def collect_events_from_trace(self, trace: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Extracts GPU kernel and CUDA runtime events from trace.
-    
+        Collects all events from trace organized by category.
+        
         Returns:
-            (gpu_kernel_events, cuda_runtime_events)
+            Dictionary with hierarchical structure:
+            - cpu: Dict with keys:
+                - ops: Dict[external_id, cpu_op_dict] - CPU operations
+                - launches: Dict[correlation_id, cuda_launch_dict] - CUDA runtime launches
+            - gpu: Dict with keys:
+                - kernels: List of kernel events
+                - memory: List of memcpy/memset events
+                - all: List of all GPU events
         """
-        trace_obj = self._load_trace_file(Path(file))
-        trace_events = trace_obj.get("traceEvents", [])
+        op_events_by_ext_id = {}
+        cuda_launch_events_by_corr = {}
+        kernel_events = []
+        gpu_mem_events = []
         
-        gpu_ops = []
-        runtime_ops = []
-        
-        for v in trace_events:
-            cat = v.get("cat", "")
-            args = v.get("args", {})
+        for event in trace.get("traceEvents", []):
+            cat = event.get("cat")
+            args = event.get("args", {})
+            external_id = args.get("External id")
+            correlation = args.get("correlation")
             
-            if cat in ("kernel", "gpu_memcpy", "gpu_memset"):
-                event_data = {
-                    "Name": get_clean_kernel_name(v.get("name", "")) if cat == "kernel" else v.get("name", ""),
-                    "Type": cat,
-                    "Begin": float(v.get("ts", 0)),
-                    "Dur": float(v.get("dur", 0)),
-                    "Correlation": args.get("correlation"),
-                    "Stream": args.get("stream"),
-                    "Thread": v.get("tid"),
+            if cat == "cpu_op" and external_id is not None:
+                op_events_by_ext_id[external_id] = {
+                    "type": "cpu_op",
+                    "name": event.get("name", ""),
+                    "external_id": external_id,
+                    "input_dims": args.get("Input Dims", []),
+                    "input_strides": args.get("Input Strides", []),
+                    "input_type": args.get("Input type", []),
+                    "concrete_inputs": args.get("Concrete Inputs", []),
+                    "ts": event.get("ts"),
+                    "dur": event.get("dur")
                 }
-                
-                if cat == "kernel":
-                    event_data.update({
-                        "Registers per thread": args.get("registers per thread"),
-                        "Shared memory": args.get("shared memory"),
-                        "Grid": args.get("grid", []),
-                        "Block": args.get("block", []),
-                    })
-                elif cat == "gpu_memcpy":
-                    event_data.update({
-                        "Bytes": args.get("bytes"),
-                        "Mem Bandwidth": args.get("memory bandwidth (GB/s)"),
-                    })
-                elif cat == "gpu_memset":
-                    event_data.update({
-                        "Bytes": args.get("bytes"),
-                    })
-                
-                gpu_ops.append(event_data)
-            
-            elif cat == "cuda_runtime":
-                runtime_ops.append({
-                    "Name": v.get("name"),
-                    "Begin": float(v.get("ts", 0)),
-                    "Dur": float(v.get("dur", 0)),
-                    "Correlation": args.get("correlation"),
+            elif cat == "cuda_runtime" and event.get("name") == "cudaLaunchKernel":
+                if external_id is not None and correlation is not None:
+                    cuda_launch_events_by_corr[correlation] = {
+                        "type": "cuda_launch",
+                        "name": event.get("name", ""),
+                        "external_id": external_id,
+                        "correlation": correlation,
+                        "ts": event.get("ts"),
+                        "dur": event.get("dur"),
+                        "cbid": args.get("cbid")
+                    }
+            elif cat == "kernel" and external_id is not None and correlation is not None:
+                kernel_events.append({
+                    "type": "kernel",
+                    "name": get_clean_kernel_name(event.get("name", "")),
+                    "external_id": external_id,
+                    "correlation": correlation,
+                    "grid": args.get("grid"),
+                    "block": args.get("block"),
+                    "shared_memory": args.get("shared memory"),
+                    "registers_per_thread": args.get("registers per thread"),
+                    "blocks_per_SM": args.get("blocks per SM"),
+                    "warps_per_SM": args.get("warps per SM"),
+                    "occupancy": args.get("est. achieved occupancy %"),
+                    "stream": args.get("stream"),
+                    "device": args.get("device"),
+                    "context": args.get("context"),
+                    "queued": args.get("queued"),
+                    "dur": event.get("dur"),
+                    "ts": event.get("ts")
+                })
+            elif cat == "gpu_memcpy" or cat == "gpu_memset":
+                gpu_mem_events.append({
+                    "type": cat,
+                    "name": event.get("name", ""),
+                    "correlation": correlation,
+                    "stream": args.get("stream"),
+                    "ts": event.get("ts"),
+                    "dur": event.get("dur"),
+                    "bytes": args.get("bytes"),
+                    "memory_bandwidth_gbs": args.get("memory bandwidth (GB/s)") if cat == "gpu_memcpy" else None
                 })
         
-        return gpu_ops, runtime_ops
+        # Create hierarchical structure
+        return {
+            "cpu": {
+                "ops": op_events_by_ext_id,
+                "launches": cuda_launch_events_by_corr
+            },
+            "gpu": {
+                "kernels": kernel_events,
+                "memory": gpu_mem_events,
+                "all": kernel_events + gpu_mem_events
+            }
+        }
 
     def calculate_total_gpu_time_span(self, file: str) -> float:
         """
@@ -430,9 +466,9 @@ class TraceModel:
 
         return gpu_utilization
 
-    def analyze_per_stream(self, gpu_ops: List[Dict]) -> Dict:
+    def analyze_per_stream(self, gpu_events: List[Dict]) -> Dict:
         """
-        Analyzes GPU operations grouped by stream.
+        Analyzes GPU events grouped by stream.
         
         For each stream, calculates:
         - Total operations and kernel count
@@ -440,7 +476,7 @@ class TraceModel:
         - True GPU busy time (merged overlapping intervals)
         
         Args:
-            gpu_ops: List of GPU operation events (kernel, gpu_memcpy, gpu_memset).
+            gpu_events: List of GPU event dictionaries (kernel, gpu_memcpy, gpu_memset).
             
         Returns:
             Dictionary mapping stream_id to stream metrics.
@@ -450,24 +486,24 @@ class TraceModel:
             "op_count": 0, "kernel_count": 0
         })
         
-        for op in gpu_ops:
-            stream_id = op.get("Stream", "unknown_stream")
+        for op in gpu_events:
+            stream_id = op.get("stream", "unknown_stream")
             stream_info[stream_id]["ops"].append(op)
         
         for stream_id, data in stream_info.items():
-            ops_on_stream = sorted(data["ops"], key=lambda x: float(x.get("Begin", 0)))
+            ops_on_stream = sorted(data["ops"], key=lambda x: float(x.get("ts", 0)))
             stream_info[stream_id]["ops"] = ops_on_stream
             stream_info[stream_id]["op_count"] = len(ops_on_stream)
             
-            stream_kernels = [op for op in ops_on_stream if op.get("Type") == "kernel"]
+            stream_kernels = [op for op in ops_on_stream if op.get("type") == "kernel"]
             stream_info[stream_id]["kernel_count"] = len(stream_kernels)
             stream_info[stream_id]["total_kernel_exec_time"] = sum(
-                float(k.get("Dur", 0)) for k in stream_kernels
+                float(k.get("dur", 0)) for k in stream_kernels
             )
             
             if stream_kernels:
                 stream_intervals = sorted([
-                    (float(k["Begin"]), float(k["Begin"]) + float(k.get("Dur", 0)))
+                    (float(k["ts"]), float(k["ts"]) + float(k.get("dur", 0)))
                     for k in stream_kernels
                 ])
                 s_merged = [stream_intervals[0]]
@@ -483,43 +519,30 @@ class TraceModel:
         
         return dict(stream_info)
 
-    def generate_dependencies(self, all_gpu_events: Tuple[List[Dict], List[Dict]], file: str) -> Tuple:
+    def generate_dependencies(self, events: Dict[str, Any], file: str) -> List[Tuple]:
         """
         Analyzes dependencies between CUDA runtime calls and kernel launches.
 
         Args:
-            all_gpu_events: Tuple of (gpu_ops, runtime_ops) lists.
-            file: Path to the JSON trace file.
+            events: Dictionary with hierarchical structure (cpu, gpu)
+            file: Path to the JSON trace file (unused, kept for compatibility).
 
         Returns:
-            A tuple containing:
-            - A list of (kernel, cuda_runtime) dependencies.
-            - List of kernel events.
+            List of (kernel, cuda_launch) dependency tuples.
         """
+        gpu_events = events["gpu"]
+        cuda_launches = events["cpu"]["launches"]
+        kernel_events = gpu_events["kernels"]
 
-        gpu_ops, runtime_ops = all_gpu_events
-
-        print(f"Analyzing {len(gpu_ops)} GPU events from profiled run.")
-
-        kernel_events = [evt for evt in gpu_ops if evt.get("Type") == "kernel"]
-
-        corr_runtime = {}
-        # Dependency Linking
-        for rt in runtime_ops:
-            corr = rt.get("Correlation")
-            if corr is not None:
-                corr_runtime[corr] = rt
+        print(f"Analyzing {len(kernel_events)} kernel events from profiled run.")
 
         dependencies = []
-        for kernel in gpu_ops:
-            corr = kernel.get("Correlation")
-            if corr in corr_runtime:
-                dependencies.append((kernel, corr_runtime[corr]))
+        for kernel in kernel_events:
+            corr = kernel.get("correlation")
+            if corr is not None and corr in cuda_launches:
+                dependencies.append((kernel, cuda_launches[corr]))
         
-        return (
-            dependencies,
-            kernel_events
-        )
+        return dependencies
 
     def calculate_launch_tax(self, dependence: List[Tuple]) -> float: 
         """
@@ -537,8 +560,8 @@ class TraceModel:
 
         total_overhead_us = 0.0
         for kernel, runtime in dependence:
-            runtime_end = runtime["Begin"] + runtime.get("Dur", 0)
-            kernel_start = kernel["Begin"]
+            runtime_end = runtime["ts"] + runtime.get("dur", 0)
+            kernel_start = kernel["ts"]
 
             gap_us = kernel_start - runtime_end
 
@@ -557,8 +580,8 @@ class TraceModel:
         kernel_stats = defaultdict(lambda: {"total_dur": 0.0, "count": 0})
     
         for k in kernel_events:
-            name = k["Name"]
-            kernel_stats[name]["total_dur"] += k.get("Dur", 0)
+            name = k["name"]
+            kernel_stats[name]["total_dur"] += k.get("dur", 0)
             kernel_stats[name]["count"] += 1
         
         akd_map = {}
@@ -586,12 +609,12 @@ class TraceModel:
         kernel_data = defaultdict(lambda: {"frequency": 0, "duration": 0.0, "type": None, "streams": set()})
         
         for kernel in kernel_events:
-            kernel_name = kernel["Name"]
+            kernel_name = kernel["name"]
             kernel_data[kernel_name]["frequency"] += 1
-            kernel_data[kernel_name]["duration"] += float(kernel.get("Dur", 0))
-            kernel_data[kernel_name]["type"] = kernel.get("Type")
-            if kernel.get("Stream") is not None:
-                kernel_data[kernel_name]["streams"].add(kernel["Stream"])
+            kernel_data[kernel_name]["duration"] += float(kernel.get("dur", 0))
+            kernel_data[kernel_name]["type"] = kernel.get("type")
+            if kernel.get("stream") is not None:
+                kernel_data[kernel_name]["streams"].add(kernel["stream"])
         
         # Top k by frequency
         top_k_freq = heapq.nlargest(k, kernel_data.items(), key=lambda item: item[1]["frequency"])
@@ -636,7 +659,7 @@ class TraceModel:
         current_segment = []
         # Separate dependencies by synchronization points
         for kernel, runtime in dependence:
-            if 'cudaStreamSynchronize' in runtime["Name"]:
+            if 'cudaStreamSynchronize' in runtime.get("name", ""):
                 if current_segment:
                     all_segments.append(current_segment)
                 current_segment = []
@@ -651,7 +674,7 @@ class TraceModel:
         for segment in all_segments:
             current_chain = deque(maxlen=exact_length)
             for kernel, _ in segment:
-                current_chain.append(kernel["Name"])
+                current_chain.append(kernel["name"])
                 if len(current_chain) == exact_length:
                     chain_tuple = tuple(current_chain)
                     unique_fusion_candidates.add(chain_tuple)
@@ -660,13 +683,13 @@ class TraceModel:
         fusion_recommendations = []
         kernel_freq: DefaultDict[str, int] = defaultdict(int)
         for kernel, _ in dependence:
-            kernel_freq[kernel["Name"]] += 1
+            kernel_freq[kernel["name"]] += 1
             
         for chain in unique_fusion_candidates:
             # Count occurrences of this exact chain
             count = 0
             for segment in all_segments:
-                segment_kernels = [k["Name"] for k, r in segment]
+                segment_kernels = [k["name"] for k, r in segment]
                 for i in range(len(segment_kernels) - exact_length + 1):
                     if tuple(segment_kernels[i:i+exact_length]) == chain:
                         count += 1
@@ -767,10 +790,10 @@ class TraceModel:
         kernel_data = defaultdict(lambda: {"frequency": 0, "duration": 0.0, "streams": set()})
         
         for kernel in kernel_events:
-            kernel_name = kernel["Name"]
+            kernel_name = kernel["name"]
             kernel_data[kernel_name]["frequency"] += 1
-            kernel_data[kernel_name]["duration"] += float(kernel.get("Dur", 0))
-            if kernel.get("Stream") is not None:
-                kernel_data[kernel_name]["streams"].add(kernel["Stream"])
+            kernel_data[kernel_name]["duration"] += float(kernel.get("dur", 0))
+            if kernel.get("stream") is not None:
+                kernel_data[kernel_name]["streams"].add(kernel["stream"])
         
         return dict(kernel_data)

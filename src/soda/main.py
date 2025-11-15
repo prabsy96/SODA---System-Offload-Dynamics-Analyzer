@@ -205,17 +205,17 @@ def main() -> int:
             json_file = trace_obj.trace_forward_pass_for_encoder(token_ids, tokenizer)
         print(f"Chrome trace file generated at: {json_file}")
 
-        # --- Data Processing and Reporting ---
+        # Data Processing and Reporting
         print("Analyzing trace data to generate reports...")
         
-        # Get all GPU events
-        gpu_events = trace_obj.generate_gpu_specific_ops(json_file)
+        # Get all events organized by category
+        trace_data = trace_obj._load_trace_file(Path(json_file))
+        events = trace_obj.collect_events_from_trace(trace_data)
         
-        (dependencies, kernel_events) = trace_obj.generate_dependencies(gpu_events, json_file)
+        dependencies = trace_obj.generate_dependencies(events, json_file)
         
         # Analyze per-stream metrics
-        gpu_ops, _ = gpu_events
-        stream_info = trace_obj.analyze_per_stream(gpu_ops)
+        stream_info = trace_obj.analyze_per_stream(events["gpu"]["all"])
         
         # Calculate metrics 
         total_gpu_time_span = trace_obj.calculate_total_gpu_time_span(json_file)
@@ -224,14 +224,14 @@ def main() -> int:
         gpu_idle_time = max(0.0, total_gpu_time_span - true_gpu_busy_time)
         total_kernel_exec_time = trace_obj.calculate_total_kernel_exec_time(json_file)
         
-        num_kernels = len(kernel_events)
-        num_ops = len(gpu_ops)
+        num_kernels = len(events["gpu"]["kernels"])
+        num_gpu_events = len(events["gpu"]["all"])
         
         # Calculate launch overhead
         launch_overhead = trace_obj.calculate_launch_tax(dependencies)
         
         # Calculate average kernel duration
-        akd_results = trace_obj.get_average_kernel_duration(kernel_events)
+        akd_results = trace_obj.get_average_kernel_duration(events["gpu"]["kernels"])
         
         
         # --- Enhanced Reporting ---
@@ -243,7 +243,7 @@ def main() -> int:
         print(f"GPU utilization: {gpu_utilization:.2f}%")
         print(f"Total launch overhead (TKLQT) (ms): {launch_overhead / 1000:.4f}")
         print(f"Number of kernels: {num_kernels}")
-        print(f"Total GPU operations: {num_ops}")
+        print(f"Total GPU operations: {num_gpu_events}")
         print(f"Active streams: {len(stream_info)}")
         
         if num_kernels > 0:
@@ -260,7 +260,7 @@ def main() -> int:
             )
         
         # Top-K kernels
-        trace_obj.get_top_k_kernels(kernel_events)
+        trace_obj.get_top_k_kernels(events["gpu"]["kernels"])
         
         # Fusion analysis
         if args.fusion:
@@ -277,7 +277,7 @@ def main() -> int:
             "gpu_utilization_percent": gpu_utilization,
             "total_launch_overhead_ms": launch_overhead / 1000,
             "num_kernels": num_kernels,
-            "total_gpu_operations": num_ops,
+            "total_gpu_operations": num_gpu_events,
             "active_streams": len(stream_info),
             "avg_launch_overhead_per_kernel_ms": (launch_overhead / num_kernels / 1000) if num_kernels > 0 else 0.0,
             "avg_kernel_execution_ms": (total_kernel_exec_time / num_kernels / 1000) if num_kernels > 0 else 0.0,
@@ -296,7 +296,7 @@ def main() -> int:
             config=config_dict,
             metrics=metrics_dict,
             stream_info=stream_info,
-            kernel_events=kernel_events,
+            kernel_events=events["gpu"]["kernels"],
         )
         
         print("Analysis complete.")
