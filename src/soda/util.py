@@ -4,8 +4,8 @@ Utility classes and functions for SODA.
 This module provides core functionalities including:
 - Model: A wrapper for loading Hugging Face models with specific configurations.
 - Benchmark: E2E latency benchmarking for TTFT and TPOT (currently unused by main but available).
-- TraceModel: The main class for profiling a model's forward pass, parsing the
-              PyTorch profiler's output, and calculating performance metrics.
+- SodaProfiler: The main class for profiling a model's forward pass, parsing the
+                PyTorch profiler's output, and calculating performance metrics.
 - Graph: A utility for visualizing model layer to ATen op mappings (currently unused).
 """
 
@@ -96,7 +96,7 @@ class Model:
     def _get_common_kwargs(self) -> Dict[str, Any]:
         """Returns common kwargs for model loading."""
         return {
-            "torch_dtype": self.precision,
+            "dtype": self.precision,
             "device_map": self.device if self.device.type == 'cuda' else 'cpu',
         }
 
@@ -163,11 +163,11 @@ class Model:
         return model, tokenizer
 
 
-class TraceModel:
+class SodaProfiler:
     """
     Handles model tracing, profile data parsing, and metric generation.
     """
-    def __init__(self, name: str, file: str, path: str, model: nn.Module):
+    def __init__(self, name: str, file: str, path: str, model: nn.Module, args):
         """
         Initializes the tracer.
 
@@ -176,11 +176,15 @@ class TraceModel:
             file: The filename for the output trace file (e.g., 'trace.json').
             path: The base directory to save all output artifacts.
             model: The PyTorch model instance to trace.
+            args: Command-line arguments object.
         """
         self.name = name
         self.file = file
         self.path = Path(path)
         self.model = model
+        self.args = args
+        self.trace = None
+        self.events = None
         self.dump_dir = self.path / self.name
         self.dump_dir.mkdir(parents=True, exist_ok=True)
 
@@ -212,6 +216,9 @@ class TraceModel:
 
         json_file = self.dump_dir / self.file
         prof.export_chrome_trace(str(json_file))
+        
+        # Load trace data into memory immediately
+        self.trace = self.load_trace_file(json_file)
         return str(json_file)
 
     def trace_forward_pass_for_decoder(self, inputs: Dict[str, torch.Tensor], tokenizer, bs: int, sq: int) -> str:
@@ -244,6 +251,9 @@ class TraceModel:
         
         json_file = self.dump_dir / self.file
         prof.export_chrome_trace(str(json_file))
+        
+        # Load trace data into memory immediately
+        self.trace = self.load_trace_file(json_file)
         return str(json_file)
 
     def load_trace_file(self, file_path: Path) -> Dict[str, Any]:
@@ -253,9 +263,11 @@ class TraceModel:
         with open(file_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
-    def collect_events_from_trace(self, trace: Dict[str, Any]) -> Dict[str, Any]:
+    def collect_events_from_trace(self) -> Dict[str, Any]:
         """
         Collects all events from trace organized by category.
+        
+        Uses self.trace
         
         Returns:
             Dictionary with hierarchical structure:
@@ -272,7 +284,7 @@ class TraceModel:
         kernel_events = []
         gpu_mem_events = []
         
-        for event in trace.get("traceEvents", []):
+        for event in self.trace.get("traceEvents", []):
             cat = event.get("cat")
             args = event.get("args", {})
             external_id = args.get("External id")
@@ -336,7 +348,7 @@ class TraceModel:
                 })
         
         # Create hierarchical structure
-        return {
+        events = {
             "cpu": {
                 "ops": op_events_by_ext_id,
                 "launches": cuda_launch_events_by_corr
@@ -347,8 +359,10 @@ class TraceModel:
                 "all": kernel_events + gpu_mem_events
             }
         }
+        self.events = events
+        return events
 
-    def calculate_total_inference_time(self, trace: Dict[str, Any]) -> float:
+    def calculate_total_inference_time(self) -> float:
         """
         Calculates total wall-clock inference time from ALL trace events.
         
@@ -356,15 +370,14 @@ class TraceModel:
         Only considers complete events (ph="X") with timestamps and durations.
         Excludes flow markers, metadata, and instant events.
         
-        Args:
-            trace: Raw trace dictionary loaded from JSON file.
+        Uses self.trace
             
         Returns:
             Total inference time in microseconds (max_end - min_start).
         """
         all_timestamps = []
         
-        for event in trace.get("traceEvents", []):
+        for event in self.trace.get("traceEvents", []):
             if event.get("ph") == "X":  # Only complete events (excludes flow markers)
                 start_time = float(event.get("ts"))
                 duration = float(event.get("dur", 0))
@@ -379,7 +392,7 @@ class TraceModel:
         
         return max_end - min_start
 
-    def calculate_total_gpu_time_span(self, events: Dict[str, Any]) -> float:
+    def calculate_total_gpu_time_span(self) -> float:
         """
         Calculates the end-to-end GPU time span by finding min start and max end
         across GPU execution events (kernel, gpu_memcpy, gpu_memset).
@@ -387,15 +400,12 @@ class TraceModel:
         Measures the extreme time window of GPU execution (from first to last GPU event).
         Excludes cuda_runtime (CPU-side calls).
         
-        Args:
-            events: Dictionary containing collected events from trace, organized hierarchically:
-                - cpu: CPU-side events (ops, launches)
-                - gpu: GPU-side events (kernels, memory, all)
+        Uses self.events.
             
         Returns:
             Time span in microseconds (max_end - min_start).
         """
-        gpu_events = events["gpu"]["all"]
+        gpu_events = self.events["gpu"]["all"]
         
         if not gpu_events:
             return 0.0
@@ -411,19 +421,16 @@ class TraceModel:
         
         return max_end - min_start
 
-    def calculate_total_kernel_exec_time(self, events: Dict[str, Any]) -> float:
+    def calculate_total_kernel_exec_time(self) -> float:
         """
         Calculates total kernel execution time by summing durations of all kernel events.
         
-        Args:
-            events: Dictionary containing collected events from trace, organized hierarchically:
-                - cpu: CPU-side events (ops, launches)
-                - gpu: GPU-side events (kernels, memory, all)
+        Uses self.events.
             
         Returns:
             Total kernel execution time in microseconds.
         """
-        kernel_events = events["gpu"]["kernels"]
+        kernel_events = self.events["gpu"]["kernels"]
         
         total_kernel_exec_time = 0.0
         for kernel in kernel_events:
@@ -431,7 +438,7 @@ class TraceModel:
         
         return total_kernel_exec_time
 
-    def calculate_true_gpu_busy_time(self, events: Dict[str, Any]) -> float:
+    def calculate_true_gpu_busy_time(self) -> float:
         """
         Calculates GPU busy time by merging overlapping GPU event intervals.
         
@@ -440,15 +447,12 @@ class TraceModel:
         events. If events run concurrently on different streams, their overlapping 
         time is counted once.
         
-        Args:
-            events: Dictionary containing collected events from trace, organized hierarchically:
-                - cpu: CPU-side events (ops, launches)
-                - gpu: GPU-side events (kernels, memory, all)
+        Uses self.events.
             
         Returns:
             Merged GPU busy time in microseconds.
         """
-        gpu_events = events["gpu"]["all"]
+        gpu_events = self.events["gpu"]["all"]
         
         # Edge case: no GPU events
         if not gpu_events:
@@ -484,27 +488,24 @@ class TraceModel:
         
         return true_gpu_busy_time
 
-    def calculate_gpu_utilization(self, events: Dict[str, Any]) -> float:
+    def calculate_gpu_utilization(self) -> float:
         """
         Calculates GPU utilization percentage.
         
-        Args:
-            events: Dictionary containing collected events from trace, organized hierarchically:
-                - cpu: CPU-side events (ops, launches)
-                - gpu: GPU-side events (kernels, memory, all)
+        Uses self.events.
             
         Returns:
             GPU utilization as a percentage (0.0 to 100.0).
         """
         # Calculate denominator: time span of GPU execution events only 
-        total_gpu_time_span = self.calculate_total_gpu_time_span(events)
+        total_gpu_time_span = self.calculate_total_gpu_time_span()
         
         # Avoid division by zero
         if total_gpu_time_span == 0.0:
             return 0.0
         
         # Calculate numerator: non overlapping busy time of GPU execution events
-        true_gpu_busy_time = self.calculate_true_gpu_busy_time(events)
+        true_gpu_busy_time = self.calculate_true_gpu_busy_time()
         
         # Calculate GPU utilization percentage
         gpu_utilization = (true_gpu_busy_time / total_gpu_time_span)
@@ -512,21 +513,22 @@ class TraceModel:
 
         return gpu_utilization
 
-    def analyze_per_stream(self, gpu_events: List[Dict]) -> Dict:
+    def analyze_per_stream(self) -> Dict:
         """
         Analyzes GPU events grouped by stream.
+        
+        Uses self.events.
         
         For each stream, calculates:
         - Total operations and kernel count
         - Total kernel execution time (sum of durations)
         - True GPU busy time (merged overlapping intervals)
-        
-        Args:
-            gpu_events: List of GPU event dictionaries (kernel, gpu_memcpy, gpu_memset).
             
         Returns:
             Dictionary mapping stream_id to stream metrics.
         """
+        gpu_events = self.events["gpu"]["all"]
+        
         stream_info = defaultdict(lambda: {
             "ops": [], "total_kernel_exec_time": 0.0, "true_gpu_busy_time": 0.0,
             "op_count": 0, "kernel_count": 0
@@ -565,20 +567,17 @@ class TraceModel:
         
         return dict(stream_info)
 
-    def generate_dependencies(self, events: Dict[str, Any]) -> List[Tuple]:
+    def generate_dependencies(self) -> List[Tuple]:
         """
         Analyzes dependencies between CUDA runtime calls and kernel launches.
 
-        Args:
-            events: Dictionary containing collected events from trace, organized hierarchically:
-                - cpu: CPU-side events (ops, launches)
-                - gpu: GPU-side events (kernels, memory, all)
+        Uses self.events.
 
         Returns:
             List of (kernel, cuda_launch) dependency tuples.
         """
-        gpu_events = events["gpu"]
-        cuda_launches = events["cpu"]["launches"]
+        gpu_events = self.events["gpu"]
+        cuda_launches = self.events["cpu"]["launches"]
         kernel_events = gpu_events["kernels"]
 
         print(f"Analyzing {len(kernel_events)} kernel events from profiled run.")
@@ -617,18 +616,19 @@ class TraceModel:
 
         return total_overhead_us
     
-    def get_average_kernel_duration(self, kernel_events: List[Dict]) -> Dict[str, float]:
+    def get_average_kernel_duration(self) -> Dict[str, float]:
         """
         Calculates the average execution duration (aka operational intensity) for each unique kernel.
         
         Aggregates all instances of each kernel and computes the mean duration.
         
-        Args:
-            kernel_events: List of kernel event dictionaries.
+        Uses self.events.
             
         Returns:
             Dictionary mapping kernel name to average duration in milliseconds.
         """
+        kernel_events = self.events["gpu"]["kernels"]
+        
         kernel_stats = defaultdict(lambda: {"total_duration": 0.0, "count": 0})
     
         for kernel in kernel_events:
@@ -646,12 +646,13 @@ class TraceModel:
         
         return avg_durations
 
-    def get_top_k_kernels(self, kernel_events: List[Dict], k: int = 3) -> Dict[str, List[Tuple[str, Dict]]]:
+    def get_top_k_kernels(self, k: int = 3) -> Dict[str, List[Tuple[str, Dict]]]:
         """
         Calculates the top-k most frequent and time-consuming kernels.
         
+        Uses self.events.
+        
         Args:
-            kernel_events: List of kernel event dictionaries.
             k: Number of top kernels to return.
             
         Returns:
@@ -661,6 +662,8 @@ class TraceModel:
             Each kernel_stats dict contains: frequency, duration
             Returns empty lists if no kernel events.
         """
+        kernel_events = self.events["gpu"]["kernels"]
+        
         if not kernel_events:
             return {"by_frequency": [], "by_duration": []}
         

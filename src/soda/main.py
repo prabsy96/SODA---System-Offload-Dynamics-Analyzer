@@ -188,51 +188,51 @@ def main() -> int:
 
         # --- Tracing and Analysis ---
         trace_dir_name = f"{args.model.replace('/', '_')}_{args.compile_type}_bs{args.batch_size}_sl{args.seq_len}"
-        trace_obj = util.TraceModel(
+        profiler = util.SodaProfiler(
             name=trace_dir_name,
             file="trace.json",
             path=str(args.output_dir),
             model=model,
+            args=args,
         )
 
         #  Single warm-up and trace run is performed.
         print("Starting model profiling run...")
         if is_decoder:
-            json_file = trace_obj.trace_forward_pass_for_decoder(
+            json_file = profiler.trace_forward_pass_for_decoder(
                 token_ids, tokenizer, args.batch_size, args.seq_len
             )
         else:
-            json_file = trace_obj.trace_forward_pass_for_encoder(token_ids, tokenizer)
+            json_file = profiler.trace_forward_pass_for_encoder(token_ids, tokenizer)
         print(f"Chrome trace file generated at: {json_file}")
 
         # Data Processing and Reporting
         print("Analyzing trace data to generate reports...")
         
-        # Get all events organized by category
-        trace_data = trace_obj.load_trace_file(Path(json_file))
-        events = trace_obj.collect_events_from_trace(trace_data)
+        # Get all events organized by category 
+        profiler.collect_events_from_trace()
         
-        dependencies = trace_obj.generate_dependencies(events)
+        dependencies = profiler.generate_dependencies()
         
         # Analyze per-stream metrics
-        stream_info = trace_obj.analyze_per_stream(events["gpu"]["all"])
+        stream_info = profiler.analyze_per_stream()
         
         # Calculate metrics 
-        total_inference_time = trace_obj.calculate_total_inference_time(trace_data)
-        total_gpu_time_span = trace_obj.calculate_total_gpu_time_span(events)
-        true_gpu_busy_time = trace_obj.calculate_true_gpu_busy_time(events)
-        gpu_utilization = trace_obj.calculate_gpu_utilization(events)
+        total_inference_time = profiler.calculate_total_inference_time()
+        total_gpu_time_span = profiler.calculate_total_gpu_time_span()
+        true_gpu_busy_time = profiler.calculate_true_gpu_busy_time()
+        gpu_utilization = profiler.calculate_gpu_utilization()
         gpu_idle_time = max(0.0, total_gpu_time_span - true_gpu_busy_time)
-        total_kernel_exec_time = trace_obj.calculate_total_kernel_exec_time(events)
+        total_kernel_exec_time = profiler.calculate_total_kernel_exec_time()
         
-        num_kernels = len(events["gpu"]["kernels"])
-        num_gpu_events = len(events["gpu"]["all"])
+        num_kernels = len(profiler.events["gpu"]["kernels"])
+        num_gpu_events = len(profiler.events["gpu"]["all"])
         
         # Calculate launch overhead
-        launch_overhead = trace_obj.calculate_launch_tax(dependencies)
+        launch_overhead = profiler.calculate_launch_tax(dependencies)
         
         # Calculate average kernel duration
-        akd_results = trace_obj.get_average_kernel_duration(events["gpu"]["kernels"])
+        akd_results = profiler.get_average_kernel_duration()
         
         
         # --- Enhanced Reporting ---
@@ -261,7 +261,7 @@ def main() -> int:
             )
         
         # Top-K kernels 
-        top_k_kernels = trace_obj.get_top_k_kernels(events["gpu"]["kernels"], k=3)
+        top_k_kernels = profiler.get_top_k_kernels(k=3)
         
         if top_k_kernels["by_frequency"]:
             print("--- Top-3 Kernels by Frequency ---")
@@ -284,7 +284,7 @@ def main() -> int:
         if args.fusion:
             print("--- Kernel Fusion Analysis ---")
             for f in args.fusion:
-                trace_obj.kernelchains(dependencies, f, args.prox_score)
+                profiler.kernelchains(dependencies, f, args.prox_score)
         
         # --- Export Metrics to JSON ---
         metrics_dict = {
@@ -309,7 +309,7 @@ def main() -> int:
             "device": args.device,
         }
         
-        trace_obj.export_metrics_to_json(
+        profiler.export_metrics_to_json(
             model_name=args.model,
             config=config_dict,
             metrics=metrics_dict,
