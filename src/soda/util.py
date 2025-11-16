@@ -103,6 +103,11 @@ class Model:
 
     def load_encoder(self) -> Tuple[transformers.PreTrainedModel, transformers.PreTrainedTokenizer]:
         """Loads an encoder-only model (e.g., BERT)."""
+        # Load tokenizer first to get eos_token_id
+        tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_name)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        
         kwargs = self._get_common_kwargs()
         if self.compile_type == "torch.compile":
             kwargs.update({"attn_implementation": "sdpa"})
@@ -120,32 +125,42 @@ class Model:
             model = transformers.AutoModelForSequenceClassification.from_pretrained(
                 self.model_name, **kwargs
             ).eval()
-
-        tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_name)
+        
+        if hasattr(model, 'generation_config') and model.generation_config.pad_token_id is None:
+            model.generation_config.pad_token_id = tokenizer.eos_token_id
         return model, tokenizer
 
     def load_decoder(self) -> Tuple[transformers.PreTrainedModel, transformers.PreTrainedTokenizer]:
         """Loads a decoder-only model (e.g., Llama)."""
+        # Load tokenizer first to get eos_token_id
+        tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_name)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        
+        # Load config and set pad_token_id before model initialization to prevent warning
+        config = transformers.AutoConfig.from_pretrained(self.model_name)
+        if hasattr(config, 'pad_token_id') and config.pad_token_id is None:
+            config.pad_token_id = tokenizer.eos_token_id
+        
         kwargs = self._get_common_kwargs()
         if self.compile_type == "torch.compile":
             kwargs.update({"attn_implementation": "sdpa"})
             model = transformers.AutoModelForCausalLM.from_pretrained(
-                self.model_name, **kwargs
+                self.model_name, config=config, **kwargs
             ).eval()
             model.generation_config.cache_implementation = "static"
             model.forward = torch.compile(model.forward, mode="reduce-overhead", backend="inductor")
         elif self.compile_type == "flash-attention":
             kwargs.update({"attn_implementation": "flash_attention_2"})
             model = transformers.AutoModelForCausalLM.from_pretrained(
-                self.model_name, **kwargs
+                self.model_name, config=config, **kwargs
             ).eval()
         else:  # eager
             kwargs.update({"attn_implementation": "eager"})
             model = transformers.AutoModelForCausalLM.from_pretrained(
-                self.model_name, **kwargs
+                self.model_name, config=config, **kwargs
             ).eval()
-
-        tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_name)
+        
         return model, tokenizer
 
 
@@ -232,7 +247,7 @@ class TraceModel:
         prof.export_chrome_trace(str(json_file))
         return str(json_file)
 
-    def _load_trace_file(self, file_path: Path) -> Dict[str, Any]:
+    def load_trace_file(self, file_path: Path) -> Dict[str, Any]:
         """Loads and returns the content of a JSON trace file."""
         if not file_path.is_file():
             raise FileNotFoundError(f"Trace file does not exist: {file_path}")

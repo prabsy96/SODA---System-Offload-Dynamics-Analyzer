@@ -209,7 +209,7 @@ def main() -> int:
         print("Analyzing trace data to generate reports...")
         
         # Get all events organized by category
-        trace_data = trace_obj._load_trace_file(Path(json_file))
+        trace_data = trace_obj.load_trace_file(Path(json_file))
         events = trace_obj.collect_events_from_trace(trace_data)
         
         dependencies = trace_obj.generate_dependencies(events)
