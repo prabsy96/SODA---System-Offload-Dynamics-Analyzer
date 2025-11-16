@@ -218,6 +218,7 @@ def main() -> int:
         stream_info = trace_obj.analyze_per_stream(events["gpu"]["all"])
         
         # Calculate metrics 
+        total_inference_time = trace_obj.calculate_total_inference_time(trace_data)
         total_gpu_time_span = trace_obj.calculate_total_gpu_time_span(events)
         true_gpu_busy_time = trace_obj.calculate_true_gpu_busy_time(events)
         gpu_utilization = trace_obj.calculate_gpu_utilization(events)
@@ -236,7 +237,7 @@ def main() -> int:
         
         # --- Enhanced Reporting ---
         print("--- Performance Metrics ---")
-        print(f"Inference runtime (ms): {total_gpu_time_span / 1000:.4f}")
+        print(f"Inference runtime (ms): {total_inference_time / 1000:.4f}")
         print(f"Total kernel execution time (ms): {total_kernel_exec_time / 1000:.4f}")
         print(f"GPU busy time (concurrent-aware) (ms): {true_gpu_busy_time / 1000:.4f}")
         print(f"GPU idle time (ms): {gpu_idle_time / 1000:.4f}")
@@ -270,7 +271,7 @@ def main() -> int:
         
         # --- Export Metrics to JSON ---
         metrics_dict = {
-            "inference_runtime_ms": total_gpu_time_span / 1000,
+            "inference_runtime_ms": total_inference_time / 1000,
             "total_kernel_execution_ms": total_kernel_exec_time / 1000,
             "gpu_busy_time_ms": true_gpu_busy_time / 1000,
             "gpu_idle_time_ms": gpu_idle_time / 1000,

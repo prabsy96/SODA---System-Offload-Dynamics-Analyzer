@@ -349,6 +349,37 @@ class TraceModel:
             }
         }
 
+    def calculate_total_inference_time(self, trace: Dict[str, Any]) -> float:
+        """
+        Calculates total wall-clock inference time from ALL trace events.
+        
+        Includes CPU ops, CUDA runtime calls, and GPU execution.
+        Only considers complete events (ph="X") with timestamps and durations.
+        Excludes flow markers, metadata, and instant events.
+        
+        Args:
+            trace: Raw trace dictionary loaded from JSON file.
+            
+        Returns:
+            Total inference time in microseconds (max_end - min_start).
+        """
+        all_timestamps = []
+        
+        for event in trace.get("traceEvents", []):
+            if event.get("ph") == "X":  # Only complete events (excludes flow markers)
+                ts = event.get("ts")
+                dur = event.get("dur", 0)
+                if ts is not None:
+                    all_timestamps.append((ts, dur))
+        
+        if not all_timestamps:
+            return 0.0
+        
+        min_start = min(ts for ts, _ in all_timestamps)
+        max_end = max(ts + dur for ts, dur in all_timestamps)
+        
+        return max_end - min_start
+
     def calculate_total_gpu_time_span(self, events: Dict[str, Any]) -> float:
         """
         Calculates the end-to-end GPU time span by finding min start and max end
