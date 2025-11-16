@@ -619,27 +619,32 @@ class TraceModel:
     
     def get_average_kernel_duration(self, kernel_events: List[Dict]) -> Dict[str, float]:
         """
-        Calculates and saves the operational intensity (average kernel duration) for each unique kernel.
+        Calculates the average execution duration (aka operational intensity) for each unique kernel.
         
+        Aggregates all instances of each kernel and computes the mean duration.
+        
+        Args:
+            kernel_events: List of kernel event dictionaries.
+            
         Returns:
-        Dict mapping kernel name -> average duration in milliseconds
+            Dictionary mapping kernel name to average duration in milliseconds.
         """
-        kernel_stats = defaultdict(lambda: {"total_dur": 0.0, "count": 0})
+        kernel_stats = defaultdict(lambda: {"total_duration": 0.0, "count": 0})
     
-        for k in kernel_events:
-            name = k["name"]
-            kernel_stats[name]["total_dur"] += k.get("dur", 0)
-            kernel_stats[name]["count"] += 1
+        for kernel in kernel_events:
+            kernel_name = kernel["name"]
+            kernel_stats[kernel_name]["total_duration"] += kernel.get("dur", 0)
+            kernel_stats[kernel_name]["count"] += 1
         
-        akd_map = {}
-        for name, data in kernel_stats.items():
-            if data["count"] > 0:
-                avg_dur_us = data["total_dur"] / data["count"]
-                akd_map[name] = float(avg_dur_us)/1000.0
+        avg_durations = {}
+        for name, stat in kernel_stats.items():
+            if stat["count"] > 0:
+                avg_duration_us = stat["total_duration"] / stat["count"]
+                avg_durations[name] = float(avg_duration_us) / 1000.0
             else:
-                akd_map[name] = 0.0
+                avg_durations[name] = 0.0
         
-        return akd_map
+        return avg_durations
 
     def get_top_k_kernels(self, kernel_events: List[Dict], k: int = 3) -> Dict[str, List[Tuple[str, Dict]]]:
         """
