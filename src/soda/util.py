@@ -213,15 +213,15 @@ class SodaProfiler:
     Handles model tracing, profile data parsing, and metric generation.
     """
     @staticmethod
-    def generate_trace_name(args: argparse.Namespace) -> str:
+    def generate_experiment_name(args: argparse.Namespace) -> str:
         """
-        Generates a unique trace directory name from arguments.
+        Generates a unique experiment directory name from arguments.
         
         Args:
             args: Parsed command-line arguments.
             
         Returns:
-            Trace directory name string.
+            Experiment directory name string.
         """
         return f"{args.model.replace('/', '_')}_{args.compile_type}_bs{args.batch_size}_sl{args.seq_len}"
 
@@ -245,15 +245,15 @@ class SodaProfiler:
         # Create output directory if it doesn't exist
         args.output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Derive name, file, path from args
-        self.name = self.generate_trace_name(args)
-        self.file = "trace.json"
-        self.path = Path(args.output_dir)
+        # Derive experiment_name, output_dir from args
+        self.experiment_name = self.generate_experiment_name(args)
+        self.output_dir = Path(args.output_dir) / self.experiment_name
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.trace_file_path = self.output_dir / "trace.json"
+        self.report_file_path = self.output_dir / "report.json"
         
         self.trace = None
         self.events = None
-        self.dump_dir = self.path / self.name
-        self.dump_dir.mkdir(parents=True, exist_ok=True)
 
     def trace_forward_pass_for_encoder(self, inputs: Dict[str, torch.Tensor]) -> str:
         """
@@ -281,12 +281,11 @@ class SodaProfiler:
             ) as prof:
                 self.model_handler.pytorch_model(**inputs)
 
-        json_file = self.dump_dir / self.file
-        prof.export_chrome_trace(str(json_file))
+        prof.export_chrome_trace(str(self.trace_file_path))
         
         # Load trace data into memory immediately
-        self.trace = self.load_trace_file(json_file)
-        return str(json_file)
+        self.trace = self.load_trace_file(self.trace_file_path)
+        return str(self.trace_file_path)
 
     def profile_forward_pass(self, inputs: Dict[str, torch.Tensor], batch_size: int = None, seq_len: int = None) -> str:
         """
@@ -337,12 +336,11 @@ class SodaProfiler:
             ) as prof:
                 self.model_handler.pytorch_model.generate(**inputs, max_new_tokens=1, do_sample=False, pad_token_id=self.model_handler.tokenizer.pad_token_id)
         
-        json_file = self.dump_dir / self.file
-        prof.export_chrome_trace(str(json_file))
+        prof.export_chrome_trace(str(self.trace_file_path))
         
         # Load trace data into memory immediately
-        self.trace = self.load_trace_file(json_file)
-        return str(json_file)
+        self.trace = self.load_trace_file(self.trace_file_path)
+        return str(self.trace_file_path)
 
     def load_trace_file(self, file_path: Path) -> Dict[str, Any]:
         """Loads and returns the content of a JSON trace file."""
@@ -905,9 +903,8 @@ class SodaProfiler:
         }
         
         # Save to file
-        output_path = self.dump_dir / "metrics_report.json"
-        with open(output_path, "w", encoding="utf-8") as f:
+        with open(self.report_file_path, "w", encoding="utf-8") as f:
             json.dump(output, f, indent=2, ensure_ascii=False)
         
-        log.info(f"Metrics exported to: {output_path}")
-        return str(output_path)
+        log.info(f"Metrics exported to: {self.report_file_path}")
+        return str(self.report_file_path)

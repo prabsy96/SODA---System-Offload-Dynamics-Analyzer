@@ -152,18 +152,17 @@ def main() -> int:
             precision=args.precision,
         )
         
-        # --- Synthetic Data Generation ---
+        # Synthetic Data Generation
         print(f"Generating synthetic input: batch_size={args.batch_size}, seq_len={args.seq_len}")
         model_inputs = model_handler.generate_synthetic_inputs(
             args.batch_size, args.seq_len, args.device
         )
 
-        # --- Tracing and Analysis ---
+        # Tracing and Analysis
         profiler = SodaProfiler(model_handler=model_handler, args=args)
-        #  Single warm-up and trace run is performed.
-        print("Starting model profiling run...")
-        json_file = profiler.profile_forward_pass(model_inputs)
-        print(f"Chrome trace file generated at: {json_file}")
+        print("Profiling model forward pass...")
+        trace_file_path = profiler.profile_forward_pass(model_inputs)
+        print(f"Chrome trace file generated at: {trace_file_path}")
 
         # Data Processing and Reporting
         print("Analyzing trace data to generate reports...")
