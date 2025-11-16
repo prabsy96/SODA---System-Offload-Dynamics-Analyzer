@@ -9,7 +9,6 @@ This module provides core functionalities including:
 - Graph: A utility for visualizing model layer to ATen op mappings (currently unused).
 """
 
-import heapq
 import json
 import logging
 import os
@@ -642,53 +641,49 @@ class TraceModel:
         
         return akd_map
 
-    def get_top_k_kernels(self, kernel_events: List[Dict], k: int = 3):
+    def get_top_k_kernels(self, kernel_events: List[Dict], k: int = 3) -> Dict[str, List[Tuple[str, Dict]]]:
         """
-        Identifies the top-k most frequent and time-consuming kernels.
+        Calculates the top-k most frequent and time-consuming kernels.
         
         Args:
             kernel_events: List of kernel event dictionaries.
-            k: Number of top kernels to report.
+            k: Number of top kernels to return.
+            
+        Returns:
+            Dictionary with keys:
+            - "by_frequency": List of (kernel_name, stats_dict) tuples, sorted by frequency
+            - "by_duration": List of (kernel_name, stats_dict) tuples, sorted by duration
+            Each kernel_stats dict contains: frequency, duration
+            Returns empty lists if no kernel events.
         """
         if not kernel_events:
-            print("Warning: No kernel events to analyze.")
-            return
+            return {"by_frequency": [], "by_duration": []}
         
-        kernel_data = defaultdict(lambda: {"frequency": 0, "duration": 0.0, "type": None, "streams": set()})
+        kernel_stats = defaultdict(lambda: {"frequency": 0, "duration": 0.0})
         
         for kernel in kernel_events:
             kernel_name = kernel["name"]
-            kernel_data[kernel_name]["frequency"] += 1
-            kernel_data[kernel_name]["duration"] += float(kernel.get("dur", 0))
-            kernel_data[kernel_name]["type"] = kernel.get("type")
-            if kernel.get("stream") is not None:
-                kernel_data[kernel_name]["streams"].add(kernel["stream"])
+            kernel_stats[kernel_name]["frequency"] += 1
+            kernel_stats[kernel_name]["duration"] += float(kernel.get("dur", 0))
         
         # Top k by frequency
-        top_k_freq = heapq.nlargest(k, kernel_data.items(), key=lambda item: item[1]["frequency"])
+        top_k_by_freq = sorted(
+            kernel_stats.items(), 
+            key=lambda item: item[1]["frequency"], 
+            reverse=True
+        )[:k]
         
         # Top k by duration
-        top_k_dur = heapq.nlargest(k, kernel_data.items(), key=lambda item: item[1]["duration"])
-        
-        print(f"--- Top-{k} Kernels by Frequency ---")
-        for i, (name, data) in enumerate(top_k_freq, 1):
-            streams = list(data["streams"]) if data["streams"] else ["N/A"]
-            print(
-                f"#{i}: {name} "
-                f"(Frequency: {int(data['frequency'])}, "
-                f"Total Duration: {data['duration'] / 1000:.4f} ms, "
-                f"Streams: {streams})"
-            )
-        
-        print(f"--- Top-{k} Kernels by Duration ---")
-        for i, (name, data) in enumerate(top_k_dur, 1):
-            streams = list(data["streams"]) if data["streams"] else ["N/A"]
-            print(
-                f"#{i}: {name} "
-                f"(Total Duration: {data['duration'] / 1000:.4f} ms, "
-                f"Frequency: {int(data['frequency'])}, "
-                f"Streams: {streams})"
-            )
+        top_k_by_dur = sorted(
+            kernel_stats.items(), 
+            key=lambda item: item[1]["duration"], 
+            reverse=True
+        )[:k]
+
+        return {
+            "by_frequency": top_k_by_freq,
+            "by_duration": top_k_by_dur
+        }
 
     def kernelchains(self, dependence: List[Tuple], exact_length: int, prox_score_threshold: float):
         """
@@ -769,15 +764,10 @@ class TraceModel:
         config: Dict[str, Any],
         metrics: Dict[str, float],
         stream_info: Dict[str, Dict],
-        kernel_events: List[Dict],
+        top_k_kernels: Dict[str, List[Tuple[str, Dict]]],
     ) -> str:
        
         from datetime import datetime
-        
-        # Compute top kernels
-        kernel_stats = self._get_kernel_stats(kernel_events)
-        top_k_freq = heapq.nlargest(10, kernel_stats.items(), key=lambda x: x[1]["frequency"])
-        top_k_dur = heapq.nlargest(10, kernel_stats.items(), key=lambda x: x[1]["duration"])
         
         # Build output structure
         output = {
@@ -802,20 +792,18 @@ class TraceModel:
                         "rank": i,
                         "name": name,
                         "frequency": data["frequency"],
-                        "total_duration_ms": data["duration"] / 1000,
-                        "streams": sorted(list(data["streams"])) if data["streams"] else []
+                        "total_duration_ms": data["duration"] / 1000
                     }
-                    for i, (name, data) in enumerate(top_k_freq, 1)
+                    for i, (name, data) in enumerate(top_k_kernels["by_frequency"], 1)
                 ],
                 "by_duration": [
                     {
                         "rank": i,
                         "name": name,
                         "frequency": data["frequency"],
-                        "total_duration_ms": data["duration"] / 1000,
-                        "streams": sorted(list(data["streams"])) if data["streams"] else []
+                        "total_duration_ms": data["duration"] / 1000
                     }
-                    for i, (name, data) in enumerate(top_k_dur, 1)
+                    for i, (name, data) in enumerate(top_k_kernels["by_duration"], 1)
                 ]
             }
         }
@@ -827,21 +815,3 @@ class TraceModel:
         
         log.info(f"Metrics exported to: {output_path}")
         return str(output_path)
-    
-    def _get_kernel_stats(self, kernel_events: List[Dict]) -> Dict[str, Dict]:
-        """
-        Compute kernel statistics for export.
-        
-        Returns:
-            Dict mapping kernel name to {frequency, duration, streams}
-        """
-        kernel_data = defaultdict(lambda: {"frequency": 0, "duration": 0.0, "streams": set()})
-        
-        for kernel in kernel_events:
-            kernel_name = kernel["name"]
-            kernel_data[kernel_name]["frequency"] += 1
-            kernel_data[kernel_name]["duration"] += float(kernel.get("dur", 0))
-            if kernel.get("stream") is not None:
-                kernel_data[kernel_name]["streams"].add(kernel["stream"])
-        
-        return dict(kernel_data)

@@ -260,8 +260,25 @@ def main() -> int:
                 f"Busy Time: {data['true_gpu_busy_time'] / 1000:.4f} ms"
             )
         
-        # Top-K kernels
-        trace_obj.get_top_k_kernels(events["gpu"]["kernels"])
+        # Top-K kernels 
+        top_k_kernels = trace_obj.get_top_k_kernels(events["gpu"]["kernels"], k=3)
+        
+        if top_k_kernels["by_frequency"]:
+            print("--- Top-3 Kernels by Frequency ---")
+            for i, (name, data) in enumerate(top_k_kernels["by_frequency"], 1):
+                print(
+                    f"#{i}: {name} "
+                    f"(Frequency: {int(data['frequency'])}, "
+                    f"Total Duration: {data['duration'] / 1000:.4f} ms)"
+                )
+            
+            print("--- Top-3 Kernels by Duration ---")
+            for i, (name, data) in enumerate(top_k_kernels["by_duration"], 1):
+                print(
+                    f"#{i}: {name} "
+                    f"(Total Duration: {data['duration'] / 1000:.4f} ms, "
+                    f"Frequency: {int(data['frequency'])})"
+                )
         
         # Fusion analysis
         if args.fusion:
@@ -297,7 +314,7 @@ def main() -> int:
             config=config_dict,
             metrics=metrics_dict,
             stream_info=stream_info,
-            kernel_events=events["gpu"]["kernels"],
+            top_k_kernels=top_k_kernels,
         )
         
         print("Analysis complete.")
