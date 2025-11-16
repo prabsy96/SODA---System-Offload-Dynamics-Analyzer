@@ -17,16 +17,7 @@ import numpy as np
 import torch
 
 from . import util
-
-def set_seed(seed: int) -> None:
-    """
-    Set seed for reproducibility.
-    
-    Args:
-        seed: Seed value to ensure deterministic behavior.
-    """
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+from .util import SodaProfiler, ModelHandler
 
 def get_args_parser() -> argparse.ArgumentParser:
     """Create and return argument parser."""
@@ -147,12 +138,6 @@ def main() -> int:
     parser = get_args_parser()
     args = parser.parse_args()
     validate_args(args)
-
-    # Set seed for reproducibility
-    set_seed(args.seed)
-
-    # Create output directory if it doesn't exist
-    args.output_dir.mkdir(parents=True, exist_ok=True)
     
     # Setup logging: redirect print to both stdout and log file
     log_path, output_file, original_print = setup_logging(args.output_dir)
@@ -160,50 +145,24 @@ def main() -> int:
     try:
         # --- Model Loading ---
         print(f"Loading model: {args.model} with precision {args.precision}...")
-        model_obj = util.Model(
+        model_handler = ModelHandler(
             model_name=args.model,
             device=args.device,
             compile_type=args.compile_type,
             precision=args.precision,
         )
-
-        if "bert" in args.model or "roberta" in args.model:
-            model, tokenizer = model_obj.load_encoder()
-            is_decoder = False
-        else:
-            model, tokenizer = model_obj.load_decoder()
-            is_decoder = True
-        print("Model loaded successfully.")
-
+        
         # --- Synthetic Data Generation ---
         print(f"Generating synthetic input: batch_size={args.batch_size}, seq_len={args.seq_len}")
-        token_ids = {
-            "input_ids": torch.randint(
-                1, tokenizer.vocab_size, size=(args.batch_size, args.seq_len), device=args.device
-            ),
-            "attention_mask": torch.ones(
-                args.batch_size, args.seq_len, device=args.device
-            ),
-        }
-
-        # --- Tracing and Analysis ---
-        trace_dir_name = f"{args.model.replace('/', '_')}_{args.compile_type}_bs{args.batch_size}_sl{args.seq_len}"
-        profiler = util.SodaProfiler(
-            name=trace_dir_name,
-            file="trace.json",
-            path=str(args.output_dir),
-            model=model,
-            args=args,
+        model_inputs = model_handler.generate_synthetic_inputs(
+            args.batch_size, args.seq_len, args.device
         )
 
+        # --- Tracing and Analysis ---
+        profiler = SodaProfiler(model_handler=model_handler, args=args)
         #  Single warm-up and trace run is performed.
         print("Starting model profiling run...")
-        if is_decoder:
-            json_file = profiler.trace_forward_pass_for_decoder(
-                token_ids, tokenizer, args.batch_size, args.seq_len
-            )
-        else:
-            json_file = profiler.trace_forward_pass_for_encoder(token_ids, tokenizer)
+        json_file = profiler.profile_forward_pass(model_inputs)
         print(f"Chrome trace file generated at: {json_file}")
 
         # Data Processing and Reporting

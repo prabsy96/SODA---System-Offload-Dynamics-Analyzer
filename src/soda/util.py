@@ -9,12 +9,9 @@ This module provides core functionalities including:
 - Graph: A utility for visualizing model layer to ATen op mappings (currently unused).
 """
 
+import argparse
 import json
 import logging
-import os
-import random
-import re
-import time
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, DefaultDict, Dict, List, Set, Tuple
@@ -70,7 +67,7 @@ def get_clean_kernel_name(kernel_name: str) -> str:
     
     return clean_kernel_name.strip()
 
-class Model:
+class ModelHandler:
     """Handles loading of Hugging Face models with specific configurations."""
 
     def __init__(self, model_name: str, device: str, compile_type: str, precision: str):
@@ -92,8 +89,16 @@ class Model:
             "bfloat16": torch.bfloat16,
         }
         self.precision = self.precision_map[precision]
+        
+        # Determine if model is decoder or encoder
+        self.is_decoder = not ("bert" in model_name.lower() or "roberta" in model_name.lower())
+        
+        # Load model; this will set self.pytorch_model and self.tokenizer
+        self.pytorch_model = None
+        self.tokenizer = None
+        self.load()
 
-    def _get_common_kwargs(self) -> Dict[str, Any]:
+    def get_kwargs(self) -> Dict[str, Any]:
         """Returns common kwargs for model loading."""
         return {
             "dtype": self.precision,
@@ -107,7 +112,7 @@ class Model:
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         
-        kwargs = self._get_common_kwargs()
+        kwargs = self.get_kwargs()
         if self.compile_type == "torch.compile":
             kwargs.update({"attn_implementation": "sdpa"})
             model = transformers.AutoModelForSequenceClassification.from_pretrained(
@@ -127,6 +132,10 @@ class Model:
         
         if hasattr(model, 'generation_config') and model.generation_config.pad_token_id is None:
             model.generation_config.pad_token_id = tokenizer.eos_token_id
+        
+        # Store model and tokenizer
+        self.pytorch_model = model
+        self.tokenizer = tokenizer
         return model, tokenizer
 
     def load_decoder(self) -> Tuple[transformers.PreTrainedModel, transformers.PreTrainedTokenizer]:
@@ -141,7 +150,7 @@ class Model:
         if hasattr(config, 'pad_token_id') and config.pad_token_id is None:
             config.pad_token_id = tokenizer.eos_token_id
         
-        kwargs = self._get_common_kwargs()
+        kwargs = self.get_kwargs()
         if self.compile_type == "torch.compile":
             kwargs.update({"attn_implementation": "sdpa"})
             model = transformers.AutoModelForCausalLM.from_pretrained(
@@ -160,35 +169,93 @@ class Model:
                 self.model_name, config=config, **kwargs
             ).eval()
         
+        # Store model and tokenizer
+        self.pytorch_model = model
+        self.tokenizer = tokenizer
         return model, tokenizer
+    
+    def load(self) -> Tuple[transformers.PreTrainedModel, transformers.PreTrainedTokenizer]:
+        """
+        Loads the model and tokenizer based on model type (encoder or decoder).
+        
+        Returns:
+            Tuple of (model, tokenizer).
+        """
+        if self.is_decoder:
+            return self.load_decoder()
+        else:
+            return self.load_encoder()
+    
+    def generate_synthetic_inputs(self, batch_size: int, seq_len: int, device: str) -> Dict[str, torch.Tensor]:
+        """
+        Generates synthetic tokenized inputs for profiling.
+        
+        Args:
+            batch_size: Batch size for the inputs.
+            seq_len: Sequence length for the inputs.
+            device: Device to create tensors on ('cpu' or 'cuda').
+            
+        Returns:
+            Dictionary with 'input_ids' and 'attention_mask' tensors.
+        """
+        return {
+            "input_ids": torch.randint(
+                1, self.tokenizer.vocab_size, size=(batch_size, seq_len), device=device
+            ),
+            "attention_mask": torch.ones(
+                batch_size, seq_len, device=device
+            ),
+        }
 
 
 class SodaProfiler:
     """
     Handles model tracing, profile data parsing, and metric generation.
     """
-    def __init__(self, name: str, file: str, path: str, model: nn.Module, args):
+    @staticmethod
+    def generate_trace_name(args: argparse.Namespace) -> str:
         """
-        Initializes the tracer.
+        Generates a unique trace directory name from arguments.
+        
+        Args:
+            args: Parsed command-line arguments.
+            
+        Returns:
+            Trace directory name string.
+        """
+        return f"{args.model.replace('/', '_')}_{args.compile_type}_bs{args.batch_size}_sl{args.seq_len}"
+
+    def __init__(self, model_handler: 'ModelHandler', args: argparse.Namespace):
+        """
+        Initializes the profiler.
+
+        Sets up the profiler and derives name, file, and path from parsed arguments.
 
         Args:
-            name: A unique name for this tracing run (e.g., model name + config).
-            file: The filename for the output trace file (e.g., 'trace.json').
-            path: The base directory to save all output artifacts.
-            model: The PyTorch model instance to trace.
-            args: Command-line arguments object.
+            model_handler: The ModelHandler class instance (contains pytorch_model, tokenizer, is_decoder).
+            args: Parsed and validated command-line arguments.
         """
-        self.name = name
-        self.file = file
-        self.path = Path(path)
-        self.model = model
         self.args = args
+        self.model_handler = model_handler
+        
+        # Set seed for reproducibility
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+        
+        # Create output directory if it doesn't exist
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Derive name, file, path from args
+        self.name = self.generate_trace_name(args)
+        self.file = "trace.json"
+        self.path = Path(args.output_dir)
+        
         self.trace = None
         self.events = None
         self.dump_dir = self.path / self.name
         self.dump_dir.mkdir(parents=True, exist_ok=True)
 
-    def trace_forward_pass_for_encoder(self, inputs: Dict[str, torch.Tensor], tokenizer) -> str:
+    def trace_forward_pass_for_encoder(self, inputs: Dict[str, torch.Tensor]) -> str:
         """
         Profiles the forward pass of an encoder model.
 
@@ -202,7 +269,7 @@ class SodaProfiler:
         # Warm-up runs
         with torch.no_grad():
             for _ in range(5):
-                self.model(**inputs)
+                self.model_handler.pytorch_model(**inputs)
         
         # Profiled run
         with torch.no_grad():
@@ -212,7 +279,7 @@ class SodaProfiler:
                 with_flops=True,
                 profile_memory=True,
             ) as prof:
-                self.model(**inputs)
+                self.model_handler.pytorch_model(**inputs)
 
         json_file = self.dump_dir / self.file
         prof.export_chrome_trace(str(json_file))
@@ -221,23 +288,44 @@ class SodaProfiler:
         self.trace = self.load_trace_file(json_file)
         return str(json_file)
 
-    def trace_forward_pass_for_decoder(self, inputs: Dict[str, torch.Tensor], tokenizer, bs: int, sq: int) -> str:
+    def profile_forward_pass(self, inputs: Dict[str, torch.Tensor], batch_size: int = None, seq_len: int = None) -> str:
         """
-        Profiles the generate step of a decoder model.
-
+        Profiles the forward pass of the model (encoder or decoder).
+        
         Args:
             inputs: A dictionary of tokenized inputs.
-            tokenizer: The model's tokenizer.
+            batch_size: Optional batch size. Defaults to self.args.batch_size.
+            seq_len: Optional sequence length. Defaults to self.args.seq_len.
+            
+        Returns:
+            The path to the generated Chrome trace JSON file.
+        """
+        batch_size = self.args.batch_size if batch_size is None else batch_size
+        seq_len = self.args.seq_len if seq_len is None else seq_len
+            
+        if self.model_handler.is_decoder:
+            return self.trace_forward_pass_for_decoder(
+                inputs, batch_size, seq_len
+            )
+        else:
+            return self.trace_forward_pass_for_encoder(inputs)
+
+    def trace_forward_pass_for_decoder(self, inputs: Dict[str, torch.Tensor], bs: int, sq: int) -> str:
+        """
+        Profiles the generate step of a decoder model.
+        
+        Args:
+            inputs: A dictionary of tokenized inputs.
             bs: Batch size.
             sq: Sequence length.
-
+            
         Returns:
             The path to the generated Chrome trace JSON file.
         """
         # Warm-up runs
         with torch.no_grad():
             for _ in range(5):
-                self.model.generate(**inputs, max_new_tokens=1, do_sample=False, pad_token_id=tokenizer.pad_token_id)
+                self.model_handler.pytorch_model.generate(**inputs, max_new_tokens=1, do_sample=False, pad_token_id=self.model_handler.tokenizer.pad_token_id)
 
         # Profiled run
         with torch.no_grad():
@@ -247,7 +335,7 @@ class SodaProfiler:
                 with_flops=True,
                 profile_memory=True,
             ) as prof:
-                self.model.generate(**inputs, max_new_tokens=1, do_sample=False, pad_token_id=tokenizer.pad_token_id)
+                self.model_handler.pytorch_model.generate(**inputs, max_new_tokens=1, do_sample=False, pad_token_id=self.model_handler.tokenizer.pad_token_id)
         
         json_file = self.dump_dir / self.file
         prof.export_chrome_trace(str(json_file))
