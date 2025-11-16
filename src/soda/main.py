@@ -212,17 +212,17 @@ def main() -> int:
         trace_data = trace_obj._load_trace_file(Path(json_file))
         events = trace_obj.collect_events_from_trace(trace_data)
         
-        dependencies = trace_obj.generate_dependencies(events, json_file)
+        dependencies = trace_obj.generate_dependencies(events)
         
         # Analyze per-stream metrics
         stream_info = trace_obj.analyze_per_stream(events["gpu"]["all"])
         
         # Calculate metrics 
-        total_gpu_time_span = trace_obj.calculate_total_gpu_time_span(json_file)
-        true_gpu_busy_time = trace_obj.calculate_true_gpu_busy_time(json_file)
-        gpu_utilization = trace_obj.calculate_gpu_utilization(json_file)
+        total_gpu_time_span = trace_obj.calculate_total_gpu_time_span(events)
+        true_gpu_busy_time = trace_obj.calculate_true_gpu_busy_time(events)
+        gpu_utilization = trace_obj.calculate_gpu_utilization(events)
         gpu_idle_time = max(0.0, total_gpu_time_span - true_gpu_busy_time)
-        total_kernel_exec_time = trace_obj.calculate_total_kernel_exec_time(json_file)
+        total_kernel_exec_time = trace_obj.calculate_total_kernel_exec_time(events)
         
         num_kernels = len(events["gpu"]["kernels"])
         num_gpu_events = len(events["gpu"]["all"])

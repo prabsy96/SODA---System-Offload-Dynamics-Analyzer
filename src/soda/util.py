@@ -313,6 +313,8 @@ class TraceModel:
                     "name": event.get("name", ""),
                     "correlation": correlation,
                     "stream": args.get("stream"),
+                    "device": args.get("device"),
+                    "context": args.get("context"),
                     "ts": event.get("ts"),
                     "dur": event.get("dur"),
                     "bytes": args.get("bytes"),
@@ -332,7 +334,7 @@ class TraceModel:
             }
         }
 
-    def calculate_total_gpu_time_span(self, file: str) -> float:
+    def calculate_total_gpu_time_span(self, events: Dict[str, Any]) -> float:
         """
         Calculates the end-to-end GPU time span by finding min start and max end
         across GPU execution events (kernel, gpu_memcpy, gpu_memset).
@@ -341,53 +343,50 @@ class TraceModel:
         Excludes cuda_runtime (CPU-side calls).
         
         Args:
-            file: Path to the Chrome trace JSON file.
+            events: Dictionary containing collected events from trace, organized hierarchically:
+                - cpu: CPU-side events (ops, launches)
+                - gpu: GPU-side events (kernels, memory, all)
             
         Returns:
             Time span in microseconds (max_end - min_start).
         """
-        trace_obj = self._load_trace_file(Path(file))
-        trace_events = trace_obj.get("traceEvents", [])
+        gpu_events = events["gpu"]["all"]
         
-        gpu_timestamps = []
-        for event in trace_events:
-            cat = event.get("cat", "")
-            if cat in ("kernel", "gpu_memcpy", "gpu_memset"):
-                start_time = float(event.get("ts", 0))
-                dur = float(event.get("dur", 0))
-                end_time = start_time + dur
-                gpu_timestamps.append((start_time, end_time))
-        
-        if not gpu_timestamps:
+        if not gpu_events:
             return 0.0
         
-        min_start = min(start_time for start_time, _ in gpu_timestamps)
-        max_end = max(end_time for _, end_time in gpu_timestamps)
+        gpu_event_intervals = []
+        for event in gpu_events:
+            start_time = float(event.get("ts", 0))
+            end_time = start_time + float(event.get("dur", 0))
+            gpu_event_intervals.append((start_time, end_time))
+        
+        min_start = min(start_time for start_time, _ in gpu_event_intervals)
+        max_end = max(end_time for _, end_time in gpu_event_intervals)
         
         return max_end - min_start
 
-    def calculate_total_kernel_exec_time(self, file: str) -> float:
+    def calculate_total_kernel_exec_time(self, events: Dict[str, Any]) -> float:
         """
         Calculates total kernel execution time by summing durations of all kernel events.
         
         Args:
-            file: Path to the Chrome trace JSON file.
+            events: Dictionary containing collected events from trace, organized hierarchically:
+                - cpu: CPU-side events (ops, launches)
+                - gpu: GPU-side events (kernels, memory, all)
             
         Returns:
             Total kernel execution time in microseconds.
         """
-        trace_obj = self._load_trace_file(Path(file))
-        trace_events = trace_obj.get("traceEvents", [])
+        kernel_events = events["gpu"]["kernels"]
         
-        total_exec_time = 0.0
-        for event in trace_events:
-            if event.get("cat", "") == "kernel":
-                dur = float(event.get("dur", 0))
-                total_exec_time += dur
+        total_kernel_exec_time = 0.0
+        for kernel in kernel_events:
+            total_kernel_exec_time += float(kernel.get("dur", 0))
         
-        return total_exec_time
+        return total_kernel_exec_time
 
-    def calculate_true_gpu_busy_time(self, file: str) -> float:
+    def calculate_true_gpu_busy_time(self, events: Dict[str, Any]) -> float:
         """
         Calculates GPU busy time by merging overlapping GPU event intervals.
         
@@ -397,26 +396,25 @@ class TraceModel:
         time is counted once.
         
         Args:
-            file: Path to the Chrome trace JSON file.
+            events: Dictionary containing collected events from trace, organized hierarchically:
+                - cpu: CPU-side events (ops, launches)
+                - gpu: GPU-side events (kernels, memory, all)
             
         Returns:
             Merged GPU busy time in microseconds.
         """
-        trace_obj = self._load_trace_file(Path(file))
-        trace_events = trace_obj.get("traceEvents", [])
-        
-        # Extract GPU event intervals (kernel, gpu_memcpy, gpu_memset) 
-        gpu_event_intervals = []
-        for event in trace_events:
-            if event.get("cat", "") in ("kernel", "gpu_memcpy", "gpu_memset"):
-                start_time = float(event.get("ts", 0))
-                dur = float(event.get("dur", 0))
-                end_time = start_time + dur
-                gpu_event_intervals.append((start_time, end_time))
+        gpu_events = events["gpu"]["all"]
         
         # Edge case: no GPU events
-        if not gpu_event_intervals:
+        if not gpu_events:
             return 0.0
+        
+        # Extract GPU event intervals
+        gpu_event_intervals = []
+        for event in gpu_events:
+            start_time = float(event.get("ts", 0))
+            end_time = start_time + float(event.get("dur", 0))
+            gpu_event_intervals.append((start_time, end_time))
         
         # Sort by start time
         gpu_event_intervals = sorted(gpu_event_intervals)
@@ -441,24 +439,27 @@ class TraceModel:
         
         return true_gpu_busy_time
 
-    def calculate_gpu_utilization(self, file: str) -> float:
+    def calculate_gpu_utilization(self, events: Dict[str, Any]) -> float:
         """
         Calculates GPU utilization percentage.
         
         Args:
-            file: Path to the Chrome trace JSON file.
+            events: Dictionary containing collected events from trace, organized hierarchically:
+                - cpu: CPU-side events (ops, launches)
+                - gpu: GPU-side events (kernels, memory, all)
             
         Returns:
             GPU utilization as a percentage (0.0 to 100.0).
         """
         # Calculate denominator: time span of GPU execution events only 
-        total_gpu_time_span = self.calculate_total_gpu_time_span(file)
+        total_gpu_time_span = self.calculate_total_gpu_time_span(events)
+        
         # Avoid division by zero
         if total_gpu_time_span == 0.0:
             return 0.0
         
         # Calculate numerator: non overlapping busy time of GPU execution events
-        true_gpu_busy_time = self.calculate_true_gpu_busy_time(file)
+        true_gpu_busy_time = self.calculate_true_gpu_busy_time(events)
         
         # Calculate GPU utilization percentage
         gpu_utilization = (true_gpu_busy_time / total_gpu_time_span)
@@ -519,13 +520,14 @@ class TraceModel:
         
         return dict(stream_info)
 
-    def generate_dependencies(self, events: Dict[str, Any], file: str) -> List[Tuple]:
+    def generate_dependencies(self, events: Dict[str, Any]) -> List[Tuple]:
         """
         Analyzes dependencies between CUDA runtime calls and kernel launches.
 
         Args:
-            events: Dictionary with hierarchical structure (cpu, gpu)
-            file: Path to the JSON trace file (unused, kept for compatibility).
+            events: Dictionary containing collected events from trace, organized hierarchically:
+                - cpu: CPU-side events (ops, launches)
+                - gpu: GPU-side events (kernels, memory, all)
 
         Returns:
             List of (kernel, cuda_launch) dependency tuples.
