@@ -367,16 +367,16 @@ class TraceModel:
         
         for event in trace.get("traceEvents", []):
             if event.get("ph") == "X":  # Only complete events (excludes flow markers)
-                ts = event.get("ts")
-                dur = event.get("dur", 0)
-                if ts is not None:
-                    all_timestamps.append((ts, dur))
+                start_time = float(event.get("ts"))
+                duration = float(event.get("dur", 0))
+                end_time = start_time + duration
+                all_timestamps.append((start_time, end_time))
         
         if not all_timestamps:
             return 0.0
         
-        min_start = min(ts for ts, _ in all_timestamps)
-        max_end = max(ts + dur for ts, dur in all_timestamps)
+        min_start = min(start_time for start_time, _ in all_timestamps)
+        max_end = max(end_time for _, end_time in all_timestamps)
         
         return max_end - min_start
 
