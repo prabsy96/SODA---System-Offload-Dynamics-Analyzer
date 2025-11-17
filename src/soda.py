@@ -610,50 +610,60 @@ class SodaProfiler:
         
         return dict(stream_info)
 
-    def generate_dependencies(self) -> List[Tuple]:
+    def build_event_causal_chains(self) -> List[Dict]:
         """
-        Analyzes dependencies between CUDA runtime calls and kernel launches.
-
+        Build event causal chains linking CPU operations, CUDA launches, and kernels.
+        
         Uses self.events.
 
         Returns:
-            List of (kernel, cuda_launch) dependency tuples.
+            List of event causal chain dictionaries with keys: kernel, cuda_launch, cpu_op.
         """
         gpu_events = self.events["gpu"]
+        cpu_ops = self.events["cpu"]["ops"]
         cuda_launches = self.events["cpu"]["launches"]
         kernel_events = gpu_events["kernels"]
 
         self.logger.info(f"Analyzing {len(kernel_events)} kernel events from profiled run.")
 
-        dependencies = []
+        event_causal_chains = []
         for kernel in kernel_events:
-            corr = kernel.get("correlation")
-            if corr is not None and corr in cuda_launches:
-                dependencies.append((kernel, cuda_launches[corr]))
+            external_id = kernel.get("external_id")
+            correlation = kernel.get("correlation")
+            cpu_op = cpu_ops.get(external_id) if external_id is not None else None
+            cuda_launch = cuda_launches.get(correlation) if correlation is not None else None
+            
+            event_causal_chains.append({
+                "kernel": kernel,
+                "cuda_launch": cuda_launch,
+                "cpu_op": cpu_op,
+            })
         
-        return dependencies
+        return event_causal_chains
 
-    def calculate_launch_tax(self, dependence: List[Tuple]) -> Dict[str, float]:
+    def calculate_launch_tax(self, event_causal_chains: List[Dict]) -> Dict[str, float]:
         """
         Calculates the total and average kernel launch tax.
 
         Args:
-            dependence: List of (kernel, runtime) dependency tuples.
+            event_causal_chains: List of event causal chain dictionaries.
 
         Returns:
             Dictionary with "total" and "avg" keys (in microseconds).
         """
-        if not dependence:
+        if not event_causal_chains:
             return {"total": 0.0, "avg": 0.0}
 
         total_tax_us = 0.0
-        for kernel, runtime in dependence:
-            if kernel.get("ts") is not None and runtime.get("ts") is not None:
-                kernel_tax_us = kernel["ts"] - runtime["ts"]
-                assert kernel_tax_us >= 0, f"Negative kernel tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={runtime['ts']}, tax={kernel_tax_us}"
+        for chain in event_causal_chains:
+            kernel = chain.get("kernel")
+            cuda_launch = chain.get("cuda_launch")
+            if kernel and cuda_launch and kernel.get("ts") is not None and cuda_launch.get("ts") is not None:
+                kernel_tax_us = kernel["ts"] - cuda_launch["ts"]
+                assert kernel_tax_us >= 0, f"Negative kernel tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={cuda_launch['ts']}, tax={kernel_tax_us}"
                 total_tax_us += kernel_tax_us
 
-        num_kernels = len(dependence)
+        num_kernels = len(event_causal_chains)
         avg_tax_us = total_tax_us / num_kernels if num_kernels > 0 else 0.0
 
         return {
@@ -738,48 +748,53 @@ class SodaProfiler:
             "by_duration": top_k_by_dur
         }
 
-    def kernelchains(self, dependence: List[Tuple], exact_length: int, prox_score_threshold: float):
+    def kernelchains(self, event_causal_chains: List[Dict], exact_length: int, prox_score_threshold: float):
         """
         Analyzes kernel launch sequences to find opportunities for fusion.
 
         Args:
-            dependence: List of (kernel, runtime) dependency tuples.
-            exact_length: The exact length of kernel chains to analyze.
+            event_causal_chains: List of event causal chain dictionaries.
+            exact_length: The exact length of sequences to analyze.
             prox_score_threshold: The proximity score required to recommend a fusion (e.g., 1.0 for deterministic).
         """
         if exact_length < 2:
-            self.logger.warning("Kernel chain length must be at least 2.")
+            self.logger.warning("Sequence length must be at least 2.")
             return
 
         all_segments = []
         current_segment = []
-        # Separate dependencies by synchronization points
-        for kernel, runtime in dependence:
-            if 'cudaStreamSynchronize' in runtime.get("name", ""):
+        # Separate event causal chains by synchronization points
+        for chain in event_causal_chains:
+            cuda_launch = chain.get("cuda_launch")
+            if cuda_launch and 'cudaStreamSynchronize' in cuda_launch.get("name", ""):
                 if current_segment:
                     all_segments.append(current_segment)
                 current_segment = []
-            current_segment.append((kernel, runtime))
+            current_segment.append(chain)
         if current_segment:
             all_segments.append(current_segment)
 
-        total_kernel_launches = len(dependence)
+        total_kernel_launches = len(event_causal_chains)
         unique_fusion_candidates: Set[Tuple[str, ...]] = set()
         
-        # Process each segment to find chains
+        # Process each segment to find sequences
         for segment in all_segments:
             current_chain = deque(maxlen=exact_length)
-            for kernel, _ in segment:
-                current_chain.append(kernel["name"])
-                if len(current_chain) == exact_length:
-                    chain_tuple = tuple(current_chain)
-                    unique_fusion_candidates.add(chain_tuple)
+            for chain in segment:
+                kernel = chain.get("kernel")
+                if kernel:
+                    current_chain.append(kernel["name"])
+                    if len(current_chain) == exact_length:
+                        chain_tuple = tuple(current_chain)
+                        unique_fusion_candidates.add(chain_tuple)
 
         # Calculate proximity scores
         fusion_recommendations = []
         kernel_freq: DefaultDict[str, int] = defaultdict(int)
-        for kernel, _ in dependence:
-            kernel_freq[kernel["name"]] += 1
+        for chain in event_causal_chains:
+            kernel = chain.get("kernel")
+            if kernel:
+                kernel_freq[kernel["name"]] += 1
             
         for chain in unique_fusion_candidates:
             # Count occurrences of this exact chain
@@ -825,17 +840,17 @@ class SodaProfiler:
         }
 
     
-    def preprocess_trace(self) -> List[Tuple]:
+    def preprocess_trace(self) -> List[Dict]:
         """
-        Preprocesses trace data by collecting events and generating dependencies.
+        Preprocesses trace data by collecting events and building event causal chains.
         
         Returns:
-            Kernel dependency graph (list of tuples).
+            Event causal chains (list of dictionaries).
         """
         # Get all events organized by category 
         self.collect_events_from_trace()
-        dependencies = self.generate_dependencies()
-        return dependencies
+        event_causal_chains = self.build_event_causal_chains()
+        return event_causal_chains
     
     def analyze(self) -> Dict[str, Any]:
         """
@@ -849,12 +864,12 @@ class SodaProfiler:
             - metrics: Performance metrics (inference time, GPU utilization, etc.)
             - stream_info: Per-stream analysis
             - top_k_kernels: Top-k kernels by frequency and duration
-            - dependencies: Kernel dependency graph
+            - event_causal_chains: Event causal chains
             - avg_kernel_dur: Average kernel duration results
         """
         self.logger.info("Analyzing trace data to generate reports...")
         # Preprocess trace data
-        dependencies = self.preprocess_trace()
+        event_causal_chains = self.preprocess_trace()
         
         # Analyze per-stream metrics
         stream_info = self.analyze_per_stream()
@@ -869,7 +884,7 @@ class SodaProfiler:
         
         # Kernel metrics
         kernel_exec_time = self.calculate_kernel_exec_time()
-        launch_tax = self.calculate_launch_tax(dependencies)
+        launch_tax = self.calculate_launch_tax(event_causal_chains)
         avg_kernel_dur = self.get_average_kernel_duration()
         top_k_kernels = self.get_top_k_kernels(k=3)
         
@@ -879,7 +894,7 @@ class SodaProfiler:
             self.logger.info("--- Kernel Fusion Analysis ---")
             fusion_results = {}
             for f in self.args.fusion:
-                fusion_results[f] = self.kernelchains(dependencies, f, self.args.prox_score)
+                fusion_results[f] = self.kernelchains(event_causal_chains, f, self.args.prox_score)
         
         # Build metrics dictionary 
         metrics = {
@@ -905,7 +920,7 @@ class SodaProfiler:
             "metrics": metrics,
             "stream_info": stream_info,
             "top_k_kernels": top_k_kernels,
-            "dependencies": dependencies,
+            "event_causal_chains": event_causal_chains,
             "avg_kernel_dur": avg_kernel_dur,
             "fusion_results": fusion_results,
         }
