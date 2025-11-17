@@ -69,7 +69,7 @@ cd "$SODA_ROOT"
 
 python -m soda \
   --model gpt2 \
-  --output-dir "$SODA_RESULTS" \
+  --output-dir "$SODA_OUTPUT" \
   --batch-size 1 \
   --seq-len 128 \
   --fusion 2 3 \

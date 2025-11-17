@@ -79,7 +79,7 @@ class SodaProfiler:
             "--output-dir",
             type=Path,
             dest="output_dir",
-            default=Path(os.environ.get("SODA_RESULTS", ".")),
+            default=Path(os.environ.get("SODA_OUTPUT", ".")),
             help="Output directory for analysis artifacts (traces, reports, etc.)",
         )
         parser.add_argument(

@@ -14,10 +14,7 @@ export SODA_ENV_LOADED=1
 # Core directory structure
 export SODA_SRC="$SODA_ROOT/src"
 export SODA_EXAMPLES="$SODA_ROOT/examples"
-export SODA_RESULTS="$SODA_ROOT/soda_results"
-
-# SODA Python package
-export SODA_PACKAGE="$SODA_SRC/soda"
+export SODA_OUTPUT="$SODA_ROOT/output"
 
 # Microbenchmark directories
 export MICROBENCH_DIR="$SODA_SRC/microbench"
@@ -78,7 +75,8 @@ print_soda_env() {
     echo "=== SODA Environment Variables ==="
     echo "SODA_ROOT: $SODA_ROOT"
     echo "SODA_SRC: $SODA_SRC"
-    echo "SODA_PACKAGE: $SODA_PACKAGE"
+    echo "SODA_EXAMPLES: $SODA_EXAMPLES"
+    echo "SODA_OUTPUT: $SODA_OUTPUT"
     echo "PYTHON_VENV: $PYTHON_VENV"
     echo ""
     echo "=== Microbenchmark Directories ==="

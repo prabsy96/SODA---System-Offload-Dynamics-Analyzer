@@ -26,7 +26,7 @@ source "$PYTHON_VENV/bin/activate"
 # Run SODA using CLI command
 soda-cli \
   --model gpt2 \
-  --output-dir "$SODA_RESULTS" \
+  --output-dir "$SODA_OUTPUT" \
   --batch-size 1 \
   --seq-len 128 \
   --fusion 2 3 \
@@ -35,7 +35,7 @@ soda-cli \
 # # Alternative: Run SODA using Python directly
 # python src/soda.py \
 #   --model gpt2 \
-#   --output-dir "$SODA_RESULTS" \
+#   --output-dir "$SODA_OUTPUT" \
 #   --batch-size 1 \
 #   --seq-len 128 \
 #   --fusion 2 3 \
@@ -44,7 +44,7 @@ soda-cli \
 # # Alternative: Run SODA using Python module format
 # python -m soda \
 #   --model gpt2 \
-#   --output-dir "$SODA_RESULTS" \
+#   --output-dir "$SODA_OUTPUT" \
 #   --batch-size 1 \
 #   --seq-len 128 \
 #   --fusion 2 3 \

@@ -56,7 +56,7 @@ pip install -e .
 
 ## Quickstart
 
-Run the analysis on a model (e.g., `gpt2`) using synthetic data. The following command will generate trace files and summary reports in the `soda_results/` directory.
+Run the analysis on a model (e.g., `gpt2`) using synthetic data. The following command will generate trace files and summary reports in the `output/` directory.
 
 For interactive jobs:
 ```bash

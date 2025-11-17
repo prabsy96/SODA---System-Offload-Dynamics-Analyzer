@@ -24,7 +24,7 @@ def main():
     # Option 1: Use the built-in argument parser
     args = SodaProfiler.parse_and_validate_args([
         "--model", "gpt2",
-        "--output-dir", os.environ.get("SODA_RESULTS", "."),
+        "--output-dir", os.environ.get("SODA_OUTPUT", "."),
         "--compile-type", "eager",
         "--device", "cuda",
         "--precision", "float16",
@@ -38,7 +38,7 @@ def main():
     # from types import SodaNamespace
     # args = SodaNamespace(
     #     model="gpt2",
-    #     output_dir=Path(os.environ.get("SODA_RESULTS", ".")),
+    #     output_dir=Path(os.environ.get("SODA_OUTPUT", ".")),
     #     compile_type="eager",
     #     device="cuda",
     #     precision="float16",
