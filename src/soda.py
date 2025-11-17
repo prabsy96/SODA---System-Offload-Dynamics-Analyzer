@@ -648,13 +648,10 @@ class SodaProfiler:
 
         total_tax_us = 0.0
         for kernel, runtime in dependence:
-            runtime_end = runtime["ts"] + runtime.get("dur", 0)
-            kernel_start = kernel["ts"]
-
-            gap_us = kernel_start - runtime_end
-
-            if gap_us > 0:
-                total_tax_us += gap_us
+            if kernel.get("ts") is not None and runtime.get("ts") is not None:
+                kernel_tax_us = kernel["ts"] - runtime["ts"]
+                assert kernel_tax_us >= 0, f"Negative kernel tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={runtime['ts']}, tax={kernel_tax_us}"
+                total_tax_us += kernel_tax_us
 
         num_kernels = len(dependence)
         avg_tax_us = total_tax_us / num_kernels if num_kernels > 0 else 0.0
