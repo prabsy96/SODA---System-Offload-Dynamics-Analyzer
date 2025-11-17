@@ -96,55 +96,63 @@ def validate_args(args: argparse.Namespace) -> None:
         print("Error: CUDA is not available. Please select --device cpu.", file=sys.stderr)
         sys.exit(1)
 
-def setup_logging(output_dir: Path) -> tuple:
+class SodaLogger:
     """
-    Setup logging: configure logger to write to both stdout and log file.
-    No timestamps in output.
-    
-    Args:
-        output_dir: Directory where log file will be created.
-    
-    Returns:
-        Tuple of (log_path, logger) for cleanup.
+    Logger class for SODA that supports both file and console output.
     """
-    import logging
     
-    log_path = output_dir / "soda.log"
+    def __init__(self, output_dir: Path, is_console: bool = True, is_file: bool = True):
+        """
+        Initialize the logger.
+        
+        Args:
+            output_dir: Directory where log file will be created.
+            is_console: If True, write to console/stdout.
+            is_file: If True, write to file.
+        """
+        import logging
+        
+        self.log_path = output_dir / "soda.log"
+        self.is_console = is_console
+        self.is_file = is_file
+        
+        # Create logger
+        self.logger = logging.getLogger("soda")
+        self.logger.setLevel(logging.DEBUG)
+        
+        # Remove existing handlers to avoid duplicates
+        self.logger.handlers.clear()
+        
+        # Create formatter without timestamp
+        formatter = logging.Formatter('%(message)s')
+        
+        # File handler - writes to file
+        if self.is_file:
+            file_handler = logging.FileHandler(self.log_path, mode='w')
+            file_handler.setLevel(logging.DEBUG)
+            file_handler.setFormatter(formatter)
+            self.logger.addHandler(file_handler)
+        
+        # Console handler - writes to stdout
+        if self.is_console:
+            console_handler = logging.StreamHandler(sys.stdout)
+            console_handler.setLevel(logging.DEBUG)
+            console_handler.setFormatter(formatter)
+            self.logger.addHandler(console_handler)
+        
+        # Log initial message
+        self.logger.info(f"Results will be saved to: {output_dir.resolve()}")
     
-    # Create logger
-    logger = logging.getLogger("soda")
-    logger.setLevel(logging.DEBUG)
-    
-    # Remove existing handlers to avoid duplicates
-    logger.handlers.clear()
-    
-    # Create formatter without timestamp
-    formatter = logging.Formatter('%(message)s')
-    
-    # File handler - writes to file
-    file_handler = logging.FileHandler(log_path, mode='w')
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(formatter)
-    
-    # Console handler - writes to stdout
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.DEBUG)
-    console_handler.setFormatter(formatter)
-    
-    # Add handlers to logger
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-    
-    # Log initial message
-    logger.info(f"Results will be saved to: {output_dir.resolve()}")
-    
-    return log_path, logger
+    def cleanup(self):
+        """Clean up logging handlers."""
+        self.logger.handlers.clear()
 
 def main() -> int:
     """Main entry point for the SODA CLI."""
 
     # Check if env.sh has been sourced and loaded
     if not os.environ.get("SODA_ENV_LOADED"):
+        # Use stderr for early errors before logger is set up
         print("Error: SODA environment not loaded.", file=sys.stderr)
         print("Please run: source env.sh", file=sys.stderr)
         sys.exit(1)
@@ -153,9 +161,6 @@ def main() -> int:
     parser = get_args_parser()
     args = parser.parse_args()
     validate_args(args)
-    
-    # Setup logging: configure logger to write to both stdout and log file
-    log_path, logger = setup_logging(args.output_dir)
 
     try:
         # Prepare model handler
@@ -173,42 +178,31 @@ def main() -> int:
             args.batch_size, args.seq_len, args.device
         )
 
-        # Tracing and Analysis
-        profiler = SodaProfiler(model_handler=model_handler, args=args)
-        print("Profiling model forward pass...")
-        trace_file_path = profiler.profile_forward_pass(model_inputs)
-        print(f"Chrome trace file generated at: {trace_file_path}")
+        # Initialize profiler 
+        profiler = SodaProfiler(model_handler=model_handler, args=args, log_console=True, log_file=True)
 
-        # Data Processing and Reporting
-        # Run analysis
+        # Profile forward pass and analyze 
+        profiler.profile_forward_pass(model_inputs)
         profiler.analyze()
-        
-        # Report results
+
+        # Report and save results
         profiler.report()
-        
-        # Save results to JSON
         profiler.save()
-        
-        print("Analysis complete.")
-        print(f"\nLog output saved to {log_path}")
-        
-        # Cleanup logging handlers
-        logger.handlers.clear()
+
+        # Cleanup and exit
+        profiler.exit()
         
         return 0
 
     except FileNotFoundError as e:
-        logger.error(f"Error: File not found: {e}")
-        logger.handlers.clear()
+        print(f"Error: File not found: {e}", file=sys.stderr)
         return 1
     except RuntimeError as e:
-        logger.error(f"Error: Runtime error during profiling: {e}")
-        logger.handlers.clear()
+        print(f"Error: Runtime error during profiling: {e}", file=sys.stderr)
         return 1
     except Exception as e:
-        logger.error(f"Error: Unexpected error: {e}")
-        logger.exception("Full traceback:")
-        logger.handlers.clear()
+        print(f"Error: Unexpected error: {e}", file=sys.stderr)
+        traceback.print_exc()
         return 1
 
 if __name__ == "__main__":

@@ -27,6 +27,54 @@ from torch.profiler import ProfilerActivity, profile
 # Configure logging
 log = logging.getLogger(__name__)
 
+class SodaLogger:
+    """
+    Logger class for SODA that supports both file and console output.
+    """
+    
+    def __init__(self, output_dir: Path, is_console: bool = True, is_file: bool = True):
+        """
+        Initialize the logger.
+        
+        Args:
+            output_dir: Directory where log file will be created.
+            is_console: If True, write to console/stdout.
+            is_file: If True, write to file.
+        """
+        self.log_path = output_dir / "soda.log"
+        self.is_console = is_console
+        self.is_file = is_file
+        
+        # Create logger
+        self.logger = logging.getLogger("soda")
+        self.logger.setLevel(logging.DEBUG)
+        
+        # Remove existing handlers to avoid duplicates
+        self.logger.handlers.clear()
+        
+        # Create formatter without timestamp
+        formatter = logging.Formatter('%(message)s')
+        
+        # File handler - writes to file
+        if self.is_file:
+            file_handler = logging.FileHandler(self.log_path, mode='w')
+            file_handler.setLevel(logging.DEBUG)
+            file_handler.setFormatter(formatter)
+            self.logger.addHandler(file_handler)
+        
+        # Console handler - writes to stdout
+        if self.is_console:
+            console_handler = logging.StreamHandler(sys.stdout)
+            console_handler.setLevel(logging.DEBUG)
+            console_handler.setFormatter(formatter)
+            self.logger.addHandler(console_handler)
+        
+        # Log initial message
+        self.logger.info(f"Results will be saved to: {output_dir.resolve()}")
+    
+    def cleanup(self):
+        """Clean up logging handlers."""
+        self.logger.handlers.clear()
 
 def get_clean_kernel_name(kernel_name: str) -> str:
     """
@@ -225,7 +273,7 @@ class SodaProfiler:
         """
         return f"{args.model.replace('/', '_')}_{args.compile_type}_bs{args.batch_size}_sl{args.seq_len}"
 
-    def __init__(self, model_handler: 'ModelHandler', args: argparse.Namespace):
+    def __init__(self, model_handler: 'ModelHandler', args: argparse.Namespace, log_console: bool = True, log_file: bool = True):
         """
         Initializes the profiler.
 
@@ -234,21 +282,25 @@ class SodaProfiler:
         Args:
             model_handler: The ModelHandler class instance (contains pytorch_model, tokenizer, is_decoder).
             args: Parsed and validated command-line arguments.
+            log_console: If True, write logs to console/stdout.
+            log_file: If True, write logs to file.
         """
         self.args = args
         self.model_handler = model_handler
-        
-        # Set seed for reproducibility
-        torch.manual_seed(args.seed)
-        np.random.seed(args.seed)
-        
-        # Create output directory if it doesn't exist
-        args.output_dir.mkdir(parents=True, exist_ok=True)
         
         # Derive experiment_name, output_dir from args
         self.experiment_name = self.generate_experiment_name(args)
         self.output_dir = Path(args.output_dir) / self.experiment_name
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Setup logger
+        self._soda_logger = SodaLogger(self.output_dir, is_console=log_console, is_file=log_file)
+        self.logger = self._soda_logger.logger
+        
+        # Set seed for reproducibility
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+        
         self.trace_file_path = self.output_dir / "trace.json"
         self.report_file_path = self.output_dir / "report.json"
         
@@ -267,6 +319,8 @@ class SodaProfiler:
         Returns:
             The path to the generated Chrome trace JSON file.
         """
+        self.logger.info("Profiling model forward pass...")
+        
         # Warm-up runs
         with torch.no_grad():
             for _ in range(5):
@@ -286,6 +340,8 @@ class SodaProfiler:
         
         # Load trace data into memory immediately
         self.trace = self.load_trace_file(self.trace_file_path)
+        
+        self.logger.info(f"Chrome trace file generated at: {self.trace_file_path}")
         return str(self.trace_file_path)
 
     def profile_forward_pass(self, inputs: Dict[str, torch.Tensor], batch_size: int = None, seq_len: int = None) -> str:
@@ -322,6 +378,8 @@ class SodaProfiler:
         Returns:
             The path to the generated Chrome trace JSON file.
         """
+        self.logger.info("Profiling model forward pass...")
+        
         # Warm-up runs
         with torch.no_grad():
             for _ in range(5):
@@ -341,6 +399,8 @@ class SodaProfiler:
         
         # Load trace data into memory immediately
         self.trace = self.load_trace_file(self.trace_file_path)
+        
+        self.logger.info(f"Chrome trace file generated at: {self.trace_file_path}")
         return str(self.trace_file_path)
 
     def load_trace_file(self, file_path: Path) -> Dict[str, Any]:
@@ -673,7 +733,7 @@ class SodaProfiler:
         cuda_launches = self.events["cpu"]["launches"]
         kernel_events = gpu_events["kernels"]
 
-        print(f"Analyzing {len(kernel_events)} kernel events from profiled run.")
+        self.logger.info(f"Analyzing {len(kernel_events)} kernel events from profiled run.")
 
         dependencies = []
         for kernel in kernel_events:
@@ -878,27 +938,17 @@ class SodaProfiler:
         }
 
     
-    def preprocess_trace(self) -> Dict[str, Any]:
+    def preprocess_trace(self) -> List[Tuple]:
         """
-        Preprocesses trace data by collecting events, generating dependencies, and analyzing streams.
+        Preprocesses trace data by collecting events and generating dependencies.
         
         Returns:
-            Dictionary containing:
-            - dependencies: Kernel dependency graph
-            - stream_info: Per-stream analysis
+            Kernel dependency graph (list of tuples).
         """
         # Get all events organized by category 
         self.collect_events_from_trace()
-        
         dependencies = self.generate_dependencies()
-        
-        # Analyze per-stream metrics
-        stream_info = self.analyze_per_stream()
-        
-        return {
-            "dependencies": dependencies,
-            "stream_info": stream_info,
-        }
+        return dependencies
     
     def analyze(self) -> Dict[str, Any]:
         """
@@ -915,11 +965,12 @@ class SodaProfiler:
             - dependencies: Kernel dependency graph
             - avg_kernel_dur: Average kernel duration results
         """
-        print("Analyzing trace data to generate reports...")
+        self.logger.info("Analyzing trace data to generate reports...")
         # Preprocess trace data
-        preprocessed = self.preprocess_trace()
-        dependencies = preprocessed["dependencies"]
-        stream_info = preprocessed["stream_info"]
+        dependencies = self.preprocess_trace()
+        
+        # Analyze per-stream metrics
+        stream_info = self.analyze_per_stream()
         
         # General metrics
         total_inference_time = self.calculate_total_inference_time()
@@ -938,7 +989,7 @@ class SodaProfiler:
         # Fusion analysis
         fusion_results = None
         if self.args.fusion:
-            print("--- Kernel Fusion Analysis ---")
+            self.logger.info("--- Kernel Fusion Analysis ---")
             fusion_results = {}
             for f in self.args.fusion:
                 fusion_results[f] = self.kernelchains(dependencies, f, self.args.prox_score)
@@ -987,24 +1038,24 @@ class SodaProfiler:
         top_k_kernels = self.results["top_k_kernels"]
         
         # --- Enhanced Reporting ---
-        print("--- Performance Metrics ---")
-        print(f"Inference runtime (ms): {metrics['inference_runtime_ms']:.4f}")
-        print(f"Total kernel execution time (ms): {metrics['total_kernel_exec_time_ms']:.4f}")
-        print(f"GPU busy time (concurrent-aware) (ms): {metrics['gpu_busy_time_ms']:.4f}")
-        print(f"GPU idle time (ms): {metrics['gpu_idle_time_ms']:.4f}")
-        print(f"GPU utilization: {metrics['gpu_utilization_percent']:.2f}%")
-        print(f"Total kernel launch tax (TKLQT) (ms): {metrics['total_kernel_launch_tax_ms']:.4f}")
-        print(f"Number of kernels: {metrics['num_total_kernels']}")
-        print(f"Active streams: {metrics['active_streams']}")
+        self.logger.info("--- Performance Metrics ---")
+        self.logger.info(f"Inference runtime (ms): {metrics['inference_runtime_ms']:.4f}")
+        self.logger.info(f"Total kernel execution time (ms): {metrics['total_kernel_exec_time_ms']:.4f}")
+        self.logger.info(f"GPU busy time (concurrent-aware) (ms): {metrics['gpu_busy_time_ms']:.4f}")
+        self.logger.info(f"GPU idle time (ms): {metrics['gpu_idle_time_ms']:.4f}")
+        self.logger.info(f"GPU utilization: {metrics['gpu_utilization_percent']:.2f}%")
+        self.logger.info(f"Total kernel launch tax (TKLQT) (ms): {metrics['total_kernel_launch_tax_ms']:.4f}")
+        self.logger.info(f"Number of kernels: {metrics['num_total_kernels']}")
+        self.logger.info(f"Active streams: {metrics['active_streams']}")
         
         if metrics['num_total_kernels'] > 0:
-            print(f"Avg. kernel launch tax per kernel (ms): {metrics['avg_kernel_launch_tax_ms']:.4f}")
-            print(f"Avg. execution time per kernel (ms): {metrics['avg_kernel_exec_time_ms']:.4f}")
+            self.logger.info(f"Avg. kernel launch tax per kernel (ms): {metrics['avg_kernel_launch_tax_ms']:.4f}")
+            self.logger.info(f"Avg. execution time per kernel (ms): {metrics['avg_kernel_exec_time_ms']:.4f}")
         
         # --- Per-Stream Breakdown ---
-        print("--- Per-Stream Analysis ---")
+        self.logger.info("--- Per-Stream Analysis ---")
         for stream_id, data in stream_info.items():
-            print(
+            self.logger.info(
                 f"  Stream {stream_id}: {data['op_count']} ops "
                 f"({data['kernel_count']} kernels), "
                 f"Busy Time: {data['true_gpu_busy_time'] / 1000:.4f} ms"
@@ -1012,17 +1063,17 @@ class SodaProfiler:
         
         # Top-K kernels 
         if top_k_kernels["by_frequency"]:
-            print("--- Top-3 Kernels by Frequency ---")
+            self.logger.info("--- Top-3 Kernels by Frequency ---")
             for i, (name, data) in enumerate(top_k_kernels["by_frequency"], 1):
-                print(
+                self.logger.info(
                     f"#{i}: {name} "
                     f"(Frequency: {int(data['frequency'])}, "
                     f"Total Duration: {data['duration'] / 1000:.4f} ms)"
                 )
             
-            print("--- Top-3 Kernels by Duration ---")
+            self.logger.info("--- Top-3 Kernels by Duration ---")
             for i, (name, data) in enumerate(top_k_kernels["by_duration"], 1):
-                print(
+                self.logger.info(
                     f"#{i}: {name} "
                     f"(Total Duration: {data['duration'] / 1000:.4f} ms, "
                     f"Frequency: {int(data['frequency'])})"
@@ -1106,3 +1157,10 @@ class SodaProfiler:
         
         log.info(f"Metrics exported to: {self.report_file_path}")
         return str(self.report_file_path)
+    
+    def exit(self) -> None:
+        """
+        Cleanup function that prints log location and cleans up logger handlers.
+        """
+        print(f"\nLog output saved to {self._soda_logger.log_path}")
+        self._soda_logger.cleanup()
