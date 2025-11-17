@@ -19,83 +19,6 @@ import torch
 from . import util
 from .util import SodaProfiler, ModelHandler
 
-def get_args_parser() -> argparse.ArgumentParser:
-    """Create and return argument parser."""
-    parser = argparse.ArgumentParser(
-        description="SODA: System Offload Dynamics Analyzer.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument(
-        "-m",
-        "--model",
-        required=True,
-        help="Hugging Face model name or path for profiling and analysis.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path(os.environ["SODA_RESULTS"]),
-        help="Output directory for analysis artifacts (traces, reports, etc.)",
-    )
-    parser.add_argument(
-        "-c",
-        "--compile_type",
-        default="eager",
-        choices=["eager", "torch.compile", "flash-attention"],
-        help="Execution mode for the model.",
-    )
-    parser.add_argument(
-        "-d", "--device", default="cuda", choices=["cpu", "cuda"], 
-        help="Device to run the model on."
-    )
-    parser.add_argument(
-        "-p",
-        "--precision",
-        default="float16",
-        choices=["float32", "float16", "bfloat16"],
-        help="Precision for model weights and operations",
-    )
-    parser.add_argument(
-        "-sl", "--seq_len", type=int, default=512, 
-        help="Sequence length for synthetic input."
-    )
-    parser.add_argument(
-        "-bs", "--batch_size", type=int, default=1, 
-        help="Batch size for synthetic input."
-    )
-    parser.add_argument(
-        "-f",
-        "--fusion",
-        nargs="+",
-        type=int,
-        help="List of kernel chain lengths to analyze for fusion opportunities.",
-    )
-    parser.add_argument(
-        "-ps",
-        "--prox_score",
-        type=float,
-        default=1.0,
-        help="Proximity score threshold (0.0 to 1.0) for fusion recommendations.",
-    )
-    parser.add_argument(
-        "--seed", type=int, default=42, help="Random seed for reproducibility."
-    )
-    parser.add_argument(
-        "--version", action="version", version="%(prog)s 0.1.0"
-    )
-    
-    return parser
-
-def validate_args(args: argparse.Namespace) -> None:
-    """Validate parsed arguments."""
-    if args.device == "cpu" and args.precision == "float16":
-        print("Warning: float16 is not supported on CPU. Forcing float32.")
-        args.precision = "float32"
-
-    if not torch.cuda.is_available() and args.device == "cuda":
-        print("Error: CUDA is not available. Please select --device cpu.", file=sys.stderr)
-        sys.exit(1)
-
 def main() -> int:
     """Main entry point for the SODA CLI."""
 
@@ -106,10 +29,8 @@ def main() -> int:
         print("Please run: source env.sh", file=sys.stderr)
         sys.exit(1)
     
-    # Parse and validate arguments
-    parser = get_args_parser()
-    args = parser.parse_args()
-    validate_args(args)
+    # Parse and validate arguments 
+    args = SodaProfiler.parse_and_validate_args()
 
     try:
         # Prepare model handler
