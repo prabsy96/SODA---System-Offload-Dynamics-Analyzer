@@ -96,57 +96,6 @@ def validate_args(args: argparse.Namespace) -> None:
         print("Error: CUDA is not available. Please select --device cpu.", file=sys.stderr)
         sys.exit(1)
 
-class SodaLogger:
-    """
-    Logger class for SODA that supports both file and console output.
-    """
-    
-    def __init__(self, output_dir: Path, is_console: bool = True, is_file: bool = True):
-        """
-        Initialize the logger.
-        
-        Args:
-            output_dir: Directory where log file will be created.
-            is_console: If True, write to console/stdout.
-            is_file: If True, write to file.
-        """
-        import logging
-        
-        self.log_path = output_dir / "soda.log"
-        self.is_console = is_console
-        self.is_file = is_file
-        
-        # Create logger
-        self.logger = logging.getLogger("soda")
-        self.logger.setLevel(logging.DEBUG)
-        
-        # Remove existing handlers to avoid duplicates
-        self.logger.handlers.clear()
-        
-        # Create formatter without timestamp
-        formatter = logging.Formatter('%(message)s')
-        
-        # File handler - writes to file
-        if self.is_file:
-            file_handler = logging.FileHandler(self.log_path, mode='w')
-            file_handler.setLevel(logging.DEBUG)
-            file_handler.setFormatter(formatter)
-            self.logger.addHandler(file_handler)
-        
-        # Console handler - writes to stdout
-        if self.is_console:
-            console_handler = logging.StreamHandler(sys.stdout)
-            console_handler.setLevel(logging.DEBUG)
-            console_handler.setFormatter(formatter)
-            self.logger.addHandler(console_handler)
-        
-        # Log initial message
-        self.logger.info(f"Results will be saved to: {output_dir.resolve()}")
-    
-    def cleanup(self):
-        """Clean up logging handlers."""
-        self.logger.handlers.clear()
-
 def main() -> int:
     """Main entry point for the SODA CLI."""
 
