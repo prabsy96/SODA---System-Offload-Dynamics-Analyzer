@@ -1,4 +1,4 @@
-# SODA — System-Offload-Dynamics-Analyzer
+# SODA — System Offload Dynamics Analyzer
 
 ![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?style=flat&logo=pytorch&logoColor=white)
 ![CUDA](https://img.shields.io/badge/CUDA-enabled-green?logo=nvidia&logoColor=white)

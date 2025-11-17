@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "soda"
 version = "0.1.0"
-description = "System-Offload-Dynamics-Analyzer (SODA): analyze CPU–GPU dynamics of PyTorch models."
+description = "System Offload Dynamics Analyzer (SODA): analyze CPU–GPU dynamics of PyTorch models."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

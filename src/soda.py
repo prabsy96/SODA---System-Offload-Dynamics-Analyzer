@@ -1,5 +1,6 @@
 """
 SODA: System Offload Dynamics Analyzer
+Analyze CPU–GPU dynamics of PyTorch models.
 """
 
 import argparse
@@ -65,7 +66,7 @@ class SodaProfiler:
     def get_args_parser() -> argparse.ArgumentParser:
         """Create and return argument parser."""
         parser = argparse.ArgumentParser(
-            description="SODA: System Offload Dynamics Analyzer.",
+            description="SODA: System Offload Dynamics Analyzer. Analyze CPU–GPU dynamics of PyTorch models.",
             formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         )
         parser.add_argument(
