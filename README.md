@@ -61,8 +61,10 @@ Run the analysis on a model (e.g., `gpt2`) using synthetic data. The following c
 For interactive jobs:
 ```bash
 # Run from the root of the repository
-./examples/quickstart.sh
+./examples/soda_example.sh
 ```
+
+See `examples/soda_example.py` for a complete example.
 
 For sbatch jobs (you might need to change specifications based on the cluster specs):
 ```bash

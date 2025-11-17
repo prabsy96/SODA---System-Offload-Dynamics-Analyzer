@@ -1,5 +1,5 @@
 #!/bin/bash
-# Quickstart example for SODA
+# SODA example run script
 
 # Check running from root directory
 if [ ! -f "pyproject.toml" ]; then
@@ -14,7 +14,6 @@ if [ -z "$SODA_ENV_LOADED" ]; then
     exit 1
 fi
 
-
 # Activate virtual environment
 if [ ! -d "$PYTHON_VENV" ]; then
     echo "Error: Virtual environment not found at $PYTHON_VENV"
@@ -24,11 +23,29 @@ fi
 
 source "$PYTHON_VENV/bin/activate"
 
-# Run SODA
-python -m soda.main \
+# Run SODA using CLI command
+soda-cli \
   --model gpt2 \
   --output-dir "$SODA_RESULTS" \
-  --batch_size 1 \
-  --seq_len 128 \
+  --batch-size 1 \
+  --seq-len 128 \
   --fusion 2 3 \
-  --prox_score 1.0
+  --prox-score 1.0
+
+# # Alternative: Run SODA using Python directly
+# python src/soda.py \
+#   --model gpt2 \
+#   --output-dir "$SODA_RESULTS" \
+#   --batch-size 1 \
+#   --seq-len 128 \
+#   --fusion 2 3 \
+#   --prox-score 1.0
+
+# # Alternative: Run SODA using Python module format
+# python -m soda \
+#   --model gpt2 \
+#   --output-dir "$SODA_RESULTS" \
+#   --batch-size 1 \
+#   --seq-len 128 \
+#   --fusion 2 3 \
+#   --prox-score 1.0

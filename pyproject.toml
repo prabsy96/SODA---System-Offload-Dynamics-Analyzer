@@ -32,7 +32,7 @@ Homepage = "https://github.com/prabsy96/soda"
 Repository = "https://github.com/prabsy96/soda"
 
 [project.scripts]
-soda-cli = "soda.main:main"
+soda-cli = "soda:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

@@ -1,12 +1,5 @@
 """
-Utility classes and functions for SODA.
-
-This module provides core functionalities including:
-- Model: A wrapper for loading Hugging Face models with specific configurations.
-- Benchmark: E2E latency benchmarking for TTFT and TPOT (currently unused by main but available).
-- SodaProfiler: The main class for profiling a model's forward pass, parsing the
-                PyTorch profiler's output, and calculating performance metrics.
-- Graph: A utility for visualizing model layer to ATen op mappings (currently unused).
+SODA: System Offload Dynamics Analyzer
 """
 
 import argparse
@@ -14,254 +7,60 @@ import json
 import logging
 import os
 import sys
-from collections import defaultdict, deque
-from pathlib import Path
-from typing import Any, DefaultDict, Dict, List, Set, Tuple
-
-import matplotlib.pyplot as plt
-import networkx as nx
-import numpy as np
 import torch
-import torch.nn as nn
+import traceback
+import numpy as np
 import transformers
+from pathlib import Path
+from collections import defaultdict, deque
 from torch.profiler import ProfilerActivity, profile
-
-# Configure logging
-log = logging.getLogger(__name__)
-
-class SodaLogger:
-    """
-    Logger class for SODA that supports both file and console output.
-    """
-    
-    def __init__(self, output_dir: Path, is_console: bool = True, is_file: bool = True):
-        """
-        Initialize the logger.
-        
-        Args:
-            output_dir: Directory where log file will be created.
-            is_console: If True, write to console/stdout.
-            is_file: If True, write to file.
-        """
-        self.log_path = output_dir / "soda.log"
-        self.is_console = is_console
-        self.is_file = is_file
-        
-        # Create logger
-        self.logger = logging.getLogger("soda")
-        self.logger.setLevel(logging.DEBUG)
-        
-        # Remove existing handlers to avoid duplicates
-        self.logger.handlers.clear()
-        
-        # Create formatter without timestamp
-        formatter = logging.Formatter('%(message)s')
-        
-        # File handler - writes to file
-        if self.is_file:
-            file_handler = logging.FileHandler(self.log_path, mode='w')
-            file_handler.setLevel(logging.DEBUG)
-            file_handler.setFormatter(formatter)
-            self.logger.addHandler(file_handler)
-        
-        # Console handler - writes to stdout
-        if self.is_console:
-            console_handler = logging.StreamHandler(sys.stdout)
-            console_handler.setLevel(logging.DEBUG)
-            console_handler.setFormatter(formatter)
-            self.logger.addHandler(console_handler)
-        
-        # Log initial message
-        self.logger.info(f"Results will be saved to: {output_dir.resolve()}")
-    
-    def cleanup(self):
-        """Clean up logging handlers."""
-        self.logger.handlers.clear()
-
-def get_clean_kernel_name(kernel_name: str) -> str:
-    """
-    Extract a clean kernel name from the full signature.
-    
-    Args:
-        kernel_name: Full kernel name (may be a C++ function signature).
-    
-    Returns:
-        Clean kernel name (just the kernel name, no namespace or template parameters).
-    
-    Examples:
-        "void at::native::vectorized_elementwise_kernel<4, ...>" 
-        -> "vectorized_elementwise_kernel"
-        
-        "void at::native::(anonymous namespace)::elementwise_kernel<...>"
-        -> "elementwise_kernel"
-        
-        "turing_fp16_s1688gemm_fp16_128x128_ldg8_f2f_stages_32x1_nn"
-        -> "turing_fp16_s1688gemm_fp16_128x128_ldg8_f2f_stages_32x1_nn"
-    """
-    # Extract everything before '<' (removes template parameters)
-    # This handles cases where '(' appears in template params like "(anonymous namespace)"
-    if '<' in kernel_name:
-        clean_kernel_name = kernel_name.split('<')[0].strip()
-    elif '(' in kernel_name:
-        # If no '<' but has '(', extract before '(' (function parameters)
-        clean_kernel_name = kernel_name.split('(')[0].strip()
-    else:
-        clean_kernel_name = kernel_name
-    
-    # Remove 'void' prefix if present
-    clean_kernel_name = clean_kernel_name.replace('void', '').strip()
-    
-    # Extract just the kernel name (last part after '::')
-    if '::' in clean_kernel_name:
-        clean_kernel_name = clean_kernel_name.split('::')[-1]
-    
-    return clean_kernel_name.strip()
-
-class ModelHandler:
-    """Handles loading of Hugging Face models with specific configurations."""
-
-    def __init__(self, model_name: str, device: str, compile_type: str, precision: str):
-        """
-        Initializes the Model loader.
-
-        Args:
-            model_name: The name of the model from Hugging Face Hub.
-            device: The device to load the model onto ('cpu' or 'cuda').
-            compile_type: The compilation mode ('eager', 'torch.compile', 'flash-attention').
-            precision: The desired data type ('float32', 'float16', 'bfloat16').
-        """
-        self.model_name = model_name
-        self.device = torch.device(device)
-        self.compile_type = compile_type
-        self.precision_map = {
-            "float32": torch.float32,
-            "float16": torch.float16,
-            "bfloat16": torch.bfloat16,
-        }
-        self.precision = self.precision_map[precision]
-        
-        # Determine if model is decoder or encoder
-        self.is_decoder = not ("bert" in model_name.lower() or "roberta" in model_name.lower())
-        
-        # Load model; this will set self.pytorch_model and self.tokenizer
-        self.pytorch_model = None
-        self.tokenizer = None
-        self.load()
-
-    def get_kwargs(self) -> Dict[str, Any]:
-        """Returns common kwargs for model loading."""
-        return {
-            "dtype": self.precision,
-            "device_map": self.device if self.device.type == 'cuda' else 'cpu',
-        }
-
-    def load_encoder(self) -> Tuple[transformers.PreTrainedModel, transformers.PreTrainedTokenizer]:
-        """Loads an encoder-only model (e.g., BERT)."""
-        # Load tokenizer first to get eos_token_id
-        tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_name)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        
-        kwargs = self.get_kwargs()
-        if self.compile_type == "torch.compile":
-            kwargs.update({"attn_implementation": "sdpa"})
-            model = transformers.AutoModelForSequenceClassification.from_pretrained(
-                self.model_name, **kwargs
-            ).eval()
-            model.forward = torch.compile(model.forward, mode="reduce-overhead", backend="inductor")
-        elif self.compile_type == "flash-attention":
-            kwargs.update({"attn_implementation": "flash_attention_2"})
-            model = transformers.AutoModelForSequenceClassification.from_pretrained(
-                self.model_name, **kwargs
-            ).eval()
-        else:  # eager
-            kwargs.update({"attn_implementation": "eager"})
-            model = transformers.AutoModelForSequenceClassification.from_pretrained(
-                self.model_name, **kwargs
-            ).eval()
-        
-        if hasattr(model, 'generation_config') and model.generation_config.pad_token_id is None:
-            model.generation_config.pad_token_id = tokenizer.eos_token_id
-        
-        # Store model and tokenizer
-        self.pytorch_model = model
-        self.tokenizer = tokenizer
-        return model, tokenizer
-
-    def load_decoder(self) -> Tuple[transformers.PreTrainedModel, transformers.PreTrainedTokenizer]:
-        """Loads a decoder-only model (e.g., Llama)."""
-        # Load tokenizer first to get eos_token_id
-        tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_name)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        
-        # Load config and set pad_token_id before model initialization to prevent warning
-        config = transformers.AutoConfig.from_pretrained(self.model_name)
-        if hasattr(config, 'pad_token_id') and config.pad_token_id is None:
-            config.pad_token_id = tokenizer.eos_token_id
-        
-        kwargs = self.get_kwargs()
-        if self.compile_type == "torch.compile":
-            kwargs.update({"attn_implementation": "sdpa"})
-            model = transformers.AutoModelForCausalLM.from_pretrained(
-                self.model_name, config=config, **kwargs
-            ).eval()
-            model.generation_config.cache_implementation = "static"
-            model.forward = torch.compile(model.forward, mode="reduce-overhead", backend="inductor")
-        elif self.compile_type == "flash-attention":
-            kwargs.update({"attn_implementation": "flash_attention_2"})
-            model = transformers.AutoModelForCausalLM.from_pretrained(
-                self.model_name, config=config, **kwargs
-            ).eval()
-        else:  # eager
-            kwargs.update({"attn_implementation": "eager"})
-            model = transformers.AutoModelForCausalLM.from_pretrained(
-                self.model_name, config=config, **kwargs
-            ).eval()
-        
-        # Store model and tokenizer
-        self.pytorch_model = model
-        self.tokenizer = tokenizer
-        return model, tokenizer
-    
-    def load(self) -> Tuple[transformers.PreTrainedModel, transformers.PreTrainedTokenizer]:
-        """
-        Loads the model and tokenizer based on model type (encoder or decoder).
-        
-        Returns:
-            Tuple of (model, tokenizer).
-        """
-        if self.is_decoder:
-            return self.load_decoder()
-        else:
-            return self.load_encoder()
-    
-    def generate_synthetic_inputs(self, batch_size: int, seq_len: int, device: str) -> Dict[str, torch.Tensor]:
-        """
-        Generates synthetic tokenized inputs for profiling.
-        
-        Args:
-            batch_size: Batch size for the inputs.
-            seq_len: Sequence length for the inputs.
-            device: Device to create tensors on ('cpu' or 'cuda').
-            
-        Returns:
-            Dictionary with 'input_ids' and 'attention_mask' tensors.
-        """
-        return {
-            "input_ids": torch.randint(
-                1, self.tokenizer.vocab_size, size=(batch_size, seq_len), device=device
-            ),
-            "attention_mask": torch.ones(
-                batch_size, seq_len, device=device
-            ),
-        }
-
+from typing import Any, DefaultDict, Dict, List, Set, Tuple
 
 class SodaProfiler:
     """
     Handles model tracing, profile data parsing, and metric generation.
     """
+
+    @staticmethod
+    def get_clean_kernel_name(kernel_name: str) -> str:
+        """
+        Extract a clean kernel name from the full signature.
+        
+        Args:
+            kernel_name: Full kernel name (may be a C++ function signature).
+        
+        Returns:
+            Clean kernel name (just the kernel name, no namespace or template parameters).
+        
+        Examples:
+            "void at::native::vectorized_elementwise_kernel<4, ...>" 
+            -> "vectorized_elementwise_kernel"
+            
+            "void at::native::(anonymous namespace)::elementwise_kernel<...>"
+            -> "elementwise_kernel"
+            
+            "turing_fp16_s1688gemm_fp16_128x128_ldg8_f2f_stages_32x1_nn"
+            -> "turing_fp16_s1688gemm_fp16_128x128_ldg8_f2f_stages_32x1_nn"
+        """
+        # Extract everything before '<' (removes template parameters)
+        # This handles cases where '(' appears in template params like "(anonymous namespace)"
+        if '<' in kernel_name:
+            clean_kernel_name = kernel_name.split('<')[0].strip()
+        elif '(' in kernel_name:
+            # If no '<' but has '(', extract before '(' (function parameters)
+            clean_kernel_name = kernel_name.split('(')[0].strip()
+        else:
+            clean_kernel_name = kernel_name
+        
+        # Remove 'void' prefix if present
+        clean_kernel_name = clean_kernel_name.replace('void', '').strip()
+        
+        # Extract just the kernel name (last part after '::')
+        if '::' in clean_kernel_name:
+            clean_kernel_name = clean_kernel_name.split('::')[-1]
+        
+        return clean_kernel_name.strip()
+
     @staticmethod
     def get_args_parser() -> argparse.ArgumentParser:
         """Create and return argument parser."""
@@ -278,12 +77,14 @@ class SodaProfiler:
         parser.add_argument(
             "--output-dir",
             type=Path,
+            dest="output_dir",
             default=Path(os.environ.get("SODA_RESULTS", ".")),
             help="Output directory for analysis artifacts (traces, reports, etc.)",
         )
         parser.add_argument(
             "-c",
-            "--compile_type",
+            "--compile-type",
+            dest="compile_type",
             default="eager",
             choices=["eager", "torch.compile", "flash-attention"],
             help="Execution mode for the model.",
@@ -300,11 +101,11 @@ class SodaProfiler:
             help="Precision for model weights and operations",
         )
         parser.add_argument(
-            "-sl", "--seq_len", type=int, default=512, 
+            "-sl", "--seq-len", dest="seq_len", type=int, default=512, 
             help="Sequence length for synthetic input."
         )
         parser.add_argument(
-            "-bs", "--batch_size", type=int, default=1, 
+            "-bs", "--batch-size", dest="batch_size", type=int, default=1, 
             help="Batch size for synthetic input."
         )
         parser.add_argument(
@@ -316,7 +117,8 @@ class SodaProfiler:
         )
         parser.add_argument(
             "-ps",
-            "--prox_score",
+            "--prox-score",
+            dest="prox_score",
             type=float,
             default=1.0,
             help="Proximity score threshold (0.0 to 1.0) for fusion recommendations.",
@@ -550,7 +352,7 @@ class SodaProfiler:
             elif cat == "kernel" and external_id is not None and correlation is not None:
                 kernel_events.append({
                     "type": "kernel",
-                    "name": get_clean_kernel_name(event.get("name", "")),
+                    "name": self.get_clean_kernel_name(event.get("name", "")),
                     "external_id": external_id,
                     "correlation": correlation,
                     "grid": args.get("grid"),
@@ -948,7 +750,7 @@ class SodaProfiler:
             prox_score_threshold: The proximity score required to recommend a fusion (e.g., 1.0 for deterministic).
         """
         if exact_length < 2:
-            log.warning("Kernel chain length must be at least 2.")
+            self.logger.warning("Kernel chain length must be at least 2.")
             return
 
         all_segments = []
@@ -999,16 +801,16 @@ class SodaProfiler:
                     fusion_recommendations.append((chain, count, proximity_score))
         
         # Report findings
-        log.info(f"--- Fusion Analysis (Length={exact_length}, Threshold={prox_score_threshold}) ---")
+        self.logger.info(f"--- Fusion Analysis (Length={exact_length}, Threshold={prox_score_threshold}) ---")
         if not fusion_recommendations:
-            log.info("No kernel chains met the fusion criteria.")
+            self.logger.info("No kernel chains met the fusion criteria.")
             return None
 
         sorted_recommendations = sorted(fusion_recommendations, key=lambda x: x[1], reverse=True)
-        log.info(f"Found {len(sorted_recommendations)} potential fusion candidates:")
+        self.logger.info(f"Found {len(sorted_recommendations)} potential fusion candidates:")
         for chain, count, score in sorted_recommendations:
             chain_str = ' -> '.join(chain)
-            log.info(f"  - Chain: [{chain_str}] (Found {count} times, Proximity Score: {score:.2f})")
+            self.logger.info(f"  - Chain: [{chain_str}] (Found {count} times, Proximity Score: {score:.2f})")
         
         # Return structured results
         return {
@@ -1242,7 +1044,7 @@ class SodaProfiler:
         with open(self.report_file_path, "w", encoding="utf-8") as f:
             json.dump(output, f, indent=2, ensure_ascii=False)
         
-        log.info(f"Metrics exported to: {self.report_file_path}")
+        self.logger.info(f"Metrics exported to: {self.report_file_path}")
         return str(self.report_file_path)
     
     def exit(self) -> None:
@@ -1251,3 +1053,255 @@ class SodaProfiler:
         """
         print(f"\nLog output saved to {self._soda_logger.log_path}")
         self._soda_logger.cleanup()
+
+
+class SodaLogger:
+    """
+    Logger class for SODA that supports both file and console output.
+    """
+    
+    def __init__(self, output_dir: Path, is_console: bool = True, is_file: bool = True):
+        """
+        Initialize the logger.
+        
+        Args:
+            output_dir: Directory where log file will be created.
+            is_console: If True, write to console/stdout.
+            is_file: If True, write to file.
+        """
+        self.log_path = output_dir / "soda.log"
+        self.is_console = is_console
+
+        self.is_file = is_file
+        
+        # Create logger
+        self.logger = logging.getLogger("soda")
+        self.logger.setLevel(logging.DEBUG)
+        
+        # Remove existing handlers to avoid duplicates
+        self.logger.handlers.clear()
+        
+        # Create formatter without timestamp
+        formatter = logging.Formatter('%(message)s')
+        
+        # File handler - writes to file
+        if self.is_file:
+            file_handler = logging.FileHandler(self.log_path, mode='w')
+            file_handler.setLevel(logging.DEBUG)
+            file_handler.setFormatter(formatter)
+            self.logger.addHandler(file_handler)
+        
+        # Console handler - writes to stdout
+        if self.is_console:
+            console_handler = logging.StreamHandler(sys.stdout)
+            console_handler.setLevel(logging.DEBUG)
+            console_handler.setFormatter(formatter)
+            self.logger.addHandler(console_handler)
+        
+        # Log initial message
+        self.logger.info(f"Results will be saved to: {output_dir.resolve()}")
+    
+    def cleanup(self):
+        """Clean up logging handlers."""
+        self.logger.handlers.clear()
+
+
+class ModelHandler:
+    """Handles loading of Hugging Face models with specific configurations."""
+
+    def __init__(self, model_name: str, device: str, compile_type: str, precision: str):
+        """
+        Initializes the Model loader.
+
+        Args:
+            model_name: The name of the model from Hugging Face Hub.
+            device: The device to load the model onto ('cpu' or 'cuda').
+            compile_type: The compilation mode ('eager', 'torch.compile', 'flash-attention').
+            precision: The desired data type ('float32', 'float16', 'bfloat16').
+        """
+        self.model_name = model_name
+        self.device = torch.device(device)
+        self.compile_type = compile_type
+        self.precision_map = {
+            "float32": torch.float32,
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+        }
+        self.precision = self.precision_map[precision]
+        
+        # Determine if model is decoder or encoder
+        self.is_decoder = not ("bert" in model_name.lower() or "roberta" in model_name.lower())
+        
+        # Load model; this will set self.pytorch_model and self.tokenizer
+        self.pytorch_model = None
+        self.tokenizer = None
+        self.load()
+
+    def get_kwargs(self) -> Dict[str, Any]:
+        """Returns common kwargs for model loading."""
+        return {
+            "dtype": self.precision,
+            "device_map": self.device if self.device.type == 'cuda' else 'cpu',
+        }
+
+    def load_encoder(self) -> Tuple[transformers.PreTrainedModel, transformers.PreTrainedTokenizer]:
+        """Loads an encoder-only model (e.g., BERT)."""
+        # Load tokenizer first to get eos_token_id
+        tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_name)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        
+        kwargs = self.get_kwargs()
+        if self.compile_type == "torch.compile":
+            kwargs.update({"attn_implementation": "sdpa"})
+            model = transformers.AutoModelForSequenceClassification.from_pretrained(
+                self.model_name, **kwargs
+            ).eval()
+            model.forward = torch.compile(model.forward, mode="reduce-overhead", backend="inductor")
+        elif self.compile_type == "flash-attention":
+            kwargs.update({"attn_implementation": "flash_attention_2"})
+            model = transformers.AutoModelForSequenceClassification.from_pretrained(
+                self.model_name, **kwargs
+            ).eval()
+        else:  # eager
+            kwargs.update({"attn_implementation": "eager"})
+            model = transformers.AutoModelForSequenceClassification.from_pretrained(
+                self.model_name, **kwargs
+            ).eval()
+        
+        if hasattr(model, 'generation_config') and model.generation_config.pad_token_id is None:
+            model.generation_config.pad_token_id = tokenizer.eos_token_id
+        
+        # Store model and tokenizer
+        self.pytorch_model = model
+        self.tokenizer = tokenizer
+        return model, tokenizer
+
+    def load_decoder(self) -> Tuple[transformers.PreTrainedModel, transformers.PreTrainedTokenizer]:
+        """Loads a decoder-only model (e.g., Llama)."""
+        # Load tokenizer first to get eos_token_id
+        tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_name)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        
+        # Load config and set pad_token_id before model initialization to prevent warning
+        config = transformers.AutoConfig.from_pretrained(self.model_name)
+        if hasattr(config, 'pad_token_id') and config.pad_token_id is None:
+            config.pad_token_id = tokenizer.eos_token_id
+        
+        kwargs = self.get_kwargs()
+        if self.compile_type == "torch.compile":
+            kwargs.update({"attn_implementation": "sdpa"})
+            model = transformers.AutoModelForCausalLM.from_pretrained(
+                self.model_name, config=config, **kwargs
+            ).eval()
+            model.generation_config.cache_implementation = "static"
+            model.forward = torch.compile(model.forward, mode="reduce-overhead", backend="inductor")
+        elif self.compile_type == "flash-attention":
+            kwargs.update({"attn_implementation": "flash_attention_2"})
+            model = transformers.AutoModelForCausalLM.from_pretrained(
+                self.model_name, config=config, **kwargs
+            ).eval()
+        else:  # eager
+            kwargs.update({"attn_implementation": "eager"})
+            model = transformers.AutoModelForCausalLM.from_pretrained(
+                self.model_name, config=config, **kwargs
+            ).eval()
+        
+        # Store model and tokenizer
+        self.pytorch_model = model
+        self.tokenizer = tokenizer
+        return model, tokenizer
+    
+    def load(self) -> Tuple[transformers.PreTrainedModel, transformers.PreTrainedTokenizer]:
+        """
+        Loads the model and tokenizer based on model type (encoder or decoder).
+        
+        Returns:
+            Tuple of (model, tokenizer).
+        """
+        if self.is_decoder:
+            return self.load_decoder()
+        else:
+            return self.load_encoder()
+    
+    def generate_synthetic_inputs(self, batch_size: int, seq_len: int, device: str) -> Dict[str, torch.Tensor]:
+        """
+        Generates synthetic tokenized inputs for profiling.
+        
+        Args:
+            batch_size: Batch size for the inputs.
+            seq_len: Sequence length for the inputs.
+            device: Device to create tensors on ('cpu' or 'cuda').
+            
+        Returns:
+            Dictionary with 'input_ids' and 'attention_mask' tensors.
+        """
+        return {
+            "input_ids": torch.randint(
+                1, self.tokenizer.vocab_size, size=(batch_size, seq_len), device=device
+            ),
+            "attention_mask": torch.ones(
+                batch_size, seq_len, device=device
+            ),
+        }
+
+
+def main() -> int:
+    """Main entry point for the SODA CLI."""
+    
+    # Check if env.sh has been sourced and loaded
+    if not os.environ.get("SODA_ENV_LOADED"):
+        # Use stderr for early errors before logger is set up
+        print("Error: SODA environment not loaded.", file=sys.stderr)
+        print("Please run: source env.sh", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        # Parse and validate arguments 
+        args = SodaProfiler.parse_and_validate_args()
+
+        # Prepare model handler
+        print(f"Loading model: {args.model} with precision {args.precision}...")
+        model_handler = ModelHandler(
+            model_name=args.model,
+            device=args.device,
+            compile_type=args.compile_type,
+            precision=args.precision,
+        )
+        
+        # Generate synthetic inputs
+        print(f"Generating synthetic input: batch_size={args.batch_size}, seq_len={args.seq_len}")
+        model_inputs = model_handler.generate_synthetic_inputs(
+            args.batch_size, args.seq_len, args.device
+        )
+
+        # Initialize profiler 
+        profiler = SodaProfiler(model_handler=model_handler, args=args, log_console=True, log_file=True)
+
+        # Profile forward pass and analyze 
+        profiler.profile_forward_pass(model_inputs)
+        profiler.analyze()
+
+        # Report and save results
+        profiler.report()
+        profiler.save()
+
+        # Cleanup and exit
+        profiler.exit()
+        
+        return 0
+
+    except FileNotFoundError as e:
+        print(f"Error: File not found: {e}", file=sys.stderr)
+        return 1
+    except RuntimeError as e:
+        print(f"Error: Runtime error during profiling: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error: Unexpected error: {e}", file=sys.stderr)
+        traceback.print_exc()
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main())
