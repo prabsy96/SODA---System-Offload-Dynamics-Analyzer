@@ -915,6 +915,7 @@ class SodaProfiler:
             - dependencies: Kernel dependency graph
             - avg_kernel_dur: Average kernel duration results
         """
+        print("Analyzing trace data to generate reports...")
         # Preprocess trace data
         preprocessed = self.preprocess_trace()
         dependencies = preprocessed["dependencies"]

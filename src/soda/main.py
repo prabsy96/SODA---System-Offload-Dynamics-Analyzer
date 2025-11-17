@@ -98,32 +98,47 @@ def validate_args(args: argparse.Namespace) -> None:
 
 def setup_logging(output_dir: Path) -> tuple:
     """
-    Setup logging: redirect print to both stdout and log file.
+    Setup logging: configure logger to write to both stdout and log file.
+    No timestamps in output.
     
     Args:
         output_dir: Directory where log file will be created.
     
     Returns:
-        Tuple of (log_path, output_file, original_print) for cleanup.
+        Tuple of (log_path, logger) for cleanup.
     """
+    import logging
+    
     log_path = output_dir / "soda.log"
-    output_file = open(log_path, "w")
     
-    original_print = builtins.print
+    # Create logger
+    logger = logging.getLogger("soda")
+    logger.setLevel(logging.DEBUG)
     
-    def print_and_write(*args_print, **kwargs):
-        """Print to stdout and write to file."""
-        original_print(*args_print, **kwargs)
-        line = ' '.join(str(arg) for arg in args_print)
-        output_file.write(line + '\n')
-        output_file.flush()
+    # Remove existing handlers to avoid duplicates
+    logger.handlers.clear()
     
-    builtins.print = print_and_write
+    # Create formatter without timestamp
+    formatter = logging.Formatter('%(message)s')
     
-    # Print initial message 
-    print(f"Results will be saved to: {output_dir.resolve()}")
+    # File handler - writes to file
+    file_handler = logging.FileHandler(log_path, mode='w')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
     
-    return log_path, output_file, original_print
+    # Console handler - writes to stdout
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.DEBUG)
+    console_handler.setFormatter(formatter)
+    
+    # Add handlers to logger
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    # Log initial message
+    logger.info(f"Results will be saved to: {output_dir.resolve()}")
+    
+    return log_path, logger
 
 def main() -> int:
     """Main entry point for the SODA CLI."""
@@ -139,8 +154,8 @@ def main() -> int:
     args = parser.parse_args()
     validate_args(args)
     
-    # Setup logging: redirect print to both stdout and log file
-    log_path, output_file, original_print = setup_logging(args.output_dir)
+    # Setup logging: configure logger to write to both stdout and log file
+    log_path, logger = setup_logging(args.output_dir)
 
     try:
         # Prepare model handler
@@ -165,8 +180,6 @@ def main() -> int:
         print(f"Chrome trace file generated at: {trace_file_path}")
 
         # Data Processing and Reporting
-        print("Analyzing trace data to generate reports...")
-        
         # Run analysis
         profiler.analyze()
         
@@ -179,27 +192,23 @@ def main() -> int:
         print("Analysis complete.")
         print(f"\nLog output saved to {log_path}")
         
-        # Restore original print and close log file
-        builtins.print = original_print
-        output_file.close()
+        # Cleanup logging handlers
+        logger.handlers.clear()
         
         return 0
 
     except FileNotFoundError as e:
-        builtins.print = original_print
-        output_file.close()
-        print(f"Error: File not found: {e}", file=sys.stderr)
+        logger.error(f"Error: File not found: {e}")
+        logger.handlers.clear()
         return 1
     except RuntimeError as e:
-        builtins.print = original_print
-        output_file.close()
-        print(f"Error: Runtime error during profiling: {e}", file=sys.stderr)
+        logger.error(f"Error: Runtime error during profiling: {e}")
+        logger.handlers.clear()
         return 1
     except Exception as e:
-        builtins.print = original_print
-        output_file.close()
-        print(f"Error: Unexpected error: {e}", file=sys.stderr)
-        traceback.print_exc()
+        logger.error(f"Error: Unexpected error: {e}")
+        logger.exception("Full traceback:")
+        logger.handlers.clear()
         return 1
 
 if __name__ == "__main__":
