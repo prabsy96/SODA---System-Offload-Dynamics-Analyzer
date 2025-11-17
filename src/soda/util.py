@@ -254,6 +254,7 @@ class SodaProfiler:
         
         self.trace = None
         self.events = None
+        self.results = None
 
     def trace_forward_pass_for_encoder(self, inputs: Dict[str, torch.Tensor]) -> str:
         """
@@ -507,22 +508,28 @@ class SodaProfiler:
         
         return max_end - min_start
 
-    def calculate_total_kernel_exec_time(self) -> float:
+    def calculate_kernel_exec_time(self) -> Dict[str, float]:
         """
-        Calculates total kernel execution time by summing durations of all kernel events.
+        Calculates total and average kernel execution time.
         
         Uses self.events.
             
         Returns:
-            Total kernel execution time in microseconds.
+            Dictionary with "total" and "avg" keys (in microseconds).
         """
         kernel_events = self.events["gpu"]["kernels"]
+        num_kernels = len(kernel_events)
         
         total_kernel_exec_time = 0.0
         for kernel in kernel_events:
             total_kernel_exec_time += float(kernel.get("dur", 0))
         
-        return total_kernel_exec_time
+        avg_kernel_exec_time = total_kernel_exec_time / num_kernels if num_kernels > 0 else 0.0
+        
+        return {
+            "total": total_kernel_exec_time,
+            "avg": avg_kernel_exec_time,
+        }
 
     def calculate_true_gpu_busy_time(self) -> float:
         """
@@ -676,21 +683,20 @@ class SodaProfiler:
         
         return dependencies
 
-    def calculate_launch_tax(self, dependence: List[Tuple]) -> float: 
+    def calculate_launch_tax(self, dependence: List[Tuple]) -> Dict[str, float]:
         """
-        Calculates the total and average launch overhead (tax).
+        Calculates the total and average kernel launch tax.
 
         Args:
             dependence: List of (kernel, runtime) dependency tuples.
-            kernel_count: Total number of kernels launched.
 
         Returns:
-            The total launch overhead time.
+            Dictionary with "total" and "avg" keys (in microseconds).
         """
         if not dependence:
-            return 0.0
+            return {"total": 0.0, "avg": 0.0}
 
-        total_overhead_us = 0.0
+        total_tax_us = 0.0
         for kernel, runtime in dependence:
             runtime_end = runtime["ts"] + runtime.get("dur", 0)
             kernel_start = kernel["ts"]
@@ -698,9 +704,15 @@ class SodaProfiler:
             gap_us = kernel_start - runtime_end
 
             if gap_us > 0:
-                total_overhead_us += gap_us
+                total_tax_us += gap_us
 
-        return total_overhead_us
+        num_kernels = len(dependence)
+        avg_tax_us = total_tax_us / num_kernels if num_kernels > 0 else 0.0
+
+        return {
+            "total": total_tax_us,
+            "avg": avg_tax_us,
+        }
     
     def get_average_kernel_duration(self) -> Dict[str, float]:
         """
@@ -843,25 +855,206 @@ class SodaProfiler:
         log.info(f"--- Fusion Analysis (Length={exact_length}, Threshold={prox_score_threshold}) ---")
         if not fusion_recommendations:
             log.info("No kernel chains met the fusion criteria.")
-            return
+            return None
 
         sorted_recommendations = sorted(fusion_recommendations, key=lambda x: x[1], reverse=True)
         log.info(f"Found {len(sorted_recommendations)} potential fusion candidates:")
         for chain, count, score in sorted_recommendations:
             chain_str = ' -> '.join(chain)
             log.info(f"  - Chain: [{chain_str}] (Found {count} times, Proximity Score: {score:.2f})")
+        
+        # Return structured results
+        return {
+            "length": exact_length,
+            "threshold": prox_score_threshold,
+            "candidates": [
+                {
+                    "chain": list(chain),
+                    "count": count,
+                    "proximity_score": score
+                }
+                for chain, count, score in sorted_recommendations
+            ]
+        }
 
     
-    def export_metrics_to_json(
-        self,
-        model_name: str,
-        config: Dict[str, Any],
-        metrics: Dict[str, float],
-        stream_info: Dict[str, Dict],
-        top_k_kernels: Dict[str, List[Tuple[str, Dict]]],
-    ) -> str:
-       
+    def preprocess_trace(self) -> Dict[str, Any]:
+        """
+        Preprocesses trace data by collecting events, generating dependencies, and analyzing streams.
+        
+        Returns:
+            Dictionary containing:
+            - dependencies: Kernel dependency graph
+            - stream_info: Per-stream analysis
+        """
+        # Get all events organized by category 
+        self.collect_events_from_trace()
+        
+        dependencies = self.generate_dependencies()
+        
+        # Analyze per-stream metrics
+        stream_info = self.analyze_per_stream()
+        
+        return {
+            "dependencies": dependencies,
+            "stream_info": stream_info,
+        }
+    
+    def analyze(self) -> Dict[str, Any]:
+        """
+        Performs complete analysis of the trace data.
+        
+        Collects events, calculates metrics, and returns analysis results.
+        This method mimics the analysis logic in main() function.
+        
+        Returns:
+            Dictionary containing all analysis results including:
+            - metrics: Performance metrics (inference time, GPU utilization, etc.)
+            - stream_info: Per-stream analysis
+            - top_k_kernels: Top-k kernels by frequency and duration
+            - dependencies: Kernel dependency graph
+            - avg_kernel_dur: Average kernel duration results
+        """
+        # Preprocess trace data
+        preprocessed = self.preprocess_trace()
+        dependencies = preprocessed["dependencies"]
+        stream_info = preprocessed["stream_info"]
+        
+        # General metrics
+        total_inference_time = self.calculate_total_inference_time()
+        
+        # GPU metrics
+        total_gpu_time_span = self.calculate_total_gpu_time_span()
+        true_gpu_busy_time = self.calculate_true_gpu_busy_time()
+        gpu_utilization = self.calculate_gpu_utilization()
+        
+        # Kernel metrics
+        kernel_exec_time = self.calculate_kernel_exec_time()
+        launch_tax = self.calculate_launch_tax(dependencies)
+        avg_kernel_dur = self.get_average_kernel_duration()
+        top_k_kernels = self.get_top_k_kernels(k=3)
+        
+        # Fusion analysis
+        fusion_results = None
+        if self.args.fusion:
+            print("--- Kernel Fusion Analysis ---")
+            fusion_results = {}
+            for f in self.args.fusion:
+                fusion_results[f] = self.kernelchains(dependencies, f, self.args.prox_score)
+        
+        # Build metrics dictionary 
+        metrics = {
+            # General metrics
+            "inference_runtime_ms": total_inference_time / 1000,
+            "active_streams": len(stream_info),
+
+            # GPU metrics
+            "total_gpu_time_span_ms": total_gpu_time_span / 1000,
+            "gpu_busy_time_ms": true_gpu_busy_time / 1000,
+            "gpu_idle_time_ms": max(0.0, (total_gpu_time_span - true_gpu_busy_time) / 1000),
+            "gpu_utilization_percent": gpu_utilization,
+ 
+            # Kernel metrics
+            "total_kernel_exec_time_ms": kernel_exec_time["total"] / 1000,
+            "num_total_kernels": len(self.events["gpu"]["kernels"]),
+            "avg_kernel_exec_time_ms": kernel_exec_time["avg"] / 1000,
+            "total_kernel_launch_tax_ms": launch_tax["total"] / 1000,
+            "avg_kernel_launch_tax_ms": launch_tax["avg"] / 1000,
+        }
+        
+        self.results = {
+            "metrics": metrics,
+            "stream_info": stream_info,
+            "top_k_kernels": top_k_kernels,
+            "dependencies": dependencies,
+            "avg_kernel_dur": avg_kernel_dur,
+            "fusion_results": fusion_results,
+        }
+        
+        return self.results
+    
+    def report(self) -> None:
+        """
+        Prints performance metrics, stream analysis, and top-k kernels.
+        Uses results stored in self.results from analyze().
+        """
+        if self.results is None:
+            raise ValueError("No analysis results available. Call analyze() first.")
+        
+        metrics = self.results["metrics"]
+        stream_info = self.results["stream_info"]
+        top_k_kernels = self.results["top_k_kernels"]
+        
+        # --- Enhanced Reporting ---
+        print("--- Performance Metrics ---")
+        print(f"Inference runtime (ms): {metrics['inference_runtime_ms']:.4f}")
+        print(f"Total kernel execution time (ms): {metrics['total_kernel_exec_time_ms']:.4f}")
+        print(f"GPU busy time (concurrent-aware) (ms): {metrics['gpu_busy_time_ms']:.4f}")
+        print(f"GPU idle time (ms): {metrics['gpu_idle_time_ms']:.4f}")
+        print(f"GPU utilization: {metrics['gpu_utilization_percent']:.2f}%")
+        print(f"Total kernel launch tax (TKLQT) (ms): {metrics['total_kernel_launch_tax_ms']:.4f}")
+        print(f"Number of kernels: {metrics['num_total_kernels']}")
+        print(f"Active streams: {metrics['active_streams']}")
+        
+        if metrics['num_total_kernels'] > 0:
+            print(f"Avg. kernel launch tax per kernel (ms): {metrics['avg_kernel_launch_tax_ms']:.4f}")
+            print(f"Avg. execution time per kernel (ms): {metrics['avg_kernel_exec_time_ms']:.4f}")
+        
+        # --- Per-Stream Breakdown ---
+        print("--- Per-Stream Analysis ---")
+        for stream_id, data in stream_info.items():
+            print(
+                f"  Stream {stream_id}: {data['op_count']} ops "
+                f"({data['kernel_count']} kernels), "
+                f"Busy Time: {data['true_gpu_busy_time'] / 1000:.4f} ms"
+            )
+        
+        # Top-K kernels 
+        if top_k_kernels["by_frequency"]:
+            print("--- Top-3 Kernels by Frequency ---")
+            for i, (name, data) in enumerate(top_k_kernels["by_frequency"], 1):
+                print(
+                    f"#{i}: {name} "
+                    f"(Frequency: {int(data['frequency'])}, "
+                    f"Total Duration: {data['duration'] / 1000:.4f} ms)"
+                )
+            
+            print("--- Top-3 Kernels by Duration ---")
+            for i, (name, data) in enumerate(top_k_kernels["by_duration"], 1):
+                print(
+                    f"#{i}: {name} "
+                    f"(Total Duration: {data['duration'] / 1000:.4f} ms, "
+                    f"Frequency: {int(data['frequency'])})"
+                )
+    
+    def save(self) -> str:
+        """
+        Saves analysis results to JSON file.
+        Uses results stored in self.results from analyze().
+        Generates model_name and config from self.args.
+            
+        Returns:
+            Path to the saved report file.
+        """
+        if self.results is None:
+            raise ValueError("No analysis results available. Call analyze() first.")
+        
         from datetime import datetime
+        
+        metrics = self.results["metrics"]
+        stream_info = self.results["stream_info"]
+        top_k_kernels = self.results["top_k_kernels"]
+        fusion_results = self.results.get("fusion_results")
+        
+        # Generate model_name and config from args
+        model_name = self.args.model
+        config = {
+            "batch_size": self.args.batch_size,
+            "seq_len": self.args.seq_len,
+            "precision": self.args.precision,
+            "compile_type": self.args.compile_type,
+            "device": self.args.device,
+        }
         
         # Build output structure
         output = {
@@ -901,6 +1094,10 @@ class SodaProfiler:
                 ]
             }
         }
+        
+        # Add fusion results if available
+        if fusion_results is not None:
+            output["fusion_analysis"] = fusion_results
         
         # Save to file
         with open(self.report_file_path, "w", encoding="utf-8") as f:
