@@ -17,6 +17,11 @@ from collections import defaultdict, deque
 from torch.profiler import ProfilerActivity, profile
 from typing import Any, DefaultDict, Dict, List, Set, Tuple
 
+
+def us_to_ms(microseconds: float) -> float:
+    """Convert microseconds to milliseconds."""
+    return microseconds / 1000.0
+
 class SodaProfiler:
     """
     Handles model tracing, profile data parsing, and metric generation.
@@ -680,7 +685,7 @@ class SodaProfiler:
         Uses self.events.
             
         Returns:
-            Dictionary mapping kernel name to average duration in milliseconds.
+            Dictionary mapping kernel name to average duration.
         """
         kernel_events = self.events["gpu"]["kernels"]
         
@@ -694,8 +699,7 @@ class SodaProfiler:
         avg_durations = {}
         for name, stat in kernel_stats.items():
             if stat["count"] > 0:
-                avg_duration_us = stat["total_duration"] / stat["count"]
-                avg_durations[name] = float(avg_duration_us) / 1000.0
+                avg_durations[name] = stat["total_duration"] / stat["count"]
             else:
                 avg_durations[name] = 0.0
         
@@ -899,21 +903,21 @@ class SodaProfiler:
         # Build metrics dictionary 
         metrics = {
             # General metrics
-            "inference_runtime_ms": total_inference_time / 1000,
+            "inference_runtime_ms": us_to_ms(total_inference_time),
             "active_streams": len(stream_info),
 
             # GPU metrics
-            "total_gpu_time_span_ms": total_gpu_time_span / 1000,
-            "gpu_busy_time_ms": true_gpu_busy_time / 1000,
-            "gpu_idle_time_ms": max(0.0, (total_gpu_time_span - true_gpu_busy_time) / 1000),
+            "total_gpu_time_span_ms": us_to_ms(total_gpu_time_span),
+            "gpu_busy_time_ms": us_to_ms(true_gpu_busy_time),
+            "gpu_idle_time_ms": us_to_ms(max(0.0, total_gpu_time_span - true_gpu_busy_time)),
             "gpu_utilization_percent": gpu_utilization,
  
             # Kernel metrics
-            "total_kernel_exec_time_ms": kernel_exec_time["total"] / 1000,
+            "total_kernel_exec_time_ms": us_to_ms(kernel_exec_time["total"]),
             "num_total_kernels": len(self.events["gpu"]["kernels"]),
-            "avg_kernel_exec_time_ms": kernel_exec_time["avg"] / 1000,
-            "total_kernel_launch_tax_ms": launch_tax["total"] / 1000,
-            "avg_kernel_launch_tax_ms": launch_tax["avg"] / 1000,
+            "avg_kernel_exec_time_ms": us_to_ms(kernel_exec_time["avg"]),
+            "total_kernel_launch_tax_ms": us_to_ms(launch_tax["total"]),
+            "avg_kernel_launch_tax_ms": us_to_ms(launch_tax["avg"]),
         }
         
         self.results = {
@@ -940,19 +944,19 @@ class SodaProfiler:
         top_k_kernels = self.results["top_k_kernels"]
         
         # --- Enhanced Reporting ---
-        self.logger.info("--- Performance Metrics ---")
-        self.logger.info(f"Inference runtime (ms): {metrics['inference_runtime_ms']:.4f}")
-        self.logger.info(f"Total kernel execution time (ms): {metrics['total_kernel_exec_time_ms']:.4f}")
-        self.logger.info(f"GPU busy time (concurrent-aware) (ms): {metrics['gpu_busy_time_ms']:.4f}")
-        self.logger.info(f"GPU idle time (ms): {metrics['gpu_idle_time_ms']:.4f}")
+        self.logger.info("--- Performance Metrics (ms) ---")
+        self.logger.info(f"Inference runtime: {metrics['inference_runtime_ms']:.4f}")
+        self.logger.info(f"Total kernel execution time: {metrics['total_kernel_exec_time_ms']:.4f}")
+        self.logger.info(f"GPU busy time (concurrent-aware): {metrics['gpu_busy_time_ms']:.4f}")
+        self.logger.info(f"GPU idle time: {metrics['gpu_idle_time_ms']:.4f}")
         self.logger.info(f"GPU utilization: {metrics['gpu_utilization_percent']:.2f}%")
-        self.logger.info(f"Total kernel launch tax (TKLQT) (ms): {metrics['total_kernel_launch_tax_ms']:.4f}")
+        self.logger.info(f"Total kernel launch tax (TKLQT): {metrics['total_kernel_launch_tax_ms']:.4f}")
         self.logger.info(f"Number of kernels: {metrics['num_total_kernels']}")
         self.logger.info(f"Active streams: {metrics['active_streams']}")
         
         if metrics['num_total_kernels'] > 0:
-            self.logger.info(f"Avg. kernel launch tax per kernel (ms): {metrics['avg_kernel_launch_tax_ms']:.4f}")
-            self.logger.info(f"Avg. execution time per kernel (ms): {metrics['avg_kernel_exec_time_ms']:.4f}")
+            self.logger.info(f"Avg. kernel launch tax per kernel: {metrics['avg_kernel_launch_tax_ms']:.4f}")
+            self.logger.info(f"Avg. execution time per kernel: {metrics['avg_kernel_exec_time_ms']:.4f}")
         
         # --- Per-Stream Breakdown ---
         self.logger.info("--- Per-Stream Analysis ---")
@@ -960,7 +964,7 @@ class SodaProfiler:
             self.logger.info(
                 f"  Stream {stream_id}: {data['op_count']} ops "
                 f"({data['kernel_count']} kernels), "
-                f"Busy Time: {data['true_gpu_busy_time'] / 1000:.4f} ms"
+                f"Busy Time: {us_to_ms(data['true_gpu_busy_time']):.4f} ms"
             )
         
         # Top-K kernels 
@@ -970,14 +974,14 @@ class SodaProfiler:
                 self.logger.info(
                     f"#{i}: {name} "
                     f"(Frequency: {int(data['frequency'])}, "
-                    f"Total Duration: {data['duration'] / 1000:.4f} ms)"
+                    f"Total Duration: {us_to_ms(data['duration']):.4f} ms)"
                 )
             
             self.logger.info("--- Top-3 Kernels by Duration ---")
             for i, (name, data) in enumerate(top_k_kernels["by_duration"], 1):
                 self.logger.info(
                     f"#{i}: {name} "
-                    f"(Total Duration: {data['duration'] / 1000:.4f} ms, "
+                    f"(Total Duration: {us_to_ms(data['duration']):.4f} ms, "
                     f"Frequency: {int(data['frequency'])})"
                 )
     
@@ -1017,13 +1021,13 @@ class SodaProfiler:
                 "timestamp": datetime.now().isoformat(),
                 "config": config
             },
-            "performance_metrics": metrics,
+            "performance_metrics": metrics, 
             "per_stream_analysis": {
                 str(stream_id): {
                     "total_ops": data["op_count"],
                     "kernel_count": data["kernel_count"],
-                    "busy_time_ms": data["true_gpu_busy_time"] / 1000,
-                    "total_kernel_exec_time_ms": data["total_kernel_exec_time"] / 1000,
+                    "busy_time_ms": us_to_ms(data["true_gpu_busy_time"]),
+                    "total_kernel_exec_time_ms": us_to_ms(data["total_kernel_exec_time"]),
                 }
                 for stream_id, data in stream_info.items()
             },
@@ -1033,7 +1037,7 @@ class SodaProfiler:
                         "rank": i,
                         "name": name,
                         "frequency": data["frequency"],
-                        "total_duration_ms": data["duration"] / 1000
+                        "total_duration_ms": us_to_ms(data["duration"])
                     }
                     for i, (name, data) in enumerate(top_k_kernels["by_frequency"], 1)
                 ],
@@ -1042,7 +1046,7 @@ class SodaProfiler:
                         "rank": i,
                         "name": name,
                         "frequency": data["frequency"],
-                        "total_duration_ms": data["duration"] / 1000
+                        "total_duration_ms": us_to_ms(data["duration"])
                     }
                     for i, (name, data) in enumerate(top_k_kernels["by_duration"], 1)
                 ]
