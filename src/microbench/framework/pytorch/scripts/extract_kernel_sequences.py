@@ -253,29 +253,6 @@ def aggregate_execution_metrics(instances):
     return base_instance
 
 
-def build_event_sequences(kernels, cpu_ops, cuda_launches):
-    """Second pass: build linked event sequences starting from kernels."""
-    event_sequences = []
-    
-    for kernel in kernels:
-        external_id = kernel["external_id"]
-        correlation = kernel["correlation"]
-        cpu_op = cpu_ops.get(external_id)
-        cuda_launch = cuda_launches.get(correlation)
-        
-        kernel_tax = None
-        if kernel and cuda_launch and kernel.get('ts') is not None and cuda_launch.get('ts') is not None:
-            kernel_tax = kernel['ts'] - cuda_launch['ts']
-            assert kernel_tax >= 0, f"Negative kernel tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={cuda_launch['ts']}, tax={kernel_tax}"
-        
-        event_sequences.append({
-            "kernel": kernel,
-            "cuda_launch": cuda_launch,
-            "cpu_op": cpu_op,
-            "kernel_tax": kernel_tax,
-        })
-    
-    return event_sequences
 
 def filter_gemm_sequences(event_sequences):
     """Filter for GEMM kernels only."""
@@ -353,11 +330,12 @@ def extract_event_sequences(trace_file):
     
     # Collect events from trace
     events = collect_events_from_trace(trace)
-    cpu_ops = events["cpu"]["ops"]
-    cuda_launches = events["cpu"]["launches"]
-    kernels = events["gpu"]["kernels"]
     
-    event_sequences = build_event_sequences(kernels, cpu_ops, cuda_launches)
+    # Use SodaProfiler function to build event sequences
+    event_sequences = SodaProfiler.get_linked_event_sequences(events)
+    
+    # Calculate kernel tax for each sequence using SodaProfiler function
+    event_sequences = SodaProfiler.calculate_per_seq_launch_tax(event_sequences)
     
     return event_sequences
 

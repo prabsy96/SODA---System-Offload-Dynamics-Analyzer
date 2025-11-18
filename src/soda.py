@@ -478,21 +478,21 @@ class SodaProfiler:
         
         return dict(stream_info)
 
-    def get_linked_event_sequences(self) -> List[Dict]:
+    @staticmethod
+    def get_linked_event_sequences(events: Dict[str, Any]) -> List[Dict]:
         """
         Get event sequences linking CPU operations, CUDA launches, and kernels.
         
-        Uses self.events.
+        Args:
+            events: Dictionary with hierarchical structure from collect_events_from_trace.
 
         Returns:
             List of event sequence dictionaries with keys: kernel, cuda_launch, cpu_op.
         """
-        gpu_events = self.events["gpu"]
-        cpu_ops = self.events["cpu"]["ops"]
-        cuda_launches = self.events["cpu"]["launches"]
+        gpu_events = events["gpu"]
+        cpu_ops = events["cpu"]["ops"]
+        cuda_launches = events["cpu"]["launches"]
         kernel_events = gpu_events["kernels"]
-
-        self.logger.info(f"Analyzing {len(kernel_events)} kernel events from profiled run.")
 
         event_sequences = []
         for kernel in kernel_events:
@@ -509,7 +509,8 @@ class SodaProfiler:
         
         return event_sequences
 
-    def calculate_per_seq_launch_tax(self, event_sequences: List[Dict]) -> List[Dict]:
+    @staticmethod
+    def calculate_per_seq_launch_tax(event_sequences: List[Dict]) -> List[Dict]:
         """
         Calculates launch tax for each sequence and adds it to the sequence dict.
 
@@ -743,7 +744,8 @@ class SodaProfiler:
         """
         # Get all events organized by category 
         self.events = collect_events_from_trace(self.trace)
-        event_sequences = self.get_linked_event_sequences()
+        self.logger.info(f"Analyzing {len(self.events['gpu']['kernels'])} kernel events from profiled run.")
+        event_sequences = SodaProfiler.get_linked_event_sequences(self.events)
         return event_sequences
     
     def analyze(self) -> Dict[str, Any]:
@@ -764,7 +766,7 @@ class SodaProfiler:
         self.logger.info("Analyzing trace data to generate reports...")
         # Preprocess trace data
         event_sequences = self.preprocess_trace()
-        event_sequences = self.calculate_per_seq_launch_tax(event_sequences)
+        event_sequences = SodaProfiler.calculate_per_seq_launch_tax(event_sequences)
         
         # Analyze per-stream metrics
         stream_info = self.analyze_per_stream()
