@@ -7,11 +7,7 @@ import copy
 import shutil
 from collections import defaultdict
 from torch.profiler import profile, ProfilerActivity
-
-# Add framework/pytorch directory to path to import models
-pytorch_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, pytorch_dir)
-from models import GPT2
+from soda import ModelHandler, SodaProfiler
 
 # GEMM operations to extract
 GEMM_OPS = ['aten::addmm', 'aten::mm', 'aten::bmm']
@@ -323,7 +319,8 @@ def build_kernel_chains(kernels, cpu_ops, cuda_launches):
         
         kernel_tax = None
         if kernel.get('ts') is not None and cuda_launch and cuda_launch.get('ts') is not None:
-            kernel_tax = abs(kernel['ts'] - cuda_launch['ts'])
+            kernel_tax = kernel['ts'] - cuda_launch['ts']
+            assert kernel_tax >= 0, f"Negative kernel tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={cuda_launch['ts']}, tax={kernel_tax}"
         
         kernel_chains.append({
             "kernel": kernel,
@@ -437,7 +434,7 @@ def run_extraction_pipeline(trace_file):
     """
     Main pipeline: extract -> save, filter -> save, deduplicate -> save.
     """
-    output_dir = "output"
+    output_dir = os.environ.get("PYTORCH_OUTPUT", "output")
     os.makedirs(output_dir, exist_ok=True)
     
     # Save model trace to traces/model_trace folder
@@ -474,12 +471,12 @@ def sanitize_trace_file(trace_file):
     with open(trace_file, "w") as f:
         f.write(sanitized)
 
-def generate_trace(model, input_ids):
+def generate_trace(model_handler, model_inputs):
     """Generate and sanitize trace file."""
     print("Generating trace...")
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
         with torch.no_grad():
-            _ = model(input_ids)
+            _ = model_handler.pytorch_model(**model_inputs)
     
     trace_file = "temp_trace.json"
     prof.export_chrome_trace(trace_file)
@@ -489,34 +486,41 @@ def generate_trace(model, input_ids):
 
 def print_summary():
     """Print extraction summary from saved files."""
-    with open('output/all_kernel_chains.json', 'r') as f:
+    output_dir = os.environ.get("PYTORCH_OUTPUT", "output")
+    with open(os.path.join(output_dir, 'all_kernel_chains.json'), 'r') as f:
         all_data = json.load(f)
-    with open('output/gemm_kernel_chains.json', 'r') as f:
+    with open(os.path.join(output_dir, 'gemm_kernel_chains.json'), 'r') as f:
         gemm_data = json.load(f)
-    with open('output/unique_gemm_kernel_chains.json', 'r') as f:
+    with open(os.path.join(output_dir, 'unique_gemm_kernel_chains.json'), 'r') as f:
         unique_data = json.load(f)
     
     print(f"Extracted {all_data['summary']['total_kernels']} kernels")
     print(f"Linked {all_data['summary']['total_chains']} kernel chains")
-    print(f"Saved to output/all_kernel_chains.json")
-    print(f"Saved {gemm_data['summary']['total_kernels']} GEMM kernel chains to output/gemm_kernel_chains.json")
-    print(f"Saved {unique_data['summary']['total_kernels']} unique GEMM kernel chains to output/unique_gemm_kernel_chains.json")
+    print(f"Saved to {os.path.join(output_dir, 'all_kernel_chains.json')}")
+    print(f"Saved {gemm_data['summary']['total_kernels']} GEMM kernel chains to {os.path.join(output_dir, 'gemm_kernel_chains.json')}")
+    print(f"Saved {unique_data['summary']['total_kernels']} unique GEMM kernel chains to {os.path.join(output_dir, 'unique_gemm_kernel_chains.json')}")
     print(f"\t* Uniqueness key: kernel_name + grid + block + shared_memory + input_dims")
 
 if __name__ == "__main__":
+    args = SodaProfiler.parse_and_validate_args()
+    
     os.environ["HF_HOME"] = os.environ.get("HF_HOME", "/tmp/hf")
     
     print("Setting up deterministic mode...")
     setup_deterministic_mode(seed=1234)
     
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print("Loading GPT2 model...")
-    model = GPT2(model_name="gpt2", device=device, precision="float32")
+    model_handler = ModelHandler(
+        model_name=args.model,
+        device=args.device,
+        compile_type=args.compile_type,
+        precision=args.precision,
+    )
     
-    seq_len = 16
-    input_ids = torch.randint(0, model.tokenizer.vocab_size, (1, seq_len), device=device)
+    model_inputs = model_handler.generate_synthetic_inputs(
+        args.batch_size, args.seq_len
+    )
     
-    trace_file = generate_trace(model, input_ids)
+    trace_file = generate_trace(model_handler, model_inputs)
     run_extraction_pipeline(trace_file)
     os.remove(trace_file)
     

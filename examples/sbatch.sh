@@ -67,11 +67,11 @@ fi
 # Change to SODA root
 cd "$SODA_ROOT"
 
-python -m soda.main \
+python -m soda \
   --model gpt2 \
-  --output-dir "$SODA_RESULTS" \
-  --batch_size 1 \
-  --seq_len 128 \
+  --output-dir "$SODA_OUTPUT" \
+  --batch-size 1 \
+  --seq-len 128 \
   --fusion 2 3 \
-  --prox_score 1.0
+  --prox-score 1.0
 echo "Job finished."

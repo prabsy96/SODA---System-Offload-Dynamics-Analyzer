@@ -10,7 +10,7 @@ from torch.profiler import profile, ProfilerActivity
 profiling_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, profiling_dir)
 from extract_kernel_chains import setup_deterministic_mode, collect_env_metadata, sanitize_trace_file, save_output, extract_kernel_chains, filter_gemm_kernel_chains, calculate_avg_min_max, make_kernel_identity_key, group_chains_by_identity, aggregate_execution_metrics
-from verify_replayed_kernels import get_kernel_short_name
+from verify_replayed_kernels import get_clean_kernel_name
 
 def restore_environment(metadata):
     torch.manual_seed(metadata["seeds"]["torch_manual_seed"])
@@ -117,7 +117,7 @@ def create_input_tensors(cpu_op, seed):
 
 def profile_operation(op_name, inputs, runs=1, trace_filename=None, warmup_runs=100):
     """Profile a PyTorch operation N times and return trace file path."""
-    output_dir = "output"
+    output_dir = os.environ.get("PYTORCH_OUTPUT", "output")
     os.makedirs(output_dir, exist_ok=True)
     
     if trace_filename is None:
@@ -166,7 +166,7 @@ def replay_kernel_from_cpu_op(cpu_op, exp_kernel_name, metadata, kernel_idx, run
     inputs = create_input_tensors(cpu_op, seed)
     
     # Save trace file in kernel_traces folder
-    output_dir = "output"
+    output_dir = os.environ.get("PYTORCH_OUTPUT", "output")
     kernel_traces_dir = os.path.join(output_dir, "traces", "kernel_traces")
     os.makedirs(kernel_traces_dir, exist_ok=True)
     
@@ -195,7 +195,7 @@ def replay_all_kernel_chains(kernel_chains, env_metadata, runs=1, warmup_runs=10
         cpu_op = kernel_chain.get("cpu_op")
         assert cpu_op is not None, f"CPU operation is None for kernel chain {i}"
         
-        exp_kernel_name = get_kernel_short_name(kernel_chain['kernel']['name'])
+        exp_kernel_name = get_clean_kernel_name(kernel_chain['kernel']['name'])
         print(f"* [{i+1}/{len(kernel_chains)}] {cpu_op['name']} -> {exp_kernel_name}")
         
         replayed_chains = replay_kernel_from_cpu_op(cpu_op, exp_kernel_name, env_metadata, i+1, runs=runs, warmup_runs=warmup_runs)
@@ -211,7 +211,7 @@ def run_replay_pipeline(input_file, runs=1, warmup_runs=100):
     """
     Main pipeline: load -> setup -> replay all -> save.
     """
-    output_dir = "output"
+    output_dir = os.environ.get("PYTORCH_OUTPUT", "output")
     os.makedirs(output_dir, exist_ok=True)
 
     # Clean previous kernel traces 

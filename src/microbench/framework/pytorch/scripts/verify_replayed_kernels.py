@@ -3,15 +3,26 @@ import os
 import re
 import sys
 
-def get_kernel_short_name(kernel_name):
-    """Extract a concise kernel name from the full signature."""
-    match = re.search(r'^([^<(]+)', kernel_name)
-    if match:
-        short = match.group(1).strip()
+def get_clean_kernel_name(kernel_name):
+    """Extract a clean kernel name from the full signature."""
+    # Extract everything before '<' (removes template parameters)
+    # This handles cases where '(' appears in template params like "(anonymous namespace)"
+    if '<' in kernel_name:
+        clean_kernel_name = kernel_name.split('<')[0].strip()
+    elif '(' in kernel_name:
+        # If no '<' but has '(', extract before '(' (function parameters)
+        clean_kernel_name = kernel_name.split('(')[0].strip()
     else:
-        short = kernel_name
-    # Remove any stray 'void' from the short name
-    return short.replace('void', '').strip()
+        clean_kernel_name = kernel_name
+    
+    # Remove 'void' prefix if present
+    clean_kernel_name = clean_kernel_name.replace('void', '').strip()
+    
+    # Extract just the kernel name (last part after '::')
+    if '::' in clean_kernel_name:
+        clean_kernel_name = clean_kernel_name.split('::')[-1]
+    
+    return clean_kernel_name.strip()
 
 def _to_tuple_int(x):
     if isinstance(x, (list, tuple)):
@@ -235,7 +246,7 @@ def verify_kernel_chains(original_kernel_chains, replayed_kernel_chains):
                     used_replayed_indices.add(idx)
                     break
         
-        print(f"\t* Kernel: {get_kernel_short_name(original_kernel['name'])}")
+        print(f"\t* Kernel: {get_clean_kernel_name(original_kernel['name'])}")
         
         if matched_kernel:
             print_launch_config_table(original_config, matched_kernel)
@@ -251,7 +262,7 @@ def verify_kernel_chains(original_kernel_chains, replayed_kernel_chains):
             for replayed_chain in replayed_chains[:3]:
                 replayed_k = replayed_chain.get("kernel", {})
                 if replayed_k:
-                    print(f"\t\t- {get_kernel_short_name(replayed_k.get('name', ''))}\tgrid={replayed_k.get('grid')}\tblock={replayed_k.get('block')}\tshared_mem={replayed_k.get('shared_memory', 'N/A')}")
+                    print(f"\t\t- {get_clean_kernel_name(replayed_k.get('name', ''))}\tgrid={replayed_k.get('grid')}\tblock={replayed_k.get('block')}\tshared_mem={replayed_k.get('shared_memory', 'N/A')}")
             if len(replayed_chains) > 3:
                 print(f"\t\t... and {len(replayed_chains) - 3} more")
             mismatches += 1
@@ -262,7 +273,7 @@ def run_verification_pipeline(original_file, replayed_file):
     """
     Main pipeline: load -> verify -> save results.
     """
-    output_dir = "output"
+    output_dir = os.environ.get("PYTORCH_OUTPUT", "output")
     os.makedirs(output_dir, exist_ok=True)
     
     # Step 1: Load kernel chain files

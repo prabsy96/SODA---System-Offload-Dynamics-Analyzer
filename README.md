@@ -1,4 +1,4 @@
-# SODA — System-Offload-Dynamics-Analyzer
+# SODA — System Offload Dynamics Analyzer
 
 ![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?style=flat&logo=pytorch&logoColor=white)
 ![CUDA](https://img.shields.io/badge/CUDA-enabled-green?logo=nvidia&logoColor=white)
@@ -56,13 +56,15 @@ pip install -e .
 
 ## Quickstart
 
-Run the analysis on a model (e.g., `gpt2`) using synthetic data. The following command will generate trace files and summary reports in the `soda_results/` directory.
+Run the analysis on a model (e.g., `gpt2`) using synthetic data. The following command will generate trace files and summary reports in the `output/` directory.
 
 For interactive jobs:
 ```bash
 # Run from the root of the repository
-./examples/quickstart.sh
+./examples/soda_example.sh
 ```
+
+See `examples/soda_example.py` for a complete example.
 
 For sbatch jobs (you might need to change specifications based on the cluster specs):
 ```bash

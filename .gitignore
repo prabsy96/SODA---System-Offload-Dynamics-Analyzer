@@ -48,3 +48,4 @@ results
 traces/
 *.tmp
 temp_*.json
+*dev*
