@@ -132,7 +132,7 @@ def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
     """
     Parse nsys sqlite trace and compute kernel launch tax statistics.
     
-    Uses same event linking logic as PyTorch extract_kernel_chains.py:
+    Uses same event linking logic as PyTorch extract_kernel_sequences.py:
     - Find cudaLaunchKernel events (cuda_runtime)
     - Find kernel events (kernel category)
     - Link via correlation ID

@@ -15,7 +15,8 @@ import transformers
 from pathlib import Path
 from collections import defaultdict, deque
 from torch.profiler import ProfilerActivity, profile
-from typing import Any, DefaultDict, Dict, List, Set, Tuple
+from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple
+from utils import collect_events_from_trace, get_clean_kernel_name
 
 
 def us_to_ms(microseconds: float) -> float:
@@ -26,46 +27,6 @@ class SodaProfiler:
     """
     Handles model tracing, profile data parsing, and metric generation.
     """
-
-    @staticmethod
-    def get_clean_kernel_name(kernel_name: str) -> str:
-        """
-        Extract a clean kernel name from the full signature.
-        
-        Args:
-            kernel_name: Full kernel name (may be a C++ function signature).
-        
-        Returns:
-            Clean kernel name (just the kernel name, no namespace or template parameters).
-        
-        Examples:
-            "void at::native::vectorized_elementwise_kernel<4, ...>" 
-            -> "vectorized_elementwise_kernel"
-            
-            "void at::native::(anonymous namespace)::elementwise_kernel<...>"
-            -> "elementwise_kernel"
-            
-            "turing_fp16_s1688gemm_fp16_128x128_ldg8_f2f_stages_32x1_nn"
-            -> "turing_fp16_s1688gemm_fp16_128x128_ldg8_f2f_stages_32x1_nn"
-        """
-        # Extract everything before '<' (removes template parameters)
-        # This handles cases where '(' appears in template params like "(anonymous namespace)"
-        if '<' in kernel_name:
-            clean_kernel_name = kernel_name.split('<')[0].strip()
-        elif '(' in kernel_name:
-            # If no '<' but has '(', extract before '(' (function parameters)
-            clean_kernel_name = kernel_name.split('(')[0].strip()
-        else:
-            clean_kernel_name = kernel_name
-        
-        # Remove 'void' prefix if present
-        clean_kernel_name = clean_kernel_name.replace('void', '').strip()
-        
-        # Extract just the kernel name (last part after '::')
-        if '::' in clean_kernel_name:
-            clean_kernel_name = clean_kernel_name.split('::')[-1]
-        
-        return clean_kernel_name.strip()
 
     @staticmethod
     def get_args_parser() -> argparse.ArgumentParser:
@@ -305,104 +266,6 @@ class SodaProfiler:
         with open(file_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
-    def collect_events_from_trace(self) -> Dict[str, Any]:
-        """
-        Collects all events from trace organized by category.
-        
-        Uses self.trace
-        
-        Returns:
-            Dictionary with hierarchical structure:
-            - cpu: Dict with keys:
-                - ops: Dict[external_id, cpu_op_dict] - CPU operations
-                - launches: Dict[correlation_id, cuda_launch_dict] - CUDA runtime launches
-            - gpu: Dict with keys:
-                - kernels: List of kernel events
-                - memory: List of memcpy/memset events
-                - all: List of all GPU events
-        """
-        op_events_by_ext_id = {}
-        cuda_launch_events_by_corr = {}
-        kernel_events = []
-        gpu_mem_events = []
-        
-        for event in self.trace.get("traceEvents", []):
-            cat = event.get("cat")
-            args = event.get("args", {})
-            external_id = args.get("External id")
-            correlation = args.get("correlation")
-            
-            if cat == "cpu_op" and external_id is not None:
-                op_events_by_ext_id[external_id] = {
-                    "type": "cpu_op",
-                    "name": event.get("name", ""),
-                    "external_id": external_id,
-                    "input_dims": args.get("Input Dims", []),
-                    "input_strides": args.get("Input Strides", []),
-                    "input_type": args.get("Input type", []),
-                    "concrete_inputs": args.get("Concrete Inputs", []),
-                    "ts": event.get("ts"),
-                    "dur": event.get("dur")
-                }
-            elif cat == "cuda_runtime" and event.get("name") == "cudaLaunchKernel":
-                if external_id is not None and correlation is not None:
-                    cuda_launch_events_by_corr[correlation] = {
-                        "type": "cuda_launch",
-                        "name": event.get("name", ""),
-                        "external_id": external_id,
-                        "correlation": correlation,
-                        "ts": event.get("ts"),
-                        "dur": event.get("dur"),
-                        "cbid": args.get("cbid")
-                    }
-            elif cat == "kernel" and external_id is not None and correlation is not None:
-                kernel_events.append({
-                    "type": "kernel",
-                    "name": self.get_clean_kernel_name(event.get("name", "")),
-                    "external_id": external_id,
-                    "correlation": correlation,
-                    "grid": args.get("grid"),
-                    "block": args.get("block"),
-                    "shared_memory": args.get("shared memory"),
-                    "registers_per_thread": args.get("registers per thread"),
-                    "blocks_per_SM": args.get("blocks per SM"),
-                    "warps_per_SM": args.get("warps per SM"),
-                    "occupancy": args.get("est. achieved occupancy %"),
-                    "stream": args.get("stream"),
-                    "device": args.get("device"),
-                    "context": args.get("context"),
-                    "queued": args.get("queued"),
-                    "dur": event.get("dur"),
-                    "ts": event.get("ts")
-                })
-            elif cat == "gpu_memcpy" or cat == "gpu_memset":
-                gpu_mem_events.append({
-                    "type": cat,
-                    "name": event.get("name", ""),
-                    "correlation": correlation,
-                    "stream": args.get("stream"),
-                    "device": args.get("device"),
-                    "context": args.get("context"),
-                    "ts": event.get("ts"),
-                    "dur": event.get("dur"),
-                    "bytes": args.get("bytes"),
-                    "memory_bandwidth_gbs": args.get("memory bandwidth (GB/s)") if cat == "gpu_memcpy" else None
-                })
-        
-        # Create hierarchical structure
-        events = {
-            "cpu": {
-                "ops": op_events_by_ext_id,
-                "launches": cuda_launch_events_by_corr
-            },
-            "gpu": {
-                "kernels": kernel_events,
-                "memory": gpu_mem_events,
-                "all": kernel_events + gpu_mem_events
-            }
-        }
-        self.events = events
-        return events
 
     def calculate_total_inference_time(self) -> float:
         """
@@ -646,35 +509,62 @@ class SodaProfiler:
         
         return event_sequences
 
-    def calculate_launch_tax(self, event_sequences: List[Dict]) -> Dict[str, float]:
+    def calculate_per_seq_launch_tax(self, event_sequences: List[Dict]) -> List[Dict]:
         """
-        Calculates the total and average kernel launch tax.
+        Calculates launch tax for each sequence and adds it to the sequence dict.
 
         Args:
             event_sequences: List of event sequence dictionaries.
 
         Returns:
-            Dictionary with "total" and "avg" keys (in microseconds).
+            Modified event sequences with "kernel_tax" key added to each.
         """
-        if not event_sequences:
-            return {"total": 0.0, "avg": 0.0}
-
-        total_tax = 0.0
         for seq in event_sequences:
             kernel = seq.get("kernel")
             cuda_launch = seq.get("cuda_launch")
             if kernel and cuda_launch and kernel.get("ts") is not None and cuda_launch.get("ts") is not None:
-                kernel_tax = kernel["ts"] - cuda_launch["ts"]
-                assert kernel_tax >= 0, f"Negative kernel tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={cuda_launch['ts']}, tax={kernel_tax}"
+                launch_tax = kernel["ts"] - cuda_launch["ts"]
+                assert launch_tax >= 0, f"Negative launch tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={cuda_launch['ts']}, tax={launch_tax}"
+                seq["kernel_tax"] = launch_tax
+            else:
+                seq["kernel_tax"] = None
+        return event_sequences
+
+    @staticmethod
+    def calculate_total_launch_tax(event_sequences: List[Dict]) -> float:
+        """
+        Calculates total launch tax across all sequences.
+
+        Args:
+            event_sequences: List of event sequence dictionaries with "kernel_tax" key.
+
+        Returns:
+            Total launch tax in microseconds.
+        """
+        total_tax = 0.0
+        for seq in event_sequences:
+            kernel_tax = seq.get("kernel_tax")
+            if kernel_tax is not None:
                 total_tax += kernel_tax
+        return total_tax
 
+    @staticmethod
+    def calculate_avg_launch_tax(event_sequences: List[Dict]) -> float:
+        """
+        Calculates average launch tax across all sequences.
+
+        Args:
+            event_sequences: List of event sequence dictionaries with "kernel_tax" key.
+
+        Returns:
+            Average launch tax in microseconds.
+        """
+        if not event_sequences:
+            return 0.0
+        
+        total_tax = SodaProfiler.calculate_total_launch_tax(event_sequences)
         num_kernels = len(event_sequences)
-        avg_tax = total_tax / num_kernels if num_kernels > 0 else 0.0
-
-        return {
-            "total": total_tax,
-            "avg": avg_tax,
-        }
+        return total_tax / num_kernels if num_kernels > 0 else 0.0
     
     def get_average_kernel_duration(self) -> Dict[str, float]:
         """
@@ -804,7 +694,7 @@ class SodaProfiler:
             # Count occurrences of this exact chain
             count = 0
             for segment in all_segments:
-                segment_kernels = [k["name"] for k, r in segment]
+                segment_kernels = [seq["kernel"]["name"] for seq in segment if seq.get("kernel")]
                 for i in range(len(segment_kernels) - exact_length + 1):
                     if tuple(segment_kernels[i:i+exact_length]) == chain:
                         count += 1
@@ -852,7 +742,7 @@ class SodaProfiler:
             Event sequences (list of dictionaries).
         """
         # Get all events organized by category 
-        self.collect_events_from_trace()
+        self.events = collect_events_from_trace(self.trace)
         event_sequences = self.get_linked_event_sequences()
         return event_sequences
     
@@ -874,6 +764,7 @@ class SodaProfiler:
         self.logger.info("Analyzing trace data to generate reports...")
         # Preprocess trace data
         event_sequences = self.preprocess_trace()
+        event_sequences = self.calculate_per_seq_launch_tax(event_sequences)
         
         # Analyze per-stream metrics
         stream_info = self.analyze_per_stream()
@@ -888,7 +779,9 @@ class SodaProfiler:
         
         # Kernel metrics
         kernel_exec_time = self.calculate_kernel_exec_time()
-        launch_tax = self.calculate_launch_tax(event_sequences)
+        total_tax = SodaProfiler.calculate_total_launch_tax(event_sequences)
+        avg_tax = SodaProfiler.calculate_avg_launch_tax(event_sequences)
+        launch_tax = {"total": total_tax, "avg": avg_tax}
         avg_kernel_dur = self.get_average_kernel_duration()
         top_k_kernels = self.get_top_k_kernels(k=3)
         

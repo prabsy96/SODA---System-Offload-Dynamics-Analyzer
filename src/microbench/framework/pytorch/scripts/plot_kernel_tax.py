@@ -44,15 +44,15 @@ def main(input_file: str, output_dir: str) -> None:
     with open(input_file, "r") as f:
         data = json.load(f)
 
-    chains = data.get("causal_chains", [])
+    sequences = data.get("sequences", [])
 
     graphs_dir = os.path.join(pytorch_output, "graphs", "kernel_tax") if output_dir is None else output_dir
     ensure_dir(graphs_dir)
 
-    for idx, chain in enumerate(chains, start=1):
-        kernel = chain.get("kernel") or {}
-        cpu_op = chain.get("cpu_op") or {}
-        meta = chain.get("meta") or {}
+    for idx, sequence in enumerate(sequences, start=1):
+        kernel = sequence.get("kernel") or {}
+        cpu_op = sequence.get("cpu_op") or {}
+        meta = sequence.get("meta") or {}
         kernel_name = kernel.get("name", "unknown")
         op_name = cpu_op.get("name", "unknown")
         values = meta.get("all_kernel_tax") or []
@@ -68,7 +68,7 @@ def main(input_file: str, output_dir: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plot kernel tax across N runs for replayed GEMM kernels.")
-    parser.add_argument("input_file", help="Input JSON file (e.g., output/replayed_gemm_kernel_chains.json)")
+    parser.add_argument("input_file", help="Input JSON file (e.g., output/replayed_gemm_kernel_sequences.json)")
     parser.add_argument("--out", default=None, help="Output directory for PNGs (default: output/graphs/kernel_tax)")
     args = parser.parse_args()
 

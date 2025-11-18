@@ -35,8 +35,8 @@ cd "$SCRIPT_DIR"
 # HuggingFace cache is already set in env.sh
 mkdir -p "$HF_HOME"
 
-echo "=== Phase 1: Extract Kernel Chains ==="
-python scripts/extract_kernel_chains.py \
+echo "=== Phase 1: Extract Event Sequences ==="
+python scripts/extract_kernel_sequences.py \
   --model gpt2 \
   --batch-size 1 \
   --seq-len 16 \
@@ -44,16 +44,16 @@ python scripts/extract_kernel_chains.py \
   --compile-type eager
 echo ""
 
-echo "=== Phase 2: Replay Kernel Chains ==="
-python scripts/replay_kernel_chains.py "$PYTORCH_OUTPUT/unique_gemm_kernel_chains.json" --runs 300 --warmup 500
+echo "=== Phase 2: Replay Event Sequences ==="
+python scripts/replay_kernel_sequences.py "$PYTORCH_OUTPUT/unique_gemm_kernel_sequences.json" --runs 300 --warmup 500
 echo ""
 
 echo "=== Phase 3: Verify Replayed Kernels ==="
-python scripts/verify_replayed_kernels.py "$PYTORCH_OUTPUT/unique_gemm_kernel_chains.json" "$PYTORCH_OUTPUT/replayed_gemm_kernel_chains.json"
+python scripts/verify_replayed_kernels.py "$PYTORCH_OUTPUT/unique_gemm_kernel_sequences.json" "$PYTORCH_OUTPUT/replayed_gemm_kernel_sequences.json"
 echo ""
 
 echo "=== Phase 4: Plot Kernel Tax Graphs ==="
-python scripts/plot_kernel_tax.py "$PYTORCH_OUTPUT/replayed_gemm_kernel_chains.json" --out "$PYTORCH_OUTPUT/graphs/"
+python scripts/plot_kernel_tax.py "$PYTORCH_OUTPUT/replayed_gemm_kernel_sequences.json" --out "$PYTORCH_OUTPUT/graphs/"
 
 echo ""
 echo "=============================================="

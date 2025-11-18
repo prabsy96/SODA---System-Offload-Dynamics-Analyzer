@@ -37,10 +37,10 @@ export BAREMETAL_BUILD="$BAREMETAL_MICROBENCH_DIR/build"
 export PYTHON_VENV="$SODA_ROOT/.venv"
 
 # Common data files referenced across scripts
-export PYTORCH_UNIQUE_KERNELS="$PYTORCH_OUTPUT/unique_gemm_kernel_chains.json"
-export PYTORCH_ALL_KERNELS="$PYTORCH_OUTPUT/all_kernel_chains.json"
-export PYTORCH_GEMM_KERNELS="$PYTORCH_OUTPUT/gemm_kernel_chains.json"
-export PYTORCH_REPLAYED_KERNELS="$PYTORCH_OUTPUT/replayed_gemm_kernel_chains.json"
+export PYTORCH_UNIQUE_KERNELS="$PYTORCH_OUTPUT/unique_gemm_kernel_sequences.json"
+export PYTORCH_ALL_KERNELS="$PYTORCH_OUTPUT/all_kernel_sequences.json"
+export PYTORCH_GEMM_KERNELS="$PYTORCH_OUTPUT/gemm_kernel_sequences.json"
+export PYTORCH_REPLAYED_KERNELS="$PYTORCH_OUTPUT/replayed_gemm_kernel_sequences.json"
 
 export BAREMETAL_JOBS="$BAREMETAL_OUTPUT/jobs.json"
 export BAREMETAL_RUNS="$BAREMETAL_OUTPUT/baremetal_gemm_runs.json"

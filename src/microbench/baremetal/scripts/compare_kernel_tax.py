@@ -2,7 +2,7 @@
 """
 Compare PyTorch and baremetal GEMM kernel launch tax.
 
-Joins results from framework/pytorch/output/unique_gemm_kernel_chains.json and
+Joins results from framework/pytorch/output/unique_gemm_kernel_sequences.json and
 baremetal/output/baremetal_gemm_runs.json, verifies kernel matching,
 computes per-kernel launch tax deltas and percentages, and emits
 baremetal/output/bm_vs_framework_report.json.
@@ -29,22 +29,22 @@ def normalize_kernel_name(name):
 
 def load_pytorch_results(pytorch_file):
     """
-    Load PyTorch kernel chains and extract per-kernel statistics.
+    Load PyTorch event sequences and extract per-kernel statistics.
     
     Returns: dict mapping job_id -> {kernel, op_signature, stats}
     """
     with open(pytorch_file, 'r') as f:
         data = json.load(f)
     
-    chains = data.get("causal_chains", [])
+    sequences = data.get("sequences", [])
     results = {}
     
-    for idx, chain in enumerate(chains):
+    for idx, sequence in enumerate(sequences):
         job_id = f"{idx+1:04d}"
         
-        kernel = chain.get("kernel", {})
-        cpu_op = chain.get("cpu_op", {})
-        meta = chain.get("meta", {})
+        kernel = sequence.get("kernel", {})
+        cpu_op = sequence.get("cpu_op", {})
+        meta = sequence.get("meta", {})
         
         # Extract op signature
         op_signature = {
@@ -264,7 +264,7 @@ def compare(pytorch_file, baremetal_file, output_file):
     rel_pytorch = os.path.relpath(pytorch_file, microbench_dir) if microbench_dir else pytorch_file
     print(f"Loading PyTorch results from {rel_pytorch}...")
     pytorch_results = load_pytorch_results(pytorch_file)
-    print(f"  Loaded {len(pytorch_results)} PyTorch kernel chains")
+    print(f"  Loaded {len(pytorch_results)} PyTorch event sequences")
     
     rel_baremetal = os.path.relpath(baremetal_file, microbench_dir) if microbench_dir else baremetal_file
     print(f"Loading baremetal results from {rel_baremetal}...")

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Generate baremetal GEMM jobs from PyTorch unique kernel chains.
+Generate baremetal GEMM jobs from PyTorch unique event sequences.
 
-Parses microbench/framework/pytorch/output/unique_gemm_kernel_chains.json and emits
+Parses microbench/framework/pytorch/output/unique_gemm_kernel_sequences.json and emits
 microbench/baremetal/output/jobs.json with all parameters needed to reproduce
 each GEMM in baremetal cuBLASLt.
 """
@@ -66,13 +66,13 @@ def infer_layout_and_ld(dims, strides):
         return ('col', stride_inner)
 
 
-def extract_gemm_params(chain):
+def extract_gemm_params(sequence):
     """
-    Extract GEMM parameters from a PyTorch kernel chain.
+    Extract GEMM parameters from a PyTorch event sequence.
     
     Returns dict with M, N, K, trans_a, trans_b, lda, ldb, ldc, alpha, beta, dtype
     """
-    cpu_op = chain.get("cpu_op", {})
+    cpu_op = sequence.get("cpu_op", {})
     op_name = cpu_op.get("name", "")
     input_dims = cpu_op.get("input_dims", [])
     input_strides = cpu_op.get("input_strides", [])
@@ -200,32 +200,32 @@ def extract_gemm_params(chain):
 
 def generate_jobs(input_file, output_file):
     """
-    Parse PyTorch unique kernel chains and generate baremetal jobs.
+    Parse PyTorch unique event sequences and generate baremetal jobs.
     """
-    # Read PyTorch unique kernel chains
+    # Read PyTorch unique event sequences
     with open(input_file, 'r') as f:
         data = json.load(f)
     
-    chains = data.get("causal_chains", [])
+    sequences = data.get("sequences", [])
     
     jobs = []
-    for idx, chain in enumerate(chains):
+    for idx, sequence in enumerate(sequences):
         job_id = f"{idx+1:04d}"
         
         # Extract GEMM parameters
-        params = extract_gemm_params(chain)
+        params = extract_gemm_params(sequence)
         
         # Skip if critical params missing
         if "m" not in params or "n" not in params or "k" not in params:
-            print(f"Warning: Skipping chain {job_id} - missing M/N/K", file=sys.stderr)
+            print(f"Warning: Skipping sequence {job_id} - missing M/N/K", file=sys.stderr)
             continue
         
         # Get target kernel name
-        kernel = chain.get("kernel", {})
+        kernel = sequence.get("kernel", {})
         target_kernel = kernel.get("name", "unknown")
         
         # Get operation type
-        cpu_op = chain.get("cpu_op", {})
+        cpu_op = sequence.get("cpu_op", {})
         op_name = cpu_op.get("name", "").replace("aten::", "")
         
         # Build job entry
