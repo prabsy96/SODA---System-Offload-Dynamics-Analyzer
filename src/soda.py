@@ -174,7 +174,7 @@ class SodaProfiler:
         Returns:
             The path to the generated Chrome trace JSON file.
         """
-        self.logger.info("Profiling model forward pass...")
+        self.logger.info("=== Profiling Model Forward Pass ===")
         
         # Warm-up runs
         with torch.no_grad():
@@ -196,7 +196,7 @@ class SodaProfiler:
         # Load trace data into memory immediately
         self.trace = self.load_trace_file(self.trace_file_path)
         
-        self.logger.info(f"Chrome trace file generated at: {self.trace_file_path}")
+        self.logger.info(f"* Chrome trace file generated at: {self.trace_file_path}")
         return str(self.trace_file_path)
 
     def profile_forward_pass(self, inputs: Dict[str, torch.Tensor], batch_size: int = None, seq_len: int = None) -> str:
@@ -233,7 +233,7 @@ class SodaProfiler:
         Returns:
             The path to the generated Chrome trace JSON file.
         """
-        self.logger.info("Profiling model forward pass...")
+        self.logger.info("=== Profiling Model Forward Pass ===")
         
         # Warm-up runs
         with torch.no_grad():
@@ -255,7 +255,7 @@ class SodaProfiler:
         # Load trace data into memory immediately
         self.trace = self.load_trace_file(self.trace_file_path)
         
-        self.logger.info(f"Chrome trace file generated at: {self.trace_file_path}")
+        self.logger.info(f"* Chrome trace file generated at: {self.trace_file_path}")
         return str(self.trace_file_path)
 
     def load_trace_file(self, file_path: Path) -> Dict[str, Any]:
@@ -848,17 +848,19 @@ class SodaProfiler:
                     fusion_recommendations.append((chain, count, proximity_score))
         
         # Report findings
-        self.logger.info(f"--- Fusion Analysis (Length={exact_length}, Threshold={prox_score_threshold}) ---")
+        self.logger.info(f"=== Fusion Analysis (Length={exact_length}, Threshold={prox_score_threshold}) ===")
         if not fusion_recommendations:
-            self.logger.info("No kernel chains met the fusion criteria.")
+            self.logger.info("\t* No kernel chains met the fusion criteria.")
             return None
 
         sorted_recommendations = sorted(fusion_recommendations, key=lambda x: x[1], reverse=True)
-        self.logger.info(f"Found {len(sorted_recommendations)} potential fusion candidates:")
-        for chain, count, score in sorted_recommendations:
-            chain_str = ' -> '.join(chain)
-            self.logger.info(f"  - Chain: [{chain_str}] (Found {count} times, Proximity Score: {score:.2f})")
+        self.logger.info(f"\t* Found {len(sorted_recommendations)} potential fusion candidates:")
+        for idx, (chain, count, score) in enumerate(sorted_recommendations, 1):
+            self.logger.info(f"\t* Chain {idx}\tFound {count} times\tProx. Score = {score:.2f}")
+            for kernel in chain:
+                self.logger.info(f"\t\t** {kernel}")
         
+        self.logger.info("")
         # Return structured results
         return {
             "length": exact_length,
@@ -883,7 +885,7 @@ class SodaProfiler:
         """
         # Get all events organized by category 
         self.events = SodaProfiler.collect_events_from_trace(self.trace)
-        self.logger.info(f"Analyzing {len(self.events['gpu']['kernels'])} kernel events from profiled run.")
+        self.logger.info(f"Analyzing {len(self.events['gpu']['kernels'])} kernel events from profiled run...")
         event_sequences = SodaProfiler.get_linked_event_sequences(self.events)
         return event_sequences
     
@@ -902,7 +904,7 @@ class SodaProfiler:
             - event_sequences: Event sequences
             - avg_kernel_dur: Average kernel duration results
         """
-        self.logger.info("Analyzing trace data to generate reports...")
+        self.logger.info("=== Analyzing Trace Data ===")
         # Preprocess trace data
         event_sequences = self.preprocess_trace()
         event_sequences = SodaProfiler.calculate_per_seq_launch_tax(event_sequences)
@@ -929,7 +931,7 @@ class SodaProfiler:
         # Fusion analysis
         fusion_results = None
         if self.args.fusion:
-            self.logger.info("--- Kernel Fusion Analysis ---")
+            self.logger.info("=== Kernel Fusion Analysis ===")
             fusion_results = {}
             for f in self.args.fusion:
                 fusion_results[f] = self.kernelchains(event_sequences, f, self.args.prox_score)
@@ -978,43 +980,47 @@ class SodaProfiler:
         top_k_kernels = self.results["top_k_kernels"]
         
         # --- Enhanced Reporting ---
-        self.logger.info("--- Performance Metrics (ms) ---")
-        self.logger.info(f"Inference runtime: {metrics['inference_runtime_ms']:.4f}")
-        self.logger.info(f"Total kernel execution time: {metrics['total_kernel_exec_time_ms']:.4f}")
-        self.logger.info(f"GPU busy time (concurrent-aware): {metrics['gpu_busy_time_ms']:.4f}")
-        self.logger.info(f"GPU idle time: {metrics['gpu_idle_time_ms']:.4f}")
-        self.logger.info(f"GPU utilization: {metrics['gpu_utilization_percent']:.2f}%")
-        self.logger.info(f"Total kernel launch tax (TKLQT): {metrics['total_kernel_launch_tax_ms']:.4f}")
-        self.logger.info(f"Number of kernels: {metrics['num_total_kernels']}")
-        self.logger.info(f"Active streams: {metrics['active_streams']}")
+        self.logger.info("")
+        self.logger.info("=== Performance Metrics ===")
+        self.logger.info(f"\t* Inference runtime (ms): {metrics['inference_runtime_ms']:.4f}")
+        self.logger.info(f"\t* Total kernel execution time (ms): {metrics['total_kernel_exec_time_ms']:.4f}")
+        self.logger.info(f"\t* GPU busy time (concurrent-aware) (ms): {metrics['gpu_busy_time_ms']:.4f}")
+        self.logger.info(f"\t* GPU idle time (ms): {metrics['gpu_idle_time_ms']:.4f}")
+        self.logger.info(f"\t* GPU utilization: {metrics['gpu_utilization_percent']:.2f}%")
+        self.logger.info(f"\t* Total kernel launch tax (TKLQT) (ms): {metrics['total_kernel_launch_tax_ms']:.4f}")
+        self.logger.info(f"\t* Number of kernels: {metrics['num_total_kernels']}")
+        self.logger.info(f"\t* Active streams: {metrics['active_streams']}")
         
         if metrics['num_total_kernels'] > 0:
-            self.logger.info(f"Avg. kernel launch tax per kernel: {metrics['avg_kernel_launch_tax_ms']:.4f}")
-            self.logger.info(f"Avg. execution time per kernel: {metrics['avg_kernel_exec_time_ms']:.4f}")
+            self.logger.info(f"\t* Avg. kernel launch tax per kernel (ms): {metrics['avg_kernel_launch_tax_ms']:.4f}")
+            self.logger.info(f"\t* Avg. execution time per kernel (ms): {metrics['avg_kernel_exec_time_ms']:.4f}")
         
+        self.logger.info("")
         # --- Per-Stream Breakdown ---
-        self.logger.info("--- Per-Stream Analysis ---")
+        self.logger.info("=== Per-Stream Analysis ===")
         for stream_id, data in stream_info.items():
             self.logger.info(
-                f"  Stream {stream_id}: {data['op_count']} ops "
+                f"\t* Stream {stream_id}: {data['op_count']} ops "
                 f"({data['kernel_count']} kernels), "
                 f"Busy Time: {us_to_ms(data['true_gpu_busy_time']):.4f} ms"
             )
         
+        self.logger.info("")
         # Top-K kernels 
         if top_k_kernels["by_frequency"]:
-            self.logger.info("--- Top-3 Kernels by Frequency ---")
+            self.logger.info("=== Top-3 Kernels by Frequency ===")
             for i, (name, data) in enumerate(top_k_kernels["by_frequency"], 1):
                 self.logger.info(
-                    f"#{i}: {name} "
+                    f"\t* #{i}: {name} "
                     f"(Frequency: {int(data['frequency'])}, "
                     f"Total Duration: {us_to_ms(data['duration']):.4f} ms)"
                 )
             
-            self.logger.info("--- Top-3 Kernels by Duration ---")
+            self.logger.info("")
+            self.logger.info("=== Top-3 Kernels by Duration ===")
             for i, (name, data) in enumerate(top_k_kernels["by_duration"], 1):
                 self.logger.info(
-                    f"#{i}: {name} "
+                    f"\t* #{i}: {name} "
                     f"(Total Duration: {us_to_ms(data['duration']):.4f} ms, "
                     f"Frequency: {int(data['frequency'])})"
                 )
@@ -1095,7 +1101,7 @@ class SodaProfiler:
         with open(self.report_file_path, "w", encoding="utf-8") as f:
             json.dump(output, f, indent=2, ensure_ascii=False)
         
-        self.logger.info(f"Metrics exported to: {self.report_file_path}")
+        self.logger.info(f"* Metrics exported to: {self.report_file_path}")
         return str(self.report_file_path)
     
     def exit(self) -> None:
