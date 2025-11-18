@@ -7,7 +7,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from verify_replayed_kernels import get_clean_kernel_name
+from soda import SodaProfiler
 
 
 def ensure_dir(path: str) -> None:
@@ -16,7 +16,7 @@ def ensure_dir(path: str) -> None:
 
 def format_filename(index: int, op_name: str, kernel_name: str) -> str:
     op_short = op_name.replace("::", "_")
-    kernel_short = get_clean_kernel_name(kernel_name).strip()
+    kernel_short = SodaProfiler.get_clean_kernel_name(kernel_name).strip()
     return f"{index:02d}_{op_short}_{kernel_short}.png"
 
 
@@ -63,7 +63,7 @@ def main(input_file: str, output_dir: str) -> None:
 
         filename = format_filename(idx, op_name, kernel_name)
         out_path = os.path.join(graphs_dir, filename)
-        plot_kernel_tax(values, f"{op_name} -> {get_clean_kernel_name(kernel_name)}", out_path)
+        plot_kernel_tax(values, f"{op_name} -> {SodaProfiler.get_clean_kernel_name(kernel_name)}", out_path)
 
 
 if __name__ == "__main__":

@@ -2,27 +2,7 @@ import json
 import os
 import re
 import sys
-
-def get_clean_kernel_name(kernel_name):
-    """Extract a clean kernel name from the full signature."""
-    # Extract everything before '<' (removes template parameters)
-    # This handles cases where '(' appears in template params like "(anonymous namespace)"
-    if '<' in kernel_name:
-        clean_kernel_name = kernel_name.split('<')[0].strip()
-    elif '(' in kernel_name:
-        # If no '<' but has '(', extract before '(' (function parameters)
-        clean_kernel_name = kernel_name.split('(')[0].strip()
-    else:
-        clean_kernel_name = kernel_name
-    
-    # Remove 'void' prefix if present
-    clean_kernel_name = clean_kernel_name.replace('void', '').strip()
-    
-    # Extract just the kernel name (last part after '::')
-    if '::' in clean_kernel_name:
-        clean_kernel_name = clean_kernel_name.split('::')[-1]
-    
-    return clean_kernel_name.strip()
+from soda import SodaProfiler
 
 def _to_tuple_int(x):
     if isinstance(x, (list, tuple)):
@@ -246,7 +226,7 @@ def verify_event_sequences(original_sequences, replayed_sequences):
                     used_replayed_indices.add(idx)
                     break
         
-        print(f"\t* Kernel: {get_clean_kernel_name(original_kernel['name'])}")
+        print(f"\t* Kernel: {SodaProfiler.get_clean_kernel_name(original_kernel['name'])}")
         
         if matched_kernel:
             print_launch_config_table(original_config, matched_kernel)
@@ -262,7 +242,7 @@ def verify_event_sequences(original_sequences, replayed_sequences):
             for replayed_sequence in matching_sequences[:3]:
                 replayed_k = replayed_sequence.get("kernel", {})
                 if replayed_k:
-                    print(f"\t\t- {get_clean_kernel_name(replayed_k.get('name', ''))}\tgrid={replayed_k.get('grid')}\tblock={replayed_k.get('block')}\tshared_mem={replayed_k.get('shared_memory', 'N/A')}")
+                    print(f"\t\t- {SodaProfiler.get_clean_kernel_name(replayed_k.get('name', ''))}\tgrid={replayed_k.get('grid')}\tblock={replayed_k.get('block')}\tshared_mem={replayed_k.get('shared_memory', 'N/A')}")
             if len(matching_sequences) > 3:
                 print(f"\t\t... and {len(matching_sequences) - 3} more")
             mismatches += 1

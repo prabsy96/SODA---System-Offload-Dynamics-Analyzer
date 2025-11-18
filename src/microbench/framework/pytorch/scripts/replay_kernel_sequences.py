@@ -10,7 +10,7 @@ from torch.profiler import profile, ProfilerActivity
 profiling_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, profiling_dir)
 from extract_kernel_sequences import setup_deterministic_mode, collect_env_metadata, sanitize_trace_file, save_output, extract_event_sequences, filter_gemm_sequences, calculate_avg_min_max, make_kernel_identity_key, group_sequences_by_identity, aggregate_execution_metrics
-from verify_replayed_kernels import get_clean_kernel_name
+from soda import SodaProfiler
 
 def restore_environment(metadata):
     torch.manual_seed(metadata["seeds"]["torch_manual_seed"])
@@ -195,7 +195,7 @@ def replay_all_event_sequences(event_sequences, env_metadata, runs=1, warmup_run
         cpu_op = event_sequence.get("cpu_op")
         assert cpu_op is not None, f"CPU operation is None for event sequence {i}"
         
-        exp_kernel_name = get_clean_kernel_name(event_sequence['kernel']['name'])
+        exp_kernel_name = SodaProfiler.get_clean_kernel_name(event_sequence['kernel']['name'])
         print(f"* [{i+1}/{len(event_sequences)}] {cpu_op['name']} -> {exp_kernel_name}")
         
         replayed_sequences = replay_kernel_from_cpu_op(cpu_op, exp_kernel_name, env_metadata, i+1, runs=runs, warmup_runs=warmup_runs)

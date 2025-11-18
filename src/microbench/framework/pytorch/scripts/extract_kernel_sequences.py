@@ -8,7 +8,6 @@ import shutil
 from collections import defaultdict
 from torch.profiler import profile, ProfilerActivity
 from soda import ModelHandler, SodaProfiler
-from utils import collect_events_from_trace
 
 # GEMM operations to extract
 GEMM_OPS = ['aten::addmm', 'aten::mm', 'aten::bmm']
@@ -329,7 +328,7 @@ def extract_event_sequences(trace_file):
         trace = json.load(f)
     
     # Collect events from trace
-    events = collect_events_from_trace(trace)
+    events = SodaProfiler.collect_events_from_trace(trace)
     
     # Use SodaProfiler function to build event sequences
     event_sequences = SodaProfiler.get_linked_event_sequences(events)
