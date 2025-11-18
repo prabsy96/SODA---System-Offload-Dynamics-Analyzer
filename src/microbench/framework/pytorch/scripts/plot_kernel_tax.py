@@ -37,15 +37,16 @@ def plot_kernel_tax(values: List[float], title: str, out_path: str) -> None:
 
 def main(input_file: str, output_dir: str) -> None:
     # Resolve file paths
+    pytorch_output = os.environ.get("PYTORCH_OUTPUT", "output")
     if not (os.path.isabs(input_file) or os.path.exists(input_file)):
-        input_file = os.path.join("output", input_file)
+        input_file = os.path.join(pytorch_output, input_file)
 
     with open(input_file, "r") as f:
         data = json.load(f)
 
     chains = data.get("causal_chains", [])
 
-    graphs_dir = os.path.join("output", "graphs", "kernel_tax") if output_dir is None else output_dir
+    graphs_dir = os.path.join(pytorch_output, "graphs", "kernel_tax") if output_dir is None else output_dir
     ensure_dir(graphs_dir)
 
     for idx, chain in enumerate(chains, start=1):

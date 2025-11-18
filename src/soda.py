@@ -1238,24 +1238,23 @@ class ModelHandler:
         else:
             return self.load_encoder()
     
-    def generate_synthetic_inputs(self, batch_size: int, seq_len: int, device: str) -> Dict[str, torch.Tensor]:
+    def generate_synthetic_inputs(self, batch_size: int, seq_len: int) -> Dict[str, torch.Tensor]:
         """
         Generates synthetic tokenized inputs for profiling.
         
         Args:
             batch_size: Batch size for the inputs.
             seq_len: Sequence length for the inputs.
-            device: Device to create tensors on ('cpu' or 'cuda').
             
         Returns:
             Dictionary with 'input_ids' and 'attention_mask' tensors.
         """
         return {
             "input_ids": torch.randint(
-                1, self.tokenizer.vocab_size, size=(batch_size, seq_len), device=device
+                1, self.tokenizer.vocab_size, size=(batch_size, seq_len), device=self.device
             ),
             "attention_mask": torch.ones(
-                batch_size, seq_len, device=device
+                batch_size, seq_len, device=self.device
             ),
         }
 
@@ -1286,7 +1285,7 @@ def main() -> int:
         # Generate synthetic inputs
         print(f"Generating synthetic input: batch_size={args.batch_size}, seq_len={args.seq_len}")
         model_inputs = model_handler.generate_synthetic_inputs(
-            args.batch_size, args.seq_len, args.device
+            args.batch_size, args.seq_len
         )
 
         # Initialize profiler 

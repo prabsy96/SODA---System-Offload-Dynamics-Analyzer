@@ -23,8 +23,8 @@ export FRAMEWORK_DIR="$MICROBENCH_DIR/framework"
 export PYTORCH_MICROBENCH_DIR="$FRAMEWORK_DIR/pytorch"
 
 # Microbenchmark output directories
-export BAREMETAL_OUTPUT="$BAREMETAL_MICROBENCH_DIR/output"
-export PYTORCH_OUTPUT="$PYTORCH_MICROBENCH_DIR/output"
+export BAREMETAL_OUTPUT="$SODA_OUTPUT/microbench/baremetal"
+export PYTORCH_OUTPUT="$SODA_OUTPUT/microbench/framework/pytorch"
 
 # Microbenchmark script directories
 export BAREMETAL_SCRIPTS="$BAREMETAL_MICROBENCH_DIR/scripts"

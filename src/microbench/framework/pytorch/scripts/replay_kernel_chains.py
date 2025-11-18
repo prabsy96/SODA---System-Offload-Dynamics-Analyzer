@@ -117,7 +117,7 @@ def create_input_tensors(cpu_op, seed):
 
 def profile_operation(op_name, inputs, runs=1, trace_filename=None, warmup_runs=100):
     """Profile a PyTorch operation N times and return trace file path."""
-    output_dir = "output"
+    output_dir = os.environ.get("PYTORCH_OUTPUT", "output")
     os.makedirs(output_dir, exist_ok=True)
     
     if trace_filename is None:
@@ -166,7 +166,7 @@ def replay_kernel_from_cpu_op(cpu_op, exp_kernel_name, metadata, kernel_idx, run
     inputs = create_input_tensors(cpu_op, seed)
     
     # Save trace file in kernel_traces folder
-    output_dir = "output"
+    output_dir = os.environ.get("PYTORCH_OUTPUT", "output")
     kernel_traces_dir = os.path.join(output_dir, "traces", "kernel_traces")
     os.makedirs(kernel_traces_dir, exist_ok=True)
     
@@ -211,7 +211,7 @@ def run_replay_pipeline(input_file, runs=1, warmup_runs=100):
     """
     Main pipeline: load -> setup -> replay all -> save.
     """
-    output_dir = "output"
+    output_dir = os.environ.get("PYTORCH_OUTPUT", "output")
     os.makedirs(output_dir, exist_ok=True)
 
     # Clean previous kernel traces 

@@ -273,7 +273,7 @@ def run_verification_pipeline(original_file, replayed_file):
     """
     Main pipeline: load -> verify -> save results.
     """
-    output_dir = "output"
+    output_dir = os.environ.get("PYTORCH_OUTPUT", "output")
     os.makedirs(output_dir, exist_ok=True)
     
     # Step 1: Load kernel chain files

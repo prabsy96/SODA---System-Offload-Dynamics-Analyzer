@@ -59,7 +59,7 @@ def main():
     
     # Generate synthetic inputs
     model_inputs = model_handler.generate_synthetic_inputs(
-        args.batch_size, args.seq_len, args.device
+        args.batch_size, args.seq_len
     )
     
     # Initialize profiler
