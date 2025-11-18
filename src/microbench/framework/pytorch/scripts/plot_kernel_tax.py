@@ -22,12 +22,12 @@ def format_filename(index: int, op_name: str, kernel_name: str) -> str:
 
 def plot_kernel_tax(values: List[float], title: str, out_path: str) -> None:
     plt.figure(figsize=(8, 4))
-    plt.plot(range(1, len(values) + 1), values, marker="o", markersize=0.3, linewidth=0.8, label="kernel_tax_us")
+    plt.plot(range(1, len(values) + 1), values, marker="o", markersize=0.3, linewidth=0.8, label="Kernel Tax")
     if values:
         avg = sum(values) / len(values)
         plt.axhline(avg, color="red", linestyle="--", label=f"avg={avg:.3f} us")
     plt.xlabel("run")
-    plt.ylabel("kernel_tax_us")
+    plt.ylabel("Kernel Tax (us)")
     plt.title(title)
     plt.legend(loc="best")
     plt.tight_layout()
@@ -55,7 +55,7 @@ def main(input_file: str, output_dir: str) -> None:
         meta = chain.get("meta") or {}
         kernel_name = kernel.get("name", "unknown")
         op_name = cpu_op.get("name", "unknown")
-        values = meta.get("all_kernel_tax_us") or []
+        values = meta.get("all_kernel_tax") or []
 
         if not values:
             # Nothing to plot

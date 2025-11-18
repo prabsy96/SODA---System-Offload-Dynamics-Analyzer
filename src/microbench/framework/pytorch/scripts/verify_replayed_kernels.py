@@ -77,7 +77,7 @@ def print_launch_config_table(original_config, matched_kernel):
     orig_regs = original_config.get("registers_per_thread") or "N/A"
     orig_occ = original_config.get("occupancy") or "N/A"
     orig_stream = original_config.get("stream") or "N/A"
-    orig_dur = original_config.get("duration_us") or "N/A"
+    orig_dur = original_config.get("dur") or "N/A"
     
     replayed_grid = str(matched_kernel['grid'])
     replayed_block = str(matched_kernel['block'])
@@ -85,7 +85,7 @@ def print_launch_config_table(original_config, matched_kernel):
     replayed_regs = matched_kernel.get('registers_per_thread') or 'N/A'
     replayed_occ = matched_kernel.get('occupancy') or 'N/A'
     replayed_stream = matched_kernel.get('stream') or 'N/A'
-    replayed_dur = matched_kernel.get('duration_us') or 'N/A'
+    replayed_dur = matched_kernel.get('dur') or 'N/A'
     
     print(f"\t\t{'grid':<20} {orig_grid:<25} {replayed_grid:<25}")
     print(f"\t\t{'block':<20} {orig_block:<25} {replayed_block:<25}")
@@ -93,7 +93,7 @@ def print_launch_config_table(original_config, matched_kernel):
     print(f"\t\t{'registers':<20} {orig_regs:<25} {replayed_regs:<25}")
     print(f"\t\t{'occupancy':<20} {orig_occ:<25} {replayed_occ:<25}")
     print(f"\t\t{'stream':<20} {orig_stream:<25} {replayed_stream:<25}")
-    print(f"\t\t{'duration_us':<20} {orig_dur:<25} {replayed_dur:<25}")
+    print(f"\t\t{'dur (μs)':<20} {orig_dur:<25} {replayed_dur:<25}")
 
 def print_summary(matches, partial_matches, mismatches):
     """Print verification summary."""
@@ -230,7 +230,7 @@ def verify_kernel_chains(original_kernel_chains, replayed_kernel_chains):
             "registers_per_thread": original_kernel.get("registers_per_thread"),
             "occupancy": original_kernel.get("occupancy"),
             "stream": original_kernel.get("stream"),
-            "duration_us": original_kernel.get("avg_duration_us") or original_kernel.get("duration_us")
+            "dur": original_kernel.get("avg_dur", original_kernel.get("dur"))
         }
         
         # Check if any replayed kernel matches

@@ -659,21 +659,21 @@ class SodaProfiler:
         if not event_sequences:
             return {"total": 0.0, "avg": 0.0}
 
-        total_tax_us = 0.0
+        total_tax = 0.0
         for seq in event_sequences:
             kernel = seq.get("kernel")
             cuda_launch = seq.get("cuda_launch")
             if kernel and cuda_launch and kernel.get("ts") is not None and cuda_launch.get("ts") is not None:
-                kernel_tax_us = kernel["ts"] - cuda_launch["ts"]
-                assert kernel_tax_us >= 0, f"Negative kernel tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={cuda_launch['ts']}, tax={kernel_tax_us}"
-                total_tax_us += kernel_tax_us
+                kernel_tax = kernel["ts"] - cuda_launch["ts"]
+                assert kernel_tax >= 0, f"Negative kernel tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={cuda_launch['ts']}, tax={kernel_tax}"
+                total_tax += kernel_tax
 
         num_kernels = len(event_sequences)
-        avg_tax_us = total_tax_us / num_kernels if num_kernels > 0 else 0.0
+        avg_tax = total_tax / num_kernels if num_kernels > 0 else 0.0
 
         return {
-            "total": total_tax_us,
-            "avg": avg_tax_us,
+            "total": total_tax,
+            "avg": avg_tax,
         }
     
     def get_average_kernel_duration(self) -> Dict[str, float]:

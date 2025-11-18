@@ -189,24 +189,25 @@ def group_chains_by_identity(chains):
 def aggregate_execution_metrics(instances):
     """
     Aggregate execution metrics across a group of identical kernel chains.
+    All time values in microseconds.
     Produces avg/min/max for:
-      - kernel.duration_us
+      - kernel.dur
       - cpu_op.dur
       - cuda_launch.dur
-      - kernel_tax_us 
+      - kernel_tax
     Returns a deep-copied, aggregated base instance.
     """
     base_instance = copy.deepcopy(instances[0])
     
     # Aggregate kernel duration
     kernel_durations = [
-        inst.get("kernel", {}).get("duration_us")
+        inst.get("kernel", {}).get("dur")
         for inst in instances
-        if inst.get("kernel", {}).get("duration_us") is not None
+        if inst.get("kernel", {}).get("dur") is not None
     ]
     if kernel_durations:
-        base_instance["kernel"].update(calculate_avg_min_max(kernel_durations, "duration_us"))
-        base_instance["kernel"]["all_duration_us"] = kernel_durations
+        base_instance["kernel"].update(calculate_avg_min_max(kernel_durations, "dur"))
+        base_instance["kernel"]["all_dur"] = kernel_durations
     
     # Aggregate cpu_op duration
     cpu_op_durations = [
@@ -215,8 +216,8 @@ def aggregate_execution_metrics(instances):
         if inst.get("cpu_op", {}).get("dur") is not None
     ]
     if cpu_op_durations:
-        base_instance["cpu_op"].update(calculate_avg_min_max(cpu_op_durations, "dur_us"))
-        base_instance["cpu_op"]["all_dur_us"] = cpu_op_durations
+        base_instance["cpu_op"].update(calculate_avg_min_max(cpu_op_durations, "dur"))
+        base_instance["cpu_op"]["all_dur"] = cpu_op_durations
     
     # Aggregate cuda_launch duration
     cuda_launch_durations = [
@@ -225,23 +226,23 @@ def aggregate_execution_metrics(instances):
         if inst.get("cuda_launch", {}).get("dur") is not None
     ]
     if cuda_launch_durations:
-        base_instance["cuda_launch"].update(calculate_avg_min_max(cuda_launch_durations, "dur_us"))
-        base_instance["cuda_launch"]["all_dur_us"] = cuda_launch_durations
+        base_instance["cuda_launch"].update(calculate_avg_min_max(cuda_launch_durations, "dur"))
+        base_instance["cuda_launch"]["all_dur"] = cuda_launch_durations
     
-    # Aggregate kernel_tax_us
+    # Aggregate kernel_tax
     kernel_tax_values = [
-        inst.get("kernel_tax_us")
+        inst.get("kernel_tax")
         for inst in instances
-        if inst.get("kernel_tax_us") is not None
+        if inst.get("kernel_tax") is not None
     ]
 
-    meta = {"count": len(instances), "all_kernel_tax_us": kernel_tax_values}
-    meta.update(calculate_avg_min_max(kernel_tax_values, "kernel_tax_us"))
+    meta = {"count": len(instances), "all_kernel_tax": kernel_tax_values}
+    meta.update(calculate_avg_min_max(kernel_tax_values, "kernel_tax"))
     base_instance["meta"] = meta
 
     # Clean up unneeded fields
-    base_instance.pop("kernel_tax_us")
-    base_instance["kernel"].pop("duration_us")
+    base_instance.pop("kernel_tax")
+    base_instance["kernel"].pop("dur")
     base_instance["cpu_op"].pop("dur")
     base_instance["cuda_launch"].pop("dur")
     base_instance["kernel"].pop("ts")
@@ -301,7 +302,7 @@ def collect_events_from_trace(trace):
                 "device": args.get("device"),
                 "context": args.get("context"),
                 "queued": args.get("queued"),
-                "duration_us": event.get("dur"),
+                "dur": event.get("dur"),
                 "ts": event.get("ts")
             })
     
@@ -326,7 +327,7 @@ def build_kernel_chains(kernels, cpu_ops, cuda_launches):
             "kernel": kernel,
             "cuda_launch": cuda_launch,
             "cpu_op": cpu_op,
-            "kernel_tax_us": kernel_tax
+            "kernel_tax": kernel_tax
         })
     
     return kernel_chains
@@ -343,7 +344,7 @@ def filter_gemm_kernel_chains(kernel_chains):
     return gemm_chains
 
 def save_output(output_dir, filename, data, env_metadata, summary=None):
-    """Save data to JSON file."""
+    """Save data to JSON file. All time values in microseconds."""
     if summary is None:
         summary = {
             "total_kernels": len([c for c in data if c.get("kernel")]),

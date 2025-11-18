@@ -136,7 +136,7 @@ def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
     - Find cudaLaunchKernel events (cuda_runtime)
     - Find kernel events (kernel category)
     - Link via correlation ID
-    - Compute kernel_tax_us = kernel.ts - cudaLaunchKernel.ts
+    - Compute kernel_tax = kernel.ts - cudaLaunchKernel.ts (microseconds)
     - Aggregate statistics
     
     Args:
@@ -231,9 +231,9 @@ def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
                 skipped += 1
                 continue
             
-            kernel_tax_us = kernel["ts"] - cuda_launch["ts"]
-            assert kernel_tax_us >= 0, f"Negative kernel tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={cuda_launch['ts']}, tax={kernel_tax_us}"
-            kernel_tax_values.append(kernel_tax_us)
+            kernel_tax = kernel["ts"] - cuda_launch["ts"]
+            assert kernel_tax >= 0, f"Negative kernel tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={cuda_launch['ts']}, tax={kernel_tax}"
+            kernel_tax_values.append(kernel_tax)
             
             # Capture kernel info from first kernel (all should be same)
             if kernel_info is None:
@@ -251,9 +251,9 @@ def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
         return None
     
     stats = {
-        "avg_kernel_tax_us": sum(kernel_tax_values) / len(kernel_tax_values),
-        "min_kernel_tax_us": min(kernel_tax_values),
-        "max_kernel_tax_us": max(kernel_tax_values),
+        "avg_kernel_tax": sum(kernel_tax_values) / len(kernel_tax_values),
+        "min_kernel_tax": min(kernel_tax_values),
+        "max_kernel_tax": max(kernel_tax_values),
         "count": len(kernel_tax_values),
     }
     
@@ -346,7 +346,7 @@ def run_suite(jobs_file, baremetal_dir, output_file):
         
         runs.append(run_entry)
         print(f"\t** Kernel: {result['kernel']['name'][:60]}...")
-        print(f"\t** Avg kernel tax: {result['stats']['avg_kernel_tax_us']:.2f} μs")
+        print(f"\t** Avg kernel tax: {result['stats']['avg_kernel_tax']:.2f} μs")
     
     # Collect environment info
     env = collect_gpu_info()

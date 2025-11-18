@@ -65,9 +65,9 @@ def load_pytorch_results(pytorch_file):
         
         # Extract stats
         stats = {
-            "avg_kernel_tax_us": meta.get("avg_kernel_tax_us", 0.0),
-            "min_kernel_tax_us": meta.get("min_kernel_tax_us", 0.0),
-            "max_kernel_tax_us": meta.get("max_kernel_tax_us", 0.0),
+            "avg_kernel_tax": meta.get("avg_kernel_tax", 0.0),
+            "min_kernel_tax": meta.get("min_kernel_tax", 0.0),
+            "max_kernel_tax": meta.get("max_kernel_tax", 0.0),
             "count": meta.get("count", 0),
         }
         
@@ -176,11 +176,11 @@ def compare_results(pytorch_results, baremetal_results):
         # Verify kernel match
         name_match, config_match = verify_kernel_match(pytorch["kernel"], baremetal["kernel"])
         
-        # Compute deltas
-        fw_avg = pytorch["stats"]["avg_kernel_tax_us"]
-        bm_avg = baremetal["stats"]["avg_kernel_tax_us"]
+        # Compute deltas (all values in microseconds)
+        fw_avg = pytorch["stats"]["avg_kernel_tax"]
+        bm_avg = baremetal["stats"]["avg_kernel_tax"]
         
-        delta_us = fw_avg - bm_avg
+        delta = fw_avg - bm_avg
         # Calculate percentage difference: (FW - BM) / FW * 100
         # Shows how much faster BM is compared to FW (base)
         delta_pct = ((fw_avg - bm_avg) / fw_avg * 100) if fw_avg > 0 else 0.0
@@ -200,19 +200,19 @@ def compare_results(pytorch_results, baremetal_results):
                 "config_match": config_match,
             },
             "framework": {
-                "avg_kernel_tax_us": fw_avg,
-                "min_kernel_tax_us": pytorch["stats"]["min_kernel_tax_us"],
-                "max_kernel_tax_us": pytorch["stats"]["max_kernel_tax_us"],
+                "avg_kernel_tax": fw_avg,
+                "min_kernel_tax": pytorch["stats"]["min_kernel_tax"],
+                "max_kernel_tax": pytorch["stats"]["max_kernel_tax"],
                 "count": pytorch["stats"]["count"],
             },
             "baremetal": {
                 "kernel_name": baremetal["kernel"]["name"],
-                "avg_kernel_tax_us": bm_avg,
-                "min_kernel_tax_us": baremetal["stats"]["min_kernel_tax_us"],
-                "max_kernel_tax_us": baremetal["stats"]["max_kernel_tax_us"],
+                "avg_kernel_tax": bm_avg,
+                "min_kernel_tax": baremetal["stats"]["min_kernel_tax"],
+                "max_kernel_tax": baremetal["stats"]["max_kernel_tax"],
                 "count": baremetal["stats"]["count"],
             },
-            "delta_us": delta_us,
+            "delta": delta,
             "delta_pct": delta_pct,
         }
         
@@ -234,9 +234,9 @@ def print_summary(matches):
     
     for match in matches:
         kernel_short = match["kernel"]["name"][:38]
-        fw_avg = match["framework"]["avg_kernel_tax_us"]
-        bm_avg = match["baremetal"]["avg_kernel_tax_us"]
-        delta = match["delta_us"]
+        fw_avg = match["framework"]["avg_kernel_tax"]
+        bm_avg = match["baremetal"]["avg_kernel_tax"]
+        delta = match["delta"]
         delta_pct = match["delta_pct"]
         
         name_match = "✓" if match["match_status"]["name_match"] else "✗"
