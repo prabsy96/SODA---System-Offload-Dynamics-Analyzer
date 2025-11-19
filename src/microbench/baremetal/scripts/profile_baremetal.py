@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Run baremetal GEMM suite under nsys profiling and aggregate results.
+Profile baremetal GEMM kernels using matched algorithms (profiling phase).
 
-Reads jobs from baremetal/output/jobs.json, builds C++ binary, runs each job
-under nsys profiling, parses traces, computes kernel launch tax statistics,
-and emits baremetal/output/baremetal_gemm_runs.json.
+Reads jobs from baremetal/output/jobs.json, uses matched_algo_index from
+algorithm matching phase, runs full nsys profiling, computes kernel launch
+tax statistics, and emits baremetal/output/baremetal_gemm_runs.json.
+
+This phase assumes search_algorithm_indices.py has already been run.
 """
 
 import json
@@ -13,7 +15,6 @@ import sys
 import subprocess
 import re
 from pathlib import Path
-from soda import SodaProfiler
 
 # Module-level variable for microbench directory (set in __main__)
 microbench_dir = None
@@ -50,266 +51,11 @@ def build_binary(baremetal_dir):
     return True
 
 
-def get_available_algorithm_count(job, binary_path):
-    """
-    Query how many algorithms are available for this problem using --query_algo_count flag.
-    
-    Returns: (max_index, total_count) or (None, None) if query fails
-    """
-    base_args = [
-        binary_path,
-        "--m", str(job["m"]),
-        "--n", str(job["n"]),
-        "--k", str(job["k"]),
-        "--lda", str(job["lda"]),
-        "--ldb", str(job["ldb"]),
-        "--ldc", str(job["ldc"]),
-        "--order_a", job.get("order_a", "row"),
-        "--order_b", job.get("order_b", "row"),
-        "--trans_a", job.get("trans_a", "N"),
-        "--trans_b", job.get("trans_b", "N"),
-        "--dtype", job["dtype"],
-        "--alpha", str(job["alpha"]),
-        "--beta", str(job["beta"]),
-        "--query_algo_count",  # Query count without running benchmark
-    ]
-    
-    try:
-        # Run without nsys (faster) - just to get the algorithm count
-        result = subprocess.run(base_args, capture_output=True, text=True, timeout=10)
-        if result.returncode == 0:
-            # Parse "Available algorithms: 0-X (total: Y)" from stdout
-            for line in result.stdout.split('\n'):
-                if "Available algorithms:" in line:
-                    match = re.search(r'Available algorithms: 0-(\d+) \(total: (\d+)\)', line)
-                    if match:
-                        max_idx = int(match.group(1))
-                        total = int(match.group(2))
-                        return max_idx, total
-    except:
-        pass
-    
-    return None, None
-
-
-def search_algorithm_index(job, binary_path, output_dir, max_algorithms=200):
-    """
-    Find cuBLASLt algorithm that matches target kernel config.
-    
-    With PyTorch-matched settings, algorithm 0 should match.
-    Falls back to searching if algo 0 doesn't match (shouldn't happen).
-    
-    Returns: algorithm index or None if no match found
-    """
-    if not job.get("target_kernel") or job["target_kernel"] == "unknown":
-        return None
-    
-    target_kernel = job["target_kernel"]
-    target_grid = job.get("target_grid", [0, 0, 0])
-    target_block = job.get("target_block", [256, 1, 1])
-    target_shared_mem = job.get("target_shared_mem", 0)
-    
-    # For testing: set FORCE_NO_MATCH=1 to test no-match scenario
-    if os.getenv("FORCE_NO_MATCH") == "1":
-        target_grid = [999, 999, 999]  # Impossible grid to force no match
-    
-    print(f"\t* Target kernel and config")
-    print(f"\t\t** name: {target_kernel}")
-    print(f"\t\t** grid: {target_grid}")
-    print(f"\t\t** block: {target_block}")
-    print(f"\t\t** shared_mem: {target_shared_mem}")
-    
-    # Query available algorithm count upfront
-    max_available_idx, total_available = get_available_algorithm_count(job, binary_path)
-    if max_available_idx is not None:
-        print(f"\t* Available algorithms: 0-{max_available_idx}")
-        # Limit search to available algorithms
-        max_algorithms = min(max_algorithms, max_available_idx + 1)
-    else:
-        print(f"\t* Starting algorithm search (testing up to {max_algorithms} algorithms)...")
-    
-    # Build base args
-    base_args = [
-        binary_path,
-        "--m", str(job["m"]),
-        "--n", str(job["n"]),
-        "--k", str(job["k"]),
-        "--lda", str(job["lda"]),
-        "--ldb", str(job["ldb"]),
-        "--ldc", str(job["ldc"]),
-        "--order_a", job.get("order_a", "row"),
-        "--order_b", job.get("order_b", "row"),
-        "--trans_a", job.get("trans_a", "N"),
-        "--trans_b", job.get("trans_b", "N"),
-        "--dtype", job["dtype"],
-        "--alpha", str(job["alpha"]),
-        "--beta", str(job["beta"]),
-        "--warmup", "0",
-        "--runs", "3",
-    ]
-    
-    trace_dir = os.path.join(output_dir, "traces")
-    os.makedirs(trace_dir, exist_ok=True)
-    
-    # Track how many algorithms we actually test
-    algorithms_tried = 0
-    
-    # Try algorithm 0 first (PyTorch's default - should match)
-    for algo_idx in range(max_algorithms):
-        test_trace_path = os.path.join(trace_dir, f"match_test_{job['id']}_algo{algo_idx}.nsys-rep")
-        test_args = base_args + ["--algo_index", str(algo_idx)]
-        
-        nsys_cmd = [
-            "nsys", "profile",
-            "--trace=cuda,osrt",
-            "--output", test_trace_path,
-            "--force-overwrite=true",
-        ] + test_args
-        
-        algorithms_tried += 1
-        
-        try:
-            result = subprocess.run(nsys_cmd, capture_output=True, text=True, timeout=30)
-            if result.returncode != 0:
-                # Check if we've hit the end of available algorithms
-                if result.stderr:
-                    if "Invalid algorithm index" in result.stderr:
-                        # Extract max available index from error message
-                        match = re.search(r'available: 0-(\d+)', result.stderr)
-                        if match:
-                            max_available = int(match.group(1))
-                            print(f"\t\t** Algorithm index {algo_idx}: Invalid (available: 0-{max_available})")
-                            # Stop searching - we've exhausted all algorithms
-                            break
-                    # Show error message for other failures
-                    error_msg = result.stderr.strip().split('\n')[-1]  # Get last line of error
-                    if error_msg:
-                        print(f"\t\t** Algorithm index {algo_idx}: {error_msg}")
-                    else:
-                        print(f"\t\t** Algorithm index {algo_idx}: nsys failed (code {result.returncode})")
-                else:
-                    print(f"\t\t** Algorithm index {algo_idx}: nsys failed (code {result.returncode})")
-                continue
-        except subprocess.TimeoutExpired:
-            print(f"\t\t** Algorithm index {algo_idx}: nsys timeout")
-            continue
-        except Exception as e:
-            print(f"\t\t** Algorithm index {algo_idx}: Exception: {e}")
-            continue
-        
-        if not os.path.exists(test_trace_path):
-            print(f"\t\t** Algorithm index {algo_idx}: Trace file not created")
-            continue
-        
-        # Export to sqlite
-        sqlite_path = test_trace_path.replace(".nsys-rep", ".sqlite")
-        if os.path.exists(sqlite_path):
-            os.remove(sqlite_path)
-        export_cmd = ["nsys", "export", "--type=sqlite", "--output", sqlite_path, test_trace_path]
-        export_result = subprocess.run(export_cmd, capture_output=True, text=True)
-        if export_result.returncode != 0 or not os.path.exists(sqlite_path):
-            print(f"\t\t** Algorithm index {algo_idx}: Trace export failed")
-            continue
-        
-        # Parse trace to get kernel config
-        kernel_config = get_kernel_config_from_trace(sqlite_path)
-        
-        if not kernel_config:
-            print(f"\t\t** Algorithm index {algo_idx}: No kernel config found in trace")
-            try:
-                if os.path.exists(test_trace_path):
-                    os.remove(test_trace_path)
-                if os.path.exists(sqlite_path):
-                    os.remove(sqlite_path)
-            except:
-                pass
-            continue
-        
-        kernel_name = kernel_config.get("name", "")
-        grid = kernel_config.get("grid", [0, 0, 0])
-        block = kernel_config.get("block", [256, 1, 1])
-        shared_mem = kernel_config.get("shared_memory", 0)
-        
-        # Get clean kernel name for display
-        clean_kernel_name = SodaProfiler.get_clean_kernel_name(kernel_name)
-        
-        # Match: name + exact grid + block + shared
-        name_match = target_kernel.lower() == kernel_name.lower()
-        grid_match = (grid == target_grid)
-        block_match = (block == target_block)
-        shared_match = (shared_mem == target_shared_mem)
-        
-        # Print observation for all algorithms
-        print(f"\t\t** Algorithm index {algo_idx}")
-        # Grid per-dimension comparison
-        grid_x_match = len(grid) > 0 and len(target_grid) > 0 and grid[0] == target_grid[0]
-        grid_y_match = len(grid) > 1 and len(target_grid) > 1 and grid[1] == target_grid[1]
-        grid_z_match = len(grid) > 2 and len(target_grid) > 2 and grid[2] == target_grid[2]
-        grid_ticks = f"[{'✓' if grid_x_match else '✗'} {'✓' if grid_y_match else '✗'} {'✓' if grid_z_match else '✗'}]"
-        # Block per-dimension comparison
-        block_x_match = len(block) > 0 and len(target_block) > 0 and block[0] == target_block[0]
-        block_y_match = len(block) > 1 and len(target_block) > 1 and block[1] == target_block[1]
-        block_z_match = len(block) > 2 and len(target_block) > 2 and block[2] == target_block[2]
-        block_ticks = f"[{'✓' if block_x_match else '✗'} {'✓' if block_y_match else '✗'} {'✓' if block_z_match else '✗'}]"
-        print(f"\t\t\t*** kernel_name={clean_kernel_name}\t[{'✓' if name_match else '✗'}]")
-        print(f"\t\t\t*** grid={grid}\t{grid_ticks}")
-        print(f"\t\t\t*** block={block}\t{block_ticks}")
-        print(f"\t\t\t*** shared_mem={shared_mem}\t[{'✓' if shared_match else '✗'}]")
-        
-        if name_match and grid_match and block_match and shared_match:
-            print(f"\t* ✓ Found match at algorithm index {algo_idx}")
-            # Clean up test trace
-            try:
-                if os.path.exists(test_trace_path):
-                    os.remove(test_trace_path)
-                if os.path.exists(sqlite_path):
-                    os.remove(sqlite_path)
-            except:
-                pass
-            return algo_idx
-    
-    print(f"\t* ✗ No matching algorithm found (tried {algorithms_tried} algorithm{'s' if algorithms_tried != 1 else ''})")
-    return None
-
-def get_kernel_config_from_trace(sqlite_path):
-    """Extract kernel config from nsys sqlite trace."""
-    import sqlite3
-    try:
-        conn = sqlite3.connect(sqlite_path)
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT s.value as name, k.gridX, k.gridY, k.gridZ,
-                   k.blockX, k.blockY, k.blockZ,
-                   k.staticSharedMemory, k.dynamicSharedMemory
-            FROM CUPTI_ACTIVITY_KIND_KERNEL as k
-            JOIN StringIds as s ON k.demangledName = s.id
-            WHERE LOWER(s.value) LIKE '%gemm%' OR LOWER(s.value) LIKE '%sgemm%'
-            ORDER BY k.start
-            LIMIT 1
-        """)
-        
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row:
-            name, gx, gy, gz, bx, by, bz, static_smem, dyn_smem = row
-            return {
-                "name": name,
-                "grid": [gx, gy, gz],
-                "block": [bx, by, bz],
-                "shared_memory": static_smem + dyn_smem,
-            }
-    except Exception:
-        pass
-    
-    return None
-
 def run_job_under_nsys(job, binary_path, output_dir):
     """
-    Run a single job under nsys profiling.
+    Run a single job under nsys profiling using matched algorithm index.
     
-    Returns: (qdrep_path, json_path)
+    Returns: (qdrep_path, sqlite_path)
     """
     job_id = job["id"]
     
@@ -320,10 +66,14 @@ def run_job_under_nsys(job, binary_path, output_dir):
     
     print(f"\nRunning job {job_id}...")
     
-    # Search for algorithm index if target config is available
-    matching_algo_idx = None
-    if "target_kernel" in job and job["target_kernel"] != "unknown":
-        matching_algo_idx = search_algorithm_index(job, binary_path, output_dir, max_algorithms=200)
+    # Use matched algorithm index if available
+    matched_algo_idx = job.get("matched_algo_index")
+    if matched_algo_idx is not None:
+        print(f"\t* Using matched algorithm index: {matched_algo_idx}")
+    elif "target_kernel" in job and job["target_kernel"] != "unknown":
+        print(f"\t* Warning: No matched_algo_index found, using default algorithm")
+    else:
+        print(f"\t* No target kernel, using default algorithm")
     
     # Build command line args
     args = [
@@ -349,9 +99,9 @@ def run_job_under_nsys(job, binary_path, output_dir):
     if "batch" in job:
         args.extend(["--batch", str(job["batch"])])
     
-    # Add algorithm index if we found a match
-    if matching_algo_idx is not None:
-        args.extend(["--algo_index", str(matching_algo_idx)])
+    # Add algorithm index if we have a match
+    if matched_algo_idx is not None:
+        args.extend(["--algo_index", str(matched_algo_idx)])
     
     # nsys command
     trace_dir = os.path.join(output_dir, "traces")
@@ -562,9 +312,9 @@ def collect_gpu_info():
     return env
 
 
-def run_suite(jobs_file, baremetal_dir, output_file):
+def run_profiling(jobs_file, baremetal_dir, output_file):
     """
-    Run the entire baremetal GEMM suite.
+    Run profiling for all jobs using matched algorithms.
     """
     # Load jobs
     with open(jobs_file, 'r') as f:
@@ -573,6 +323,15 @@ def run_suite(jobs_file, baremetal_dir, output_file):
     jobs = jobs_data.get("jobs", [])
     rel_path = os.path.relpath(jobs_file, microbench_dir) if microbench_dir else jobs_file
     print(f"Loaded {len(jobs)} jobs from {rel_path}")
+    
+    # Check if matching has been done
+    matching_summary = jobs_data.get("matching_summary", {})
+    matches_found = matching_summary.get("matches_found", 0)
+    if matches_found == 0:
+        print("Warning: No algorithm matches found in jobs.json", file=sys.stderr)
+        print("Run search_algorithm_indices.py first to search for algorithm indices", file=sys.stderr)
+    else:
+        print(f"Using {matches_found} matched algorithms")
     
     # Build binary
     if not build_binary(baremetal_dir):
@@ -653,6 +412,6 @@ if __name__ == "__main__":
         print("Run gen_bm_jobs.py first", file=sys.stderr)
         sys.exit(1)
     
-    success = run_suite(jobs_file, baremetal_dir, output_file)
+    success = run_profiling(jobs_file, baremetal_dir, output_file)
     sys.exit(0 if success else 1)
 

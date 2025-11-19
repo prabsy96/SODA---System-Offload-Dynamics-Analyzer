@@ -148,6 +148,7 @@ def verify_kernel_match(pytorch_kernel, baremetal_kernel):
     pytorch_config = extract_config(pytorch_kernel)
     baremetal_config = extract_config(baremetal_kernel)
     
+    # Require exact match 
     config_match = (
         pytorch_config["grid"] == baremetal_config["grid"] and
         pytorch_config["block"] == baremetal_config["block"] and
@@ -252,9 +253,9 @@ def print_summary(matches):
     exact_matches = sum(1 for m in matches if m["match_status"]["name_match"] and m["match_status"]["config_match"])
     
     print(f"\nMatch Statistics:")
-    print(f"  Exact matches (name + config): {exact_matches}/{len(matches)}")
-    print(f"  Name matches:                  {name_matches}/{len(matches)}")
-    print(f"  Config matches:                {config_matches}/{len(matches)}")
+    print(f"\tExact matches (name + config): {exact_matches}/{len(matches)}")
+    print(f"\tName matches:                  {name_matches}/{len(matches)}")
+    print(f"\tConfig matches:                {config_matches}/{len(matches)}")
 
 
 def compare(pytorch_file, baremetal_file, output_file):
@@ -262,14 +263,14 @@ def compare(pytorch_file, baremetal_file, output_file):
     Main comparison function.
     """
     rel_pytorch = os.path.relpath(pytorch_file, microbench_dir) if microbench_dir else pytorch_file
-    print(f"Loading PyTorch results from {rel_pytorch}...")
+    print(f"Loading PyTorch results from {rel_pytorch}...", end=" ")
     pytorch_results = load_pytorch_results(pytorch_file)
-    print(f"  Loaded {len(pytorch_results)} PyTorch event sequences")
+    print(f"Loaded {len(pytorch_results)} PyTorch event sequences")
     
     rel_baremetal = os.path.relpath(baremetal_file, microbench_dir) if microbench_dir else baremetal_file
-    print(f"Loading baremetal results from {rel_baremetal}...")
+    print(f"Loading baremetal results from {rel_baremetal}...", end=" ")
     baremetal_results = load_baremetal_results(baremetal_file)
-    print(f"  Loaded {len(baremetal_results)} baremetal runs")
+    print(f"Loaded {len(baremetal_results)} baremetal runs")
     
     # Compare
     print("Comparing results...")
@@ -315,7 +316,7 @@ if __name__ == "__main__":
     
     if not os.path.exists(baremetal_file):
         print(f"Error: Baremetal results not found: {baremetal_file}", file=sys.stderr)
-        print("Run run_bm_suite.py first", file=sys.stderr)
+        print("Run profile_baremetal.py first", file=sys.stderr)
         sys.exit(1)
     
     compare(pytorch_file, baremetal_file, output_file)

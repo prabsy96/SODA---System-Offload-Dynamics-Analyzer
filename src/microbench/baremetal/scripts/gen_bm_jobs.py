@@ -220,9 +220,12 @@ def generate_jobs(input_file, output_file):
             print(f"Warning: Skipping sequence {job_id} - missing M/N/K", file=sys.stderr)
             continue
         
-        # Get target kernel name
+        # Get target kernel name and config
         kernel = sequence.get("kernel", {})
         target_kernel = kernel.get("name", "unknown")
+        target_grid = kernel.get("grid", [1, 1, 1])
+        target_block = kernel.get("block", [256, 1, 1])
+        target_shared_mem = kernel.get("shared_memory", 0)
         
         # Get operation type
         cpu_op = sequence.get("cpu_op", {})
@@ -232,6 +235,9 @@ def generate_jobs(input_file, output_file):
         job = {
             "id": job_id,
             "target_kernel": target_kernel,
+            "target_grid": target_grid,
+            "target_block": target_block,
+            "target_shared_mem": target_shared_mem,
             "op": op_name,
             "m": params["m"],
             "n": params["n"],

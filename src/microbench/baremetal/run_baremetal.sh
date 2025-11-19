@@ -60,21 +60,21 @@ echo "=== Phase 1: Generate Baremetal Jobs ==="
 python scripts/gen_bm_jobs.py
 echo ""
 
-# Phase 2: Run baremetal suite (NOTE: This runs nsys, may take a while)
-echo "=== Phase 2: Run Baremetal Suite (under nsys profiling) ==="
-echo "WARNING: This will run nsys profiling for 7 jobs, may take several minutes..."
-read -p "Continue? (y/n) " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    python scripts/run_bm_suite.py
-    echo ""
-    
-    # Phase 3: Compare results
-    echo "=== Phase 3: Compare PyTorch vs Baremetal ==="
-    python scripts/compare_kernel_tax.py
-else
-    echo "Skipped baremetal suite execution"
-fi
+# Phase 2: Search for algorithm indices (offline, can run anytime)
+echo "=== Phase 2: Offline Search for Algorithm Indices ==="
+echo "Searching for cuBLASLt algorithm indices for each job..."
+python scripts/search_algorithm_indices.py
+echo ""
+
+# Phase 3: Profile baremetal (uses matched algorithms)
+echo "=== Phase 3: Profile Baremetal (under nsys profiling) ==="
+echo "This will run nsys profiling for multiple jobs, may take several minutes..."
+python scripts/profile_baremetal.py
+echo ""
+
+# Phase 4: Compare results
+echo "=== Phase 4: Compare PyTorch vs Baremetal ==="
+python scripts/compare_kernel_tax.py
 
 echo ""
 echo "=============================================="
