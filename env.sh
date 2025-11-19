@@ -96,6 +96,17 @@ print_soda_env() {
     echo "=================================="
 }
 
+# Helper function to cleanup output directory
+cleanup() {
+    if [ -d "$SODA_OUTPUT" ]; then
+        echo "Deleting output directory: $SODA_OUTPUT"
+        rm -rf "$SODA_OUTPUT"
+        echo "Cleanup complete"
+    else
+        echo "Output directory does not exist: $SODA_OUTPUT"
+    fi
+}
+
 # Print SODA banner when sourced
 print_soda_banner() {
     # ANSI color codes for pastel colors
@@ -148,5 +159,6 @@ if [ -z "${SODA_ENV_QUIET:-}" ]; then
     echo "Get started:"
     echo "  * print_soda_env    - Show all environment variables and paths"
     echo "  * activate_venv     - Activate Python virtual environment"
+    echo "  * cleanup           - Delete output directory ($SODA_OUTPUT)"
     echo ""
 fi
