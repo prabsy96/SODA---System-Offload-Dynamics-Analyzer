@@ -15,40 +15,10 @@ import sys
 import subprocess
 import re
 from pathlib import Path
+from search_algorithm_indices import build_binary
 
 # Module-level variable for microbench directory (set in __main__)
 microbench_dir = None
-
-
-def build_binary(baremetal_dir):
-    """Build the C++ binary using cmake."""
-    print("Building C++ binary...")
-    build_dir = os.path.join(baremetal_dir, "build")
-    
-    # Configure
-    result = subprocess.run(
-        ["cmake", "-B", build_dir, "-DCMAKE_BUILD_TYPE=Release"],
-        cwd=baremetal_dir,
-        capture_output=True,
-        text=True
-    )
-    if result.returncode != 0:
-        print(f"CMake configure failed:\n{result.stderr}", file=sys.stderr)
-        return False
-    
-    # Build
-    result = subprocess.run(
-        ["cmake", "--build", build_dir],
-        cwd=baremetal_dir,
-        capture_output=True,
-        text=True
-    )
-    if result.returncode != 0:
-        print(f"Build failed:\n{result.stderr}", file=sys.stderr)
-        return False
-    
-    print("Build successful")
-    return True
 
 
 def run_job_under_nsys(job, binary_path, output_dir):
