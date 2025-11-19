@@ -208,7 +208,25 @@ def generate_jobs(input_file, output_file):
     
     sequences = data.get("sequences", [])
     
+    # Profiling parameters (same for all jobs)
+    WARMUP_RUNS = 500
+    MEASUREMENT_RUNS = 1000
+    
     jobs = []
+    
+    # Add null kernel job (job 0000) for baseline launch tax measurement
+    jobs.append({
+        "id": "0000",
+        "target_kernel": "__null__",
+        "target_grid": [1, 1, 1],
+        "target_block": [1, 1, 1],
+        "target_shared_mem": 0,
+        "op": "null_kernel",
+        "null_kernel": True,
+        "warmup": WARMUP_RUNS,
+        "runs": MEASUREMENT_RUNS,
+    })
+    
     for idx, sequence in enumerate(sequences):
         job_id = f"{idx+1:04d}"
         
@@ -252,8 +270,8 @@ def generate_jobs(input_file, output_file):
             "dtype": params.get("dtype", "f32"),
             "alpha": params.get("alpha", 1.0),
             "beta": params.get("beta", 0.0),
-            "warmup": 200,
-            "runs": 1000,
+            "warmup": WARMUP_RUNS,
+            "runs": MEASUREMENT_RUNS,
         }
         
         # Add batch count for bmm

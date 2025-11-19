@@ -158,7 +158,7 @@ def _print_target_config(target_kernel, target_grid, target_block, target_shared
     print(f"\t\t** grid: {target_grid}")
     print(f"\t\t** block: {target_block}")
     print(f"\t\t** shared_mem: {target_shared_mem}")
-
+    
 
 def _build_base_args(job, binary_path):
     """Build base command line arguments for the C++ binary."""
@@ -180,8 +180,8 @@ def _build_base_args(job, binary_path):
         "--warmup", "0",
         "--runs", "3",
     ]
-
-
+    
+    
 def _run_nsys_for_algorithm(job, binary_path, algo_idx, base_args, trace_dir):
     """
     Run nsys profiling for a specific algorithm index.
@@ -211,7 +211,7 @@ def _run_nsys_for_algorithm(job, binary_path, algo_idx, base_args, trace_dir):
                         print(f"\t\t** Algorithm index {algo_idx}: Invalid (available: 0-{max_available})")
                         return (False, None, None, "exhausted")  # Signal to stop searching
                 # Show error message for other failures
-                error_msg = result.stderr.strip().split('\n')[-1]  # Get last line of error
+                error_msg = result.stderr.strip().split('\n')[-1]
                 if error_msg:
                     print(f"\t\t** Algorithm index {algo_idx}: {error_msg}")
                 else:
@@ -338,7 +338,7 @@ def search_algorithm_index(job, binary_path, output_dir, max_algorithms=200):
         print(f"\t* Available algorithms: 0-{max_available_idx}")
         max_algorithms = min(max_algorithms, max_available_idx + 1)
     
-    print(f"\t* Starting algorithm search...")
+    print(f"\t* Starting search...")
     
     base_args = _build_base_args(job, binary_path)
     trace_dir = os.path.join(output_dir, "traces")
@@ -427,6 +427,12 @@ def search_algorithm_indices(jobs_file, baremetal_dir):
         if not job.get("target_kernel") or job["target_kernel"] == "unknown":
             print(f"\t* Skipping (no target kernel)")
             continue
+
+        # Skip null kernel jobs (no GEMM arguments to search)
+        if job.get("null_kernel"):
+            print(f"\t* Skipping (null kernel)")
+            job["matched_algo_index"] = None
+            continue
         
         # Search for algorithm index
         matched_algo_idx = search_algorithm_index(job, binary_path, output_dir, max_algorithms=200)
@@ -434,11 +440,9 @@ def search_algorithm_indices(jobs_file, baremetal_dir):
         if matched_algo_idx is not None:
             job["matched_algo_index"] = matched_algo_idx
             algorithms_found += 1
-            # Don't print again - search_algorithm_index already printed the result
         else:
             job["matched_algo_index"] = None  # Explicitly set to None when no match found
             no_algorithm.append(job_id)
-            # Don't print again - search_algorithm_index already printed the no-match message
     
     # Update jobs.json with matched_algo_index
     jobs_data["jobs"] = jobs

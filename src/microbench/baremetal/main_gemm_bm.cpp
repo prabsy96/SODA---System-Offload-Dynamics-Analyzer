@@ -50,6 +50,7 @@ struct GemmParams {
     bool has_algo_id;
     bool list_algo_ids;  // If true, just list all algorithm IDs and exit
     bool query_algo_count;  // If true, query heuristic algorithm count and exit
+    bool null_kernel;  // If true, launch empty kernel to measure baseline launch tax
 };
     
 void parse_args(int argc, char** argv, GemmParams& params) {
@@ -76,6 +77,7 @@ void parse_args(int argc, char** argv, GemmParams& params) {
     params.algo_id = 0;
     params.list_algo_ids = false;
     params.query_algo_count = false;
+    params.null_kernel = false;
     
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -126,11 +128,14 @@ void parse_args(int argc, char** argv, GemmParams& params) {
         } else if (arg == "--query_algo_count") {
             // Query heuristic algorithm count and exit
             params.query_algo_count = true;
+        } else if (arg == "--null_kernel") {
+            // Launch empty kernel to measure baseline launch tax
+            params.null_kernel = true;
         }
     }
     
     // Validation
-    if (params.m <= 0 || params.n <= 0 || params.k <= 0) {
+    if (!params.null_kernel && (params.m <= 0 || params.n <= 0 || params.k <= 0)) {
         std::cerr << "Error: M, N, K must be positive" << std::endl;
         exit(EXIT_FAILURE);
     }
@@ -285,7 +290,30 @@ void query_heuristic_algorithm_count(const GemmParams& params) {
     CHECK_CUBLASLT(cublasLtDestroy(handle));
 }
 
+__global__ void null_kernel() {
+    // Empty kernel to measure baseline launch tax
+}
+
+void run_null_kernel(const GemmParams& params) {
+    CHECK_CUDA(cudaDeviceSynchronize());
+    
+    for (int i = 0; i < params.warmup; i++) {
+        null_kernel<<<1, 1>>>();
+        CHECK_CUDA(cudaDeviceSynchronize());
+    }
+    
+    for (int i = 0; i < params.runs; i++) {
+        null_kernel<<<1, 1>>>();
+        CHECK_CUDA(cudaDeviceSynchronize());
+    }
+}
+
 void run_gemm(const GemmParams& params) {
+    if (params.null_kernel) {
+        run_null_kernel(params);
+        return;
+    }
+    
     std::cout << "Running GEMM: M=" << params.m << " N=" << params.n << " K=" << params.k 
               << " order_a=" << params.order_a << " order_b=" << params.order_b
               << " trans_a=" << params.trans_a << " trans_b=" << params.trans_b
@@ -363,7 +391,7 @@ void run_gemm(const GemmParams& params) {
     // Matrix A: [M, K] with leading dimension lda
     // If transpose: cuBLASLt sees it as [K, M] (swapped dimensions)
     bool transpose_A = (op_A == CUBLAS_OP_T);
-    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&A_desc, cuda_dtype,
+    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&A_desc, cuda_dtype, 
                                                transpose_A ? K : M,  // rows: K if transposed, M otherwise
                                                transpose_A ? M : K,  // cols: M if transposed, K otherwise
                                                lda));
@@ -428,16 +456,16 @@ void run_gemm(const GemmParams& params) {
     // attributes when order_a or order_b is "row" to ensure correct memory interpretation.
     // This is a necessary deviation from PyTorch's approach due to our different input format.
     if (params.order_a == "row" || params.order_b == "row") {
-        cublasLtOrder_t order_a = (params.order_a == "col") ? CUBLASLT_ORDER_COL : CUBLASLT_ORDER_ROW;
-        cublasLtOrder_t order_b = (params.order_b == "col") ? CUBLASLT_ORDER_COL : CUBLASLT_ORDER_ROW;
-        cublasLtOrder_t order_c = CUBLASLT_ORDER_ROW;  // Output is always row-major
-        
-        CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(A_desc, CUBLASLT_MATRIX_LAYOUT_ORDER,
-                                                         &order_a, sizeof(order_a)));
-        CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(B_desc, CUBLASLT_MATRIX_LAYOUT_ORDER,
-                                                         &order_b, sizeof(order_b)));
-        CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(C_desc, CUBLASLT_MATRIX_LAYOUT_ORDER,
-                                                         &order_c, sizeof(order_c)));
+    cublasLtOrder_t order_a = (params.order_a == "col") ? CUBLASLT_ORDER_COL : CUBLASLT_ORDER_ROW;
+    cublasLtOrder_t order_b = (params.order_b == "col") ? CUBLASLT_ORDER_COL : CUBLASLT_ORDER_ROW;
+    cublasLtOrder_t order_c = CUBLASLT_ORDER_ROW;  // Output is always row-major
+    
+    CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(A_desc, CUBLASLT_MATRIX_LAYOUT_ORDER,
+                                                     &order_a, sizeof(order_a)));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(B_desc, CUBLASLT_MATRIX_LAYOUT_ORDER,
+                                                     &order_b, sizeof(order_b)));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(C_desc, CUBLASLT_MATRIX_LAYOUT_ORDER,
+                                                     &order_c, sizeof(order_c)));
     }
     
     // Create matmul descriptor
@@ -618,15 +646,15 @@ void run_gemm(const GemmParams& params) {
         int requested_algo_count = params.has_algo_index ? DIAGNOSTIC_ALGO_COUNT : PYTORCH_DEFAULT_ALGO_COUNT;
         
         std::vector<cublasLtMatmulHeuristicResult_t> heuristic_results(requested_algo_count);
-        int returned_results = 0;
-        CHECK_CUBLASLT(cublasLtMatmulAlgoGetHeuristic(handle, matmul_desc,
-                                                       A_desc, B_desc, C_desc, C_desc,
+    int returned_results = 0;
+    CHECK_CUBLASLT(cublasLtMatmulAlgoGetHeuristic(handle, matmul_desc,
+                                                   A_desc, B_desc, C_desc, C_desc,
                                                        preference, requested_algo_count,
                                                        heuristic_results.data(), &returned_results));
-        
-        if (returned_results == 0) {
-            std::cerr << "Error: No cuBLASLt algorithm found" << std::endl;
-            exit(EXIT_FAILURE);
+    
+    if (returned_results == 0) {
+        std::cerr << "Error: No cuBLASLt algorithm found" << std::endl;
+        exit(EXIT_FAILURE);
         }
         
         // Print available algorithm count (for debugging when doing algorithm sweeps)

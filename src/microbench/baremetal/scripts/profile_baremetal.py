@@ -36,42 +36,51 @@ def run_job_under_nsys(job, binary_path, output_dir):
     
     print(f"\nRunning job {job_id}...")
     
-    # Use matched algorithm index if available
-    matched_algo_idx = job.get("matched_algo_index")
-    if matched_algo_idx is not None:
-        print(f"\t* Using matched algorithm index: {matched_algo_idx}")
-    elif "target_kernel" in job and job["target_kernel"] != "unknown":
-        print(f"\t* Warning: No matched_algo_index found, using default algorithm")
+    # Handle null kernel job
+    if job.get("null_kernel"):
+        args = [
+            binary_path,
+            "--null_kernel",
+            "--warmup", str(job["warmup"]),
+            "--runs", str(job["runs"]),
+        ]
     else:
-        print(f"\t* No target kernel, using default algorithm")
-    
-    # Build command line args
-    args = [
-        binary_path,
-        "--m", str(job["m"]),
-        "--n", str(job["n"]),
-        "--k", str(job["k"]),
-        "--lda", str(job["lda"]),
-        "--ldb", str(job["ldb"]),
-        "--ldc", str(job["ldc"]),
-        "--order_a", job.get("order_a", "row"),
-        "--order_b", job.get("order_b", "row"),
-        "--trans_a", job.get("trans_a", "N"),
-        "--trans_b", job.get("trans_b", "N"),
-        "--dtype", job["dtype"],
-        "--alpha", str(job["alpha"]),
-        "--beta", str(job["beta"]),
-        "--warmup", str(job["warmup"]),
-        "--runs", str(job["runs"]),
-    ]
-    
-    # Add batch if present
-    if "batch" in job:
-        args.extend(["--batch", str(job["batch"])])
-    
-    # Add algorithm index if we have a match
-    if matched_algo_idx is not None:
-        args.extend(["--algo_index", str(matched_algo_idx)])
+        # Use matched algorithm index if available
+        matched_algo_idx = job.get("matched_algo_index")
+        if matched_algo_idx is not None:
+            print(f"\t* Using matched algorithm index: {matched_algo_idx}")
+        elif "target_kernel" in job and job["target_kernel"] != "unknown":
+            print(f"\t* Warning: No matched_algo_index found, using default algorithm")
+        else:
+            print(f"\t* No target kernel, using default algorithm")
+        
+        # Build command line args
+        args = [
+            binary_path,
+            "--m", str(job["m"]),
+            "--n", str(job["n"]),
+            "--k", str(job["k"]),
+            "--lda", str(job["lda"]),
+            "--ldb", str(job["ldb"]),
+            "--ldc", str(job["ldc"]),
+            "--order_a", job.get("order_a", "row"),
+            "--order_b", job.get("order_b", "row"),
+            "--trans_a", job.get("trans_a", "N"),
+            "--trans_b", job.get("trans_b", "N"),
+            "--dtype", job["dtype"],
+            "--alpha", str(job["alpha"]),
+            "--beta", str(job["beta"]),
+            "--warmup", str(job["warmup"]),
+            "--runs", str(job["runs"]),
+        ]
+        
+        # Add batch if present
+        if "batch" in job:
+            args.extend(["--batch", str(job["batch"])])
+        
+        # Add algorithm index if we have a match
+        if matched_algo_idx is not None:
+            args.extend(["--algo_index", str(matched_algo_idx)])
     
     # nsys command
     trace_dir = os.path.join(output_dir, "traces")
@@ -109,7 +118,8 @@ def run_job_under_nsys(job, binary_path, output_dir):
     
     # Print relative path
     rel_path = os.path.relpath(sqlite_path, microbench_dir) if microbench_dir else sqlite_path
-    print(f"\t** Job {job_id} completed, trace exported to {rel_path}")
+    if not job.get("null_kernel"):
+        print(f"\t** Job {job_id} completed, trace exported to {rel_path}")
     return qdrep_path, sqlite_path
 
 
@@ -161,10 +171,10 @@ def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
         print(f"Warning: Could not query CUDA runtime events: {e}", file=sys.stderr)
     
     # Query for kernel events
-    # Filter for GEMM kernels only 
-    # Kernel name must contain 'gemm' to exclude other kernels (e.g., splitKreduce_kernel, etc.)
+    # For null kernel, get any kernel; for GEMM, filter by name
     kernels = []
     try:
+        # Query all kernels (will filter by name later if needed)
         cursor.execute("""
             SELECT k.start, k.end, k.correlationId, s.value, 
                    k.gridX, k.gridY, k.gridZ,
@@ -172,12 +182,15 @@ def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
                    k.staticSharedMemory, k.dynamicSharedMemory
             FROM CUPTI_ACTIVITY_KIND_KERNEL as k
             JOIN StringIds as s ON k.demangledName = s.id
-            WHERE LOWER(s.value) LIKE '%gemm%'
         """)
         for row in cursor.fetchall():
             start_ns, end_ns, corr_id, name, gx, gy, gz, bx, by, bz, static_smem, dyn_smem = row
+            # For GEMM jobs, only include kernels with 'gemm' in name
+            # For null kernel, include all kernels
+            if "gemm" not in name.lower() and "null" not in name.lower():
+                continue
             kernels.append({
-                "name": name,
+                "name": "__null__" if "null" in name.lower() else name,
                 "ts": start_ns / 1000.0,  # Convert ns to us
                 "dur": (end_ns - start_ns) / 1000.0,
                 "correlation": corr_id,
@@ -220,7 +233,7 @@ def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
             assert kernel_tax >= 0, f"Negative kernel tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={cuda_launch['ts']}, tax={kernel_tax}"
             kernel_tax_values.append(kernel_tax)
             
-            # Capture kernel info from first kernel (all should be same)
+            # Capture kernel info from first kernel
             if kernel_info is None:
                 kernel_info = {
                     "name": kernel["name"],
@@ -339,8 +352,13 @@ def run_profiling(jobs_file, baremetal_dir, output_file):
         }
         
         runs.append(run_entry)
-        print(f"\t** Kernel: {result['kernel']['name'][:60]}...")
-        print(f"\t** Avg kernel tax: {result['stats']['avg_kernel_tax']:.2f} μs")
+        
+        if job.get("null_kernel"):
+            print(f"\t** Kernel: __null__")
+            print(f"\t** Avg kernel tax: {result['stats']['avg_kernel_tax']:.2f} μs")
+        else:
+            print(f"\t** Kernel: {result['kernel']['name'][:60]}...")
+            print(f"\t** Avg kernel tax: {result['stats']['avg_kernel_tax']:.2f} μs")
     
     # Collect environment info
     env = collect_gpu_info()

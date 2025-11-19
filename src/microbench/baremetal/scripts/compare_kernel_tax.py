@@ -94,6 +94,9 @@ def load_baremetal_results(baremetal_file):
     
     for run in runs:
         job_id = run["id"]
+        # Skip null kernel job (0000) from comparison results
+        if run.get("target_kernel") == "__null__":
+            continue
         results[job_id] = {
             "kernel": run["kernel"],
             "stats": run["stats"],
@@ -272,11 +275,23 @@ def compare(pytorch_file, baremetal_file, output_file):
     baremetal_results = load_baremetal_results(baremetal_file)
     print(f"Loaded {len(baremetal_results)} baremetal runs")
     
+    # Extract null kernel tax (baseline launch tax)
+    null_kernel_tax = None
+    with open(baremetal_file, 'r') as f:
+        data = json.load(f)
+    for run in data.get("runs", []):
+        if run.get("target_kernel") == "__null__":
+            null_kernel_tax = run["stats"]["avg_kernel_tax"]
+            break
+    
     # Compare
     print("Comparing results...")
     matches = compare_results(pytorch_results, baremetal_results)
     
     # Print summary
+    if null_kernel_tax is not None:
+        print(f"\nBaseline launch tax (null kernel): {null_kernel_tax:.2f} μs")
+    
     print_summary(matches)
     
     # Write output
