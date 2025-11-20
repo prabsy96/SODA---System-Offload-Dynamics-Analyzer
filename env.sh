@@ -37,10 +37,10 @@ export BAREMETAL_BUILD="$BAREMETAL_MICROBENCH_DIR/build"
 export PYTHON_VENV="$SODA_ROOT/.venv"
 
 # Common data files referenced across scripts
-export PYTORCH_UNIQUE_KERNELS="$PYTORCH_OUTPUT/unique_gemm_kernel_chains.json"
-export PYTORCH_ALL_KERNELS="$PYTORCH_OUTPUT/all_kernel_chains.json"
-export PYTORCH_GEMM_KERNELS="$PYTORCH_OUTPUT/gemm_kernel_chains.json"
-export PYTORCH_REPLAYED_KERNELS="$PYTORCH_OUTPUT/replayed_gemm_kernel_chains.json"
+export PYTORCH_UNIQUE_KERNELS="$PYTORCH_OUTPUT/unique_gemm_kernel_sequences.json"
+export PYTORCH_ALL_KERNELS="$PYTORCH_OUTPUT/all_kernel_sequences.json"
+export PYTORCH_GEMM_KERNELS="$PYTORCH_OUTPUT/gemm_kernel_sequences.json"
+export PYTORCH_REPLAYED_KERNELS="$PYTORCH_OUTPUT/replayed_gemm_kernel_sequences.json"
 
 export BAREMETAL_JOBS="$BAREMETAL_OUTPUT/jobs.json"
 export BAREMETAL_RUNS="$BAREMETAL_OUTPUT/baremetal_gemm_runs.json"
@@ -49,9 +49,16 @@ export BAREMETAL_REPORT="$BAREMETAL_OUTPUT/bm_vs_framework_report.json"
 # Trace directories
 export BAREMETAL_TRACES="$BAREMETAL_OUTPUT/traces"
 export PYTORCH_TRACES="$PYTORCH_OUTPUT/traces"
+export PYTORCH_MODEL_TRACE_DIR="$PYTORCH_TRACES/model_trace"
+export PYTORCH_KERNEL_TRACES_DIR="$PYTORCH_TRACES/kernel_traces"
+export PYTORCH_MODEL_TRACE_FILE="$PYTORCH_MODEL_TRACE_DIR/model_trace.json"
 
 # Graphs output
 export PYTORCH_GRAPHS="$PYTORCH_OUTPUT/graphs"
+export PYTORCH_KERNEL_TAX_GRAPHS="$PYTORCH_GRAPHS/kernel_tax"
+
+# Log files
+export PYTORCH_VERIFY_LOG="$PYTORCH_OUTPUT/verify_replayed_kernels.log"
 
 # HuggingFace cache (set default if not already set)
 export HF_HOME="${HF_HOME:-/tmp/hf_cache_$USER}"
@@ -94,6 +101,24 @@ print_soda_env() {
     echo "BAREMETAL_RUNS: $BAREMETAL_RUNS"
     echo "BAREMETAL_REPORT: $BAREMETAL_REPORT"
     echo "=================================="
+}
+
+# Helper function to cleanup output directory
+cleanup() {
+    if [ -d "$SODA_OUTPUT" ]; then
+        echo "Deleting output directory: $SODA_OUTPUT"
+        rm -rf "$SODA_OUTPUT"
+        echo "Cleanup complete"
+    else
+        echo "Output directory does not exist: $SODA_OUTPUT"
+    fi
+}
+
+# Helper function to reinstall the soda package
+reinstall() {
+    echo "Reinstalling soda package..."
+    pip install --ignore-installed --force-reinstall --no-deps -e "$SODA_ROOT"
+    echo "Soda package reinstalled"
 }
 
 # Print SODA banner when sourced
@@ -148,5 +173,7 @@ if [ -z "${SODA_ENV_QUIET:-}" ]; then
     echo "Get started:"
     echo "  * print_soda_env    - Show all environment variables and paths"
     echo "  * activate_venv     - Activate Python virtual environment"
+    echo "  * cleanup           - Delete output directory ($SODA_OUTPUT)"
+    echo "  * reinstall    - Reinstall the soda package (use after making changes)"
     echo ""
 fi

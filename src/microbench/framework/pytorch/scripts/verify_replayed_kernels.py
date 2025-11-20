@@ -2,27 +2,8 @@ import json
 import os
 import re
 import sys
-
-def get_clean_kernel_name(kernel_name):
-    """Extract a clean kernel name from the full signature."""
-    # Extract everything before '<' (removes template parameters)
-    # This handles cases where '(' appears in template params like "(anonymous namespace)"
-    if '<' in kernel_name:
-        clean_kernel_name = kernel_name.split('<')[0].strip()
-    elif '(' in kernel_name:
-        # If no '<' but has '(', extract before '(' (function parameters)
-        clean_kernel_name = kernel_name.split('(')[0].strip()
-    else:
-        clean_kernel_name = kernel_name
-    
-    # Remove 'void' prefix if present
-    clean_kernel_name = clean_kernel_name.replace('void', '').strip()
-    
-    # Extract just the kernel name (last part after '::')
-    if '::' in clean_kernel_name:
-        clean_kernel_name = clean_kernel_name.split('::')[-1]
-    
-    return clean_kernel_name.strip()
+from pathlib import Path
+from soda import SodaProfiler
 
 def _to_tuple_int(x):
     if isinstance(x, (list, tuple)):
@@ -77,7 +58,7 @@ def print_launch_config_table(original_config, matched_kernel):
     orig_regs = original_config.get("registers_per_thread") or "N/A"
     orig_occ = original_config.get("occupancy") or "N/A"
     orig_stream = original_config.get("stream") or "N/A"
-    orig_dur = original_config.get("duration_us") or "N/A"
+    orig_dur = original_config.get("dur") or "N/A"
     
     replayed_grid = str(matched_kernel['grid'])
     replayed_block = str(matched_kernel['block'])
@@ -85,7 +66,7 @@ def print_launch_config_table(original_config, matched_kernel):
     replayed_regs = matched_kernel.get('registers_per_thread') or 'N/A'
     replayed_occ = matched_kernel.get('occupancy') or 'N/A'
     replayed_stream = matched_kernel.get('stream') or 'N/A'
-    replayed_dur = matched_kernel.get('duration_us') or 'N/A'
+    replayed_dur = matched_kernel.get('dur') or 'N/A'
     
     print(f"\t\t{'grid':<20} {orig_grid:<25} {replayed_grid:<25}")
     print(f"\t\t{'block':<20} {orig_block:<25} {replayed_block:<25}")
@@ -93,7 +74,7 @@ def print_launch_config_table(original_config, matched_kernel):
     print(f"\t\t{'registers':<20} {orig_regs:<25} {replayed_regs:<25}")
     print(f"\t\t{'occupancy':<20} {orig_occ:<25} {replayed_occ:<25}")
     print(f"\t\t{'stream':<20} {orig_stream:<25} {replayed_stream:<25}")
-    print(f"\t\t{'duration_us':<20} {orig_dur:<25} {replayed_dur:<25}")
+    print(f"\t\t{'dur (μs)':<20} {orig_dur:<25} {replayed_dur:<25}")
 
 def print_summary(matches, partial_matches, mismatches):
     """Print verification summary."""
@@ -102,26 +83,26 @@ def print_summary(matches, partial_matches, mismatches):
     print(f"\tExact matches:\t{matches}")
     print(f"\tPartial matches (name only):\t{partial_matches}")
     print(f"\tMismatches:\t{mismatches}")
-    print(f"\tTotal kernel chains:\t{matches + partial_matches + mismatches}")
+    print(f"\tTotal event sequences:\t{matches + partial_matches + mismatches}")
     print("=" * 80)
     
     if matches == matches + partial_matches + mismatches:
-        print("\nAll kernel chains match exactly")
+        print("\nAll event sequences match exactly")
     elif matches + partial_matches == matches + partial_matches + mismatches:
-        print("\nAll kernel chains match at family level (some config differences)")
+        print("\nAll event sequences match at family level (some config differences)")
     else:
-        print("\nSome kernel chains don't match")
+        print("\nSome event sequences don't match")
 
-def find_matching_replayed_chains(original_chain, replayed_kernel_chains):
-    """Find replayed kernel chains matching the original chain's operation."""
-    cpu_op = original_chain.get("cpu_op")
+def find_matching_replayed_sequences(original_sequence, replayed_sequences):
+    """Find replayed event sequences matching the original sequence's operation."""
+    cpu_op = original_sequence.get("cpu_op")
     if not cpu_op:
         return []
     
     # Match by operation name, dims, strides, dtypes, and alpha/beta scalars
-    matching_chains = []
-    for replayed_chain in replayed_kernel_chains["causal_chains"]:
-        replayed_cpu_op = replayed_chain.get("cpu_op")
+    matching_sequences = []
+    for replayed_sequence in replayed_sequences["sequences"]:
+        replayed_cpu_op = replayed_sequence.get("cpu_op")
         if not replayed_cpu_op or replayed_cpu_op["name"] != cpu_op["name"]:
             continue
         
@@ -149,21 +130,21 @@ def find_matching_replayed_chains(original_chain, replayed_kernel_chains):
                    (ob is not None and rb is not None and ob != rb):
                     continue
         
-        matching_chains.append(replayed_chain)
+        matching_sequences.append(replayed_sequence)
     
-    return matching_chains
+    return matching_sequences
 
-def verify_kernel_match(original_kernel, original_config, replayed_chains):
+def verify_kernel_match(original_kernel, original_config, replayed_sequences):
     """Check if any replayed kernel matches the original kernel."""
     original_kernel_name = original_kernel["name"]
     exact_match = False
     name_match = False
     matched_kernel = None
-    matched_chain = None
+    matched_sequence = None
     
     # Check each replayed kernel for name and config match
-    for replayed_chain in replayed_chains:
-        replayed_kernel = replayed_chain.get("kernel")
+    for replayed_sequence in replayed_sequences:
+        replayed_kernel = replayed_sequence.get("kernel")
         if replayed_kernel is None:
             continue
         
@@ -171,7 +152,7 @@ def verify_kernel_match(original_kernel, original_config, replayed_chains):
         if replayed_name == original_kernel_name:
             name_match = True
             matched_kernel = replayed_kernel
-            matched_chain = replayed_chain
+            matched_sequence = replayed_sequence
             
             # Extract normalized configs for exact match comparison
             replayed_config = extract_config(replayed_kernel)
@@ -186,21 +167,21 @@ def verify_kernel_match(original_kernel, original_config, replayed_chains):
                 exact_match = True
                 break
     
-    return exact_match, name_match, matched_kernel, matched_chain
+    return exact_match, name_match, matched_kernel, matched_sequence
 
-def verify_kernel_chains(original_kernel_chains, replayed_kernel_chains):
-    """Verify each kernel chain and return match statistics."""
+def verify_event_sequences(original_sequences, replayed_sequences):
+    """Verify each event sequence and return match statistics."""
     matches = 0
     partial_matches = 0
     mismatches = 0
     
-    # Track which replayed chains have been matched 
+    # Track which replayed sequences have been matched 
     used_replayed_indices = set()
     
-    # Verify each original kernel chain against replayed chains
-    for i, original_chain in enumerate(original_kernel_chains["causal_chains"]):
-        cpu_op = original_chain.get("cpu_op")
-        original_kernel = original_chain.get("kernel")
+    # Verify each original event sequence against replayed sequences
+    for i, original_sequence in enumerate(original_sequences["sequences"]):
+        cpu_op = original_sequence.get("cpu_op")
+        original_kernel = original_sequence.get("kernel")
         
         if cpu_op is None or original_kernel is None:
             continue
@@ -208,17 +189,17 @@ def verify_kernel_chains(original_kernel_chains, replayed_kernel_chains):
         print(f"\n[{i+1}] Operation:\t{cpu_op['name']}")
         print_input_details(cpu_op)
         
-        # Find matching replayed chains by operation, dims, strides, dtypes, alpha/beta
-        all_matching_chains = find_matching_replayed_chains(original_chain, replayed_kernel_chains)
+        # Find matching replayed sequences by operation, dims, strides, dtypes, alpha/beta
+        all_matching_sequences = find_matching_replayed_sequences(original_sequence, replayed_sequences)
         
-        # Filter out already-used replayed chains 
-        replayed_chains = []
-        for idx, chain in enumerate(replayed_kernel_chains["causal_chains"]):
-            if idx not in used_replayed_indices and chain in all_matching_chains:
-                replayed_chains.append(chain)
+        # Filter out already-used replayed sequences 
+        matching_sequences = []
+        for idx, sequence in enumerate(replayed_sequences["sequences"]):
+            if idx not in used_replayed_indices and sequence in all_matching_sequences:
+                matching_sequences.append(sequence)
         
-        if not replayed_chains:
-            print(f"\tNo matching replayed kernel chains found")
+        if not matching_sequences:
+            print(f"\tNo matching replayed event sequences found")
             mismatches += 1
             continue
         
@@ -230,23 +211,23 @@ def verify_kernel_chains(original_kernel_chains, replayed_kernel_chains):
             "registers_per_thread": original_kernel.get("registers_per_thread"),
             "occupancy": original_kernel.get("occupancy"),
             "stream": original_kernel.get("stream"),
-            "duration_us": original_kernel.get("avg_duration_us") or original_kernel.get("duration_us")
+            "dur": original_kernel.get("avg_dur", original_kernel.get("dur"))
         }
         
         # Check if any replayed kernel matches
-        exact_match, name_match, matched_kernel, matched_chain = verify_kernel_match(
-            original_kernel, original_config, replayed_chains
+        exact_match, name_match, matched_kernel, matched_sequence = verify_kernel_match(
+            original_kernel, original_config, matching_sequences
         )
         
-        # Mark matched replayed chain as used 
-        if matched_chain is not None:
-            for idx, chain in enumerate(replayed_kernel_chains["causal_chains"]):
-                if (chain.get("cpu_op") == matched_chain.get("cpu_op") and
-                    chain.get("kernel", {}).get("name") == matched_chain.get("kernel", {}).get("name")):
+        # Mark matched replayed sequence as used 
+        if matched_sequence is not None:
+            for idx, sequence in enumerate(replayed_sequences["sequences"]):
+                if (sequence.get("cpu_op") == matched_sequence.get("cpu_op") and
+                    sequence.get("kernel", {}).get("name") == matched_sequence.get("kernel", {}).get("name")):
                     used_replayed_indices.add(idx)
                     break
         
-        print(f"\t* Kernel: {get_clean_kernel_name(original_kernel['name'])}")
+        print(f"\t* Kernel: {SodaProfiler.get_clean_kernel_name(original_kernel['name'])}")
         
         if matched_kernel:
             print_launch_config_table(original_config, matched_kernel)
@@ -258,46 +239,33 @@ def verify_kernel_chains(original_kernel_chains, replayed_kernel_chains):
                 partial_matches += 1
         else:
             print(f"\t* Match: No match")
-            print(f"\tReplayed kernel chains found ({len(replayed_chains)}):")
-            for replayed_chain in replayed_chains[:3]:
-                replayed_k = replayed_chain.get("kernel", {})
+            print(f"\tReplayed event sequences found ({len(matching_sequences)}):")
+            for replayed_sequence in matching_sequences[:3]:
+                replayed_k = replayed_sequence.get("kernel", {})
                 if replayed_k:
-                    print(f"\t\t- {get_clean_kernel_name(replayed_k.get('name', ''))}\tgrid={replayed_k.get('grid')}\tblock={replayed_k.get('block')}\tshared_mem={replayed_k.get('shared_memory', 'N/A')}")
-            if len(replayed_chains) > 3:
-                print(f"\t\t... and {len(replayed_chains) - 3} more")
+                    print(f"\t\t- {SodaProfiler.get_clean_kernel_name(replayed_k.get('name', ''))}\tgrid={replayed_k.get('grid')}\tblock={replayed_k.get('block')}\tshared_mem={replayed_k.get('shared_memory', 'N/A')}")
+            if len(matching_sequences) > 3:
+                print(f"\t\t... and {len(matching_sequences) - 3} more")
             mismatches += 1
     
     return matches, partial_matches, mismatches
 
-def run_verification_pipeline(original_file, replayed_file):
+def run_verification_pipeline():
     """
     Main pipeline: load -> verify -> save results.
     """
-    output_dir = os.environ.get("PYTORCH_OUTPUT", "output")
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir = SodaProfiler.get_path("PYTORCH_OUTPUT")
+    output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Step 1: Load kernel chain files
-    # Resolve file paths (absolute or relative to output dir)
-    if os.path.isabs(original_file) or os.path.exists(original_file):
-        original_path = original_file
-    else:
-        original_path = os.path.join(output_dir, original_file)
-    
-    if os.path.isabs(replayed_file) or os.path.exists(replayed_file):
-        replayed_path = replayed_file
-    else:
-        replayed_path = os.path.join(output_dir, replayed_file)
-    
-    # Load original and replayed kernel chain data
-    with open(original_path, "r") as f:
-        original_kernel_chains = json.load(f)
-    
-    with open(replayed_path, "r") as f:
-        replayed_kernel_chains = json.load(f)
+    # Step 1: Load event sequence files from env vars
+    original_file = SodaProfiler.get_path("PYTORCH_UNIQUE_KERNELS")
+    replayed_file = SodaProfiler.get_path("PYTORCH_REPLAYED_KERNELS")
+    original_sequences = SodaProfiler.load_json(original_file)
+    replayed_sequences = SodaProfiler.load_json(replayed_file)
     
     # Step 2: Setup logging
     # Redirect print to both stdout and log file
-    log_path = os.path.join(output_dir, "verify_replayed_kernels.log")
+    log_path = SodaProfiler.get_path("PYTORCH_VERIFY_LOG")
     output_file = open(log_path, "w")
     
     import builtins
@@ -312,20 +280,20 @@ def run_verification_pipeline(original_file, replayed_file):
     
     builtins.print = print_and_write
     
-    # Step 3: Verify kernel chains
+    # Step 3: Verify event sequences
     print("=" * 80)
-    print("Kernel chain verification: original vs replayed kernel chains")
+    print("Event sequence verification: original vs replayed event sequences")
     print("=" * 80)
     
     print("\n1. Metadata verification:")
-    print(f"\tOriginal kernel chains:\t{len(original_kernel_chains['causal_chains'])} chains")
-    print(f"\tReplayed kernel chains:\t{len(replayed_kernel_chains['causal_chains'])} chains")
+    print(f"\tOriginal event sequences:\t{len(original_sequences['sequences'])} sequences")
+    print(f"\tReplayed event sequences:\t{len(replayed_sequences['sequences'])} sequences")
     
-    print("\n2. Kernel chain-by-chain verification:")
+    print("\n2. Event sequence-by-sequence verification:")
     print("-" * 80)
     
-    matches, partial_matches, mismatches = verify_kernel_chains(
-        original_kernel_chains, replayed_kernel_chains
+    matches, partial_matches, mismatches = verify_event_sequences(
+        original_sequences, replayed_sequences
     )
     
     # Step 4: Print summary
@@ -337,11 +305,4 @@ def run_verification_pipeline(original_file, replayed_file):
     print(f"\nVerification output saved to {log_path}")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: python verify_replayed_kernels.py <original_file> <replayed_file>")
-        print("Example: python verify_replayed_kernels.py unique_gemm_kernel_chains.json replayed_gemm_kernel_chains.json")
-        sys.exit(1)
-    
-    original_file = sys.argv[1]
-    replayed_file = sys.argv[2]
-    run_verification_pipeline(original_file, replayed_file)
+    run_verification_pipeline()

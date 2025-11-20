@@ -15,52 +15,17 @@ import transformers
 from pathlib import Path
 from collections import defaultdict, deque
 from torch.profiler import ProfilerActivity, profile
-from typing import Any, DefaultDict, Dict, List, Set, Tuple
+from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple
+
+
+def us_to_ms(microseconds: float) -> float:
+    """Convert microseconds to milliseconds."""
+    return microseconds / 1000.0
 
 class SodaProfiler:
     """
     Handles model tracing, profile data parsing, and metric generation.
     """
-
-    @staticmethod
-    def get_clean_kernel_name(kernel_name: str) -> str:
-        """
-        Extract a clean kernel name from the full signature.
-        
-        Args:
-            kernel_name: Full kernel name (may be a C++ function signature).
-        
-        Returns:
-            Clean kernel name (just the kernel name, no namespace or template parameters).
-        
-        Examples:
-            "void at::native::vectorized_elementwise_kernel<4, ...>" 
-            -> "vectorized_elementwise_kernel"
-            
-            "void at::native::(anonymous namespace)::elementwise_kernel<...>"
-            -> "elementwise_kernel"
-            
-            "turing_fp16_s1688gemm_fp16_128x128_ldg8_f2f_stages_32x1_nn"
-            -> "turing_fp16_s1688gemm_fp16_128x128_ldg8_f2f_stages_32x1_nn"
-        """
-        # Extract everything before '<' (removes template parameters)
-        # This handles cases where '(' appears in template params like "(anonymous namespace)"
-        if '<' in kernel_name:
-            clean_kernel_name = kernel_name.split('<')[0].strip()
-        elif '(' in kernel_name:
-            # If no '<' but has '(', extract before '(' (function parameters)
-            clean_kernel_name = kernel_name.split('(')[0].strip()
-        else:
-            clean_kernel_name = kernel_name
-        
-        # Remove 'void' prefix if present
-        clean_kernel_name = clean_kernel_name.replace('void', '').strip()
-        
-        # Extract just the kernel name (last part after '::')
-        if '::' in clean_kernel_name:
-            clean_kernel_name = clean_kernel_name.split('::')[-1]
-        
-        return clean_kernel_name.strip()
 
     @staticmethod
     def get_args_parser() -> argparse.ArgumentParser:
@@ -209,7 +174,7 @@ class SodaProfiler:
         Returns:
             The path to the generated Chrome trace JSON file.
         """
-        self.logger.info("Profiling model forward pass...")
+        self.logger.info("=== Profiling Model Forward Pass ===")
         
         # Warm-up runs
         with torch.no_grad():
@@ -229,9 +194,9 @@ class SodaProfiler:
         prof.export_chrome_trace(str(self.trace_file_path))
         
         # Load trace data into memory immediately
-        self.trace = self.load_trace_file(self.trace_file_path)
+        self.trace = SodaProfiler.load_json(self.trace_file_path)
         
-        self.logger.info(f"Chrome trace file generated at: {self.trace_file_path}")
+        self.logger.info(f"* Chrome trace file generated at: {self.trace_file_path}")
         return str(self.trace_file_path)
 
     def profile_forward_pass(self, inputs: Dict[str, torch.Tensor], batch_size: int = None, seq_len: int = None) -> str:
@@ -268,7 +233,7 @@ class SodaProfiler:
         Returns:
             The path to the generated Chrome trace JSON file.
         """
-        self.logger.info("Profiling model forward pass...")
+        self.logger.info("=== Profiling Model Forward Pass ===")
         
         # Warm-up runs
         with torch.no_grad():
@@ -288,116 +253,32 @@ class SodaProfiler:
         prof.export_chrome_trace(str(self.trace_file_path))
         
         # Load trace data into memory immediately
-        self.trace = self.load_trace_file(self.trace_file_path)
+        self.trace = SodaProfiler.load_json(self.trace_file_path)
         
-        self.logger.info(f"Chrome trace file generated at: {self.trace_file_path}")
+        self.logger.info(f"* Chrome trace file generated at: {self.trace_file_path}")
         return str(self.trace_file_path)
 
-    def load_trace_file(self, file_path: Path) -> Dict[str, Any]:
-        """Loads and returns the content of a JSON trace file."""
+    @staticmethod
+    def get_path(env_var: str) -> Path:
+        """Get path from environment variable."""
+        return Path(os.environ[env_var])
+    
+    @staticmethod
+    def ensure_dir(path) -> None:
+        """Ensure directory exists, creating parent directories if needed. Accepts Path or str."""
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+    
+    @staticmethod
+    def load_json(file_path) -> Dict[str, Any]:
+        """Load JSON file."""
+        file_path = Path(file_path)
         if not file_path.is_file():
-            raise FileNotFoundError(f"Trace file does not exist: {file_path}")
+            raise FileNotFoundError(f"File does not exist: {file_path}")
+        
         with open(file_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
-    def collect_events_from_trace(self) -> Dict[str, Any]:
-        """
-        Collects all events from trace organized by category.
-        
-        Uses self.trace
-        
-        Returns:
-            Dictionary with hierarchical structure:
-            - cpu: Dict with keys:
-                - ops: Dict[external_id, cpu_op_dict] - CPU operations
-                - launches: Dict[correlation_id, cuda_launch_dict] - CUDA runtime launches
-            - gpu: Dict with keys:
-                - kernels: List of kernel events
-                - memory: List of memcpy/memset events
-                - all: List of all GPU events
-        """
-        op_events_by_ext_id = {}
-        cuda_launch_events_by_corr = {}
-        kernel_events = []
-        gpu_mem_events = []
-        
-        for event in self.trace.get("traceEvents", []):
-            cat = event.get("cat")
-            args = event.get("args", {})
-            external_id = args.get("External id")
-            correlation = args.get("correlation")
-            
-            if cat == "cpu_op" and external_id is not None:
-                op_events_by_ext_id[external_id] = {
-                    "type": "cpu_op",
-                    "name": event.get("name", ""),
-                    "external_id": external_id,
-                    "input_dims": args.get("Input Dims", []),
-                    "input_strides": args.get("Input Strides", []),
-                    "input_type": args.get("Input type", []),
-                    "concrete_inputs": args.get("Concrete Inputs", []),
-                    "ts": event.get("ts"),
-                    "dur": event.get("dur")
-                }
-            elif cat == "cuda_runtime" and event.get("name") == "cudaLaunchKernel":
-                if external_id is not None and correlation is not None:
-                    cuda_launch_events_by_corr[correlation] = {
-                        "type": "cuda_launch",
-                        "name": event.get("name", ""),
-                        "external_id": external_id,
-                        "correlation": correlation,
-                        "ts": event.get("ts"),
-                        "dur": event.get("dur"),
-                        "cbid": args.get("cbid")
-                    }
-            elif cat == "kernel" and external_id is not None and correlation is not None:
-                kernel_events.append({
-                    "type": "kernel",
-                    "name": self.get_clean_kernel_name(event.get("name", "")),
-                    "external_id": external_id,
-                    "correlation": correlation,
-                    "grid": args.get("grid"),
-                    "block": args.get("block"),
-                    "shared_memory": args.get("shared memory"),
-                    "registers_per_thread": args.get("registers per thread"),
-                    "blocks_per_SM": args.get("blocks per SM"),
-                    "warps_per_SM": args.get("warps per SM"),
-                    "occupancy": args.get("est. achieved occupancy %"),
-                    "stream": args.get("stream"),
-                    "device": args.get("device"),
-                    "context": args.get("context"),
-                    "queued": args.get("queued"),
-                    "dur": event.get("dur"),
-                    "ts": event.get("ts")
-                })
-            elif cat == "gpu_memcpy" or cat == "gpu_memset":
-                gpu_mem_events.append({
-                    "type": cat,
-                    "name": event.get("name", ""),
-                    "correlation": correlation,
-                    "stream": args.get("stream"),
-                    "device": args.get("device"),
-                    "context": args.get("context"),
-                    "ts": event.get("ts"),
-                    "dur": event.get("dur"),
-                    "bytes": args.get("bytes"),
-                    "memory_bandwidth_gbs": args.get("memory bandwidth (GB/s)") if cat == "gpu_memcpy" else None
-                })
-        
-        # Create hierarchical structure
-        events = {
-            "cpu": {
-                "ops": op_events_by_ext_id,
-                "launches": cuda_launch_events_by_corr
-            },
-            "gpu": {
-                "kernels": kernel_events,
-                "memory": gpu_mem_events,
-                "all": kernel_events + gpu_mem_events
-            }
-        }
-        self.events = events
-        return events
 
     def calculate_total_inference_time(self) -> float:
         """
@@ -610,21 +491,161 @@ class SodaProfiler:
         
         return dict(stream_info)
 
-    def get_linked_event_sequences(self) -> List[Dict]:
+    @staticmethod
+    def get_clean_kernel_name(kernel_name: str) -> str:
+        """
+        Extract a clean kernel name from the full signature.
+        
+        Args:
+            kernel_name: Full kernel name (may be a C++ function signature).
+        
+        Returns:
+            Clean kernel name (just the kernel name, no namespace or template parameters).
+        
+        Examples:
+            "void at::native::vectorized_elementwise_kernel<4, ...>" 
+            -> "vectorized_elementwise_kernel"
+            
+            "void at::native::(anonymous namespace)::elementwise_kernel<...>"
+            -> "elementwise_kernel"
+            
+            "turing_fp16_s1688gemm_fp16_128x128_ldg8_f2f_stages_32x1_nn"
+            -> "turing_fp16_s1688gemm_fp16_128x128_ldg8_f2f_stages_32x1_nn"
+        """
+        # Extract everything before '<' (removes template parameters)
+        # This handles cases where '(' appears in template params like "(anonymous namespace)"
+        if '<' in kernel_name:
+            clean_kernel_name = kernel_name.split('<')[0].strip()
+        elif '(' in kernel_name:
+            # If no '<' but has '(', extract before '(' (function parameters)
+            clean_kernel_name = kernel_name.split('(')[0].strip()
+        else:
+            clean_kernel_name = kernel_name
+        
+        # Remove 'void' prefix if present
+        clean_kernel_name = clean_kernel_name.replace('void', '').strip()
+        
+        # Extract just the kernel name (last part after '::')
+        if '::' in clean_kernel_name:
+            clean_kernel_name = clean_kernel_name.split('::')[-1]
+        
+        return clean_kernel_name.strip()
+
+    @staticmethod
+    def collect_events_from_trace(trace: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Collects all events from trace organized by category.
+        
+        Args:
+            trace: Chrome trace format dictionary with "traceEvents" key.
+        
+        Returns:
+            Dictionary with hierarchical structure:
+            - cpu: Dict with keys:
+                - ops: Dict[external_id, cpu_op_dict] - CPU operations
+                - launches: Dict[correlation_id, cuda_launch_dict] - CUDA runtime launches
+            - gpu: Dict with keys:
+                - kernels: List of kernel events
+                - memory: List of memcpy/memset events
+                - all: List of all GPU events
+        """
+        op_events_by_ext_id = {}
+        cuda_launch_events_by_corr = {}
+        kernel_events = []
+        gpu_mem_events = []
+        
+        for event in trace.get("traceEvents", []):
+            cat = event.get("cat")
+            args = event.get("args", {})
+            external_id = args.get("External id")
+            correlation = args.get("correlation")
+            
+            if cat == "cpu_op" and external_id is not None:
+                op_events_by_ext_id[external_id] = {
+                    "type": "cpu_op",
+                    "name": event.get("name", ""),
+                    "external_id": external_id,
+                    "input_dims": args.get("Input Dims", []),
+                    "input_strides": args.get("Input Strides", []),
+                    "input_type": args.get("Input type", []),
+                    "concrete_inputs": args.get("Concrete Inputs", []),
+                    "ts": event.get("ts"),
+                    "dur": event.get("dur")
+                }
+            elif cat == "cuda_runtime" and event.get("name") == "cudaLaunchKernel":
+                if external_id is not None and correlation is not None:
+                    cuda_launch_events_by_corr[correlation] = {
+                        "type": "cuda_launch",
+                        "name": event.get("name", ""),
+                        "external_id": external_id,
+                        "correlation": correlation,
+                        "ts": event.get("ts"),
+                        "dur": event.get("dur"),
+                        "cbid": args.get("cbid")
+                    }
+            elif cat == "kernel" and external_id is not None and correlation is not None:
+                kernel_events.append({
+                    "type": "kernel",
+                    "name": SodaProfiler.get_clean_kernel_name(event.get("name", "")),
+                    "external_id": external_id,
+                    "correlation": correlation,
+                    "grid": args.get("grid"),
+                    "block": args.get("block"),
+                    "shared_memory": args.get("shared memory"),
+                    "registers_per_thread": args.get("registers per thread"),
+                    "blocks_per_SM": args.get("blocks per SM"),
+                    "warps_per_SM": args.get("warps per SM"),
+                    "occupancy": args.get("est. achieved occupancy %"),
+                    "stream": args.get("stream"),
+                    "device": args.get("device"),
+                    "context": args.get("context"),
+                    "queued": args.get("queued"),
+                    "dur": event.get("dur"),
+                    "ts": event.get("ts")
+                })
+            elif cat == "gpu_memcpy" or cat == "gpu_memset":
+                gpu_mem_events.append({
+                    "type": cat,
+                    "name": event.get("name", ""),
+                    "correlation": correlation,
+                    "stream": args.get("stream"),
+                    "device": args.get("device"),
+                    "context": args.get("context"),
+                    "ts": event.get("ts"),
+                    "dur": event.get("dur"),
+                    "bytes": args.get("bytes"),
+                    "memory_bandwidth_gbs": args.get("memory bandwidth (GB/s)") if cat == "gpu_memcpy" else None
+                })
+        
+        # Create hierarchical structure
+        events = {
+            "cpu": {
+                "ops": op_events_by_ext_id,
+                "launches": cuda_launch_events_by_corr
+            },
+            "gpu": {
+                "kernels": kernel_events,
+                "memory": gpu_mem_events,
+                "all": kernel_events + gpu_mem_events
+            }
+        }
+        return events
+
+    @staticmethod
+    def get_linked_event_sequences(events: Dict[str, Any]) -> List[Dict]:
         """
         Get event sequences linking CPU operations, CUDA launches, and kernels.
         
-        Uses self.events.
+        Args:
+            events: Dictionary with hierarchical structure from collect_events_from_trace.
 
         Returns:
             List of event sequence dictionaries with keys: kernel, cuda_launch, cpu_op.
         """
-        gpu_events = self.events["gpu"]
-        cpu_ops = self.events["cpu"]["ops"]
-        cuda_launches = self.events["cpu"]["launches"]
+        gpu_events = events["gpu"]
+        cpu_ops = events["cpu"]["ops"]
+        cuda_launches = events["cpu"]["launches"]
         kernel_events = gpu_events["kernels"]
-
-        self.logger.info(f"Analyzing {len(kernel_events)} kernel events from profiled run.")
 
         event_sequences = []
         for kernel in kernel_events:
@@ -641,35 +662,63 @@ class SodaProfiler:
         
         return event_sequences
 
-    def calculate_launch_tax(self, event_sequences: List[Dict]) -> Dict[str, float]:
+    @staticmethod
+    def calculate_per_seq_launch_tax(event_sequences: List[Dict]) -> List[Dict]:
         """
-        Calculates the total and average kernel launch tax.
+        Calculates launch tax for each sequence and adds it to the sequence dict.
 
         Args:
             event_sequences: List of event sequence dictionaries.
 
         Returns:
-            Dictionary with "total" and "avg" keys (in microseconds).
+            Modified event sequences with "kernel_tax" key added to each.
         """
-        if not event_sequences:
-            return {"total": 0.0, "avg": 0.0}
-
-        total_tax_us = 0.0
         for seq in event_sequences:
             kernel = seq.get("kernel")
             cuda_launch = seq.get("cuda_launch")
             if kernel and cuda_launch and kernel.get("ts") is not None and cuda_launch.get("ts") is not None:
-                kernel_tax_us = kernel["ts"] - cuda_launch["ts"]
-                assert kernel_tax_us >= 0, f"Negative kernel tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={cuda_launch['ts']}, tax={kernel_tax_us}"
-                total_tax_us += kernel_tax_us
+                launch_tax = kernel["ts"] - cuda_launch["ts"]
+                assert launch_tax >= 0, f"Negative launch tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={cuda_launch['ts']}, tax={launch_tax}"
+                seq["kernel_tax"] = launch_tax
+            else:
+                seq["kernel_tax"] = None
+        return event_sequences
 
+    @staticmethod
+    def calculate_total_launch_tax(event_sequences: List[Dict]) -> float:
+        """
+        Calculates total launch tax across all sequences.
+
+        Args:
+            event_sequences: List of event sequence dictionaries with "kernel_tax" key.
+
+        Returns:
+            Total launch tax in microseconds.
+        """
+        total_tax = 0.0
+        for seq in event_sequences:
+            kernel_tax = seq.get("kernel_tax")
+            if kernel_tax is not None:
+                total_tax += kernel_tax
+        return total_tax
+
+    @staticmethod
+    def calculate_avg_launch_tax(event_sequences: List[Dict]) -> float:
+        """
+        Calculates average launch tax across all sequences.
+
+        Args:
+            event_sequences: List of event sequence dictionaries with "kernel_tax" key.
+
+        Returns:
+            Average launch tax in microseconds.
+        """
+        if not event_sequences:
+            return 0.0
+        
+        total_tax = SodaProfiler.calculate_total_launch_tax(event_sequences)
         num_kernels = len(event_sequences)
-        avg_tax_us = total_tax_us / num_kernels if num_kernels > 0 else 0.0
-
-        return {
-            "total": total_tax_us,
-            "avg": avg_tax_us,
-        }
+        return total_tax / num_kernels if num_kernels > 0 else 0.0
     
     def get_average_kernel_duration(self) -> Dict[str, float]:
         """
@@ -680,7 +729,7 @@ class SodaProfiler:
         Uses self.events.
             
         Returns:
-            Dictionary mapping kernel name to average duration in milliseconds.
+            Dictionary mapping kernel name to average duration.
         """
         kernel_events = self.events["gpu"]["kernels"]
         
@@ -694,8 +743,7 @@ class SodaProfiler:
         avg_durations = {}
         for name, stat in kernel_stats.items():
             if stat["count"] > 0:
-                avg_duration_us = stat["total_duration"] / stat["count"]
-                avg_durations[name] = float(avg_duration_us) / 1000.0
+                avg_durations[name] = stat["total_duration"] / stat["count"]
             else:
                 avg_durations[name] = 0.0
         
@@ -800,7 +848,7 @@ class SodaProfiler:
             # Count occurrences of this exact chain
             count = 0
             for segment in all_segments:
-                segment_kernels = [k["name"] for k, r in segment]
+                segment_kernels = [seq["kernel"]["name"] for seq in segment if seq.get("kernel")]
                 for i in range(len(segment_kernels) - exact_length + 1):
                     if tuple(segment_kernels[i:i+exact_length]) == chain:
                         count += 1
@@ -814,17 +862,19 @@ class SodaProfiler:
                     fusion_recommendations.append((chain, count, proximity_score))
         
         # Report findings
-        self.logger.info(f"--- Fusion Analysis (Length={exact_length}, Threshold={prox_score_threshold}) ---")
+        self.logger.info(f"=== Fusion Analysis (Length={exact_length}, Threshold={prox_score_threshold}) ===")
         if not fusion_recommendations:
-            self.logger.info("No kernel chains met the fusion criteria.")
+            self.logger.info("\t* No kernel chains met the fusion criteria.")
             return None
 
         sorted_recommendations = sorted(fusion_recommendations, key=lambda x: x[1], reverse=True)
-        self.logger.info(f"Found {len(sorted_recommendations)} potential fusion candidates:")
-        for chain, count, score in sorted_recommendations:
-            chain_str = ' -> '.join(chain)
-            self.logger.info(f"  - Chain: [{chain_str}] (Found {count} times, Proximity Score: {score:.2f})")
+        self.logger.info(f"\t* Found {len(sorted_recommendations)} potential fusion candidates:")
+        for idx, (chain, count, score) in enumerate(sorted_recommendations, 1):
+            self.logger.info(f"\t* Chain {idx}\tFound {count} times\tProx. Score = {score:.2f}")
+            for kernel in chain:
+                self.logger.info(f"\t\t** {kernel}")
         
+        self.logger.info("")
         # Return structured results
         return {
             "length": exact_length,
@@ -839,18 +889,6 @@ class SodaProfiler:
             ]
         }
 
-    
-    def preprocess_trace(self) -> List[Dict]:
-        """
-        Preprocesses trace data by collecting events and getting event sequences.
-        
-        Returns:
-            Event sequences (list of dictionaries).
-        """
-        # Get all events organized by category 
-        self.collect_events_from_trace()
-        event_sequences = self.get_linked_event_sequences()
-        return event_sequences
     
     def analyze(self) -> Dict[str, Any]:
         """
@@ -867,9 +905,12 @@ class SodaProfiler:
             - event_sequences: Event sequences
             - avg_kernel_dur: Average kernel duration results
         """
-        self.logger.info("Analyzing trace data to generate reports...")
-        # Preprocess trace data
-        event_sequences = self.preprocess_trace()
+        self.logger.info("=== Analyzing Trace Data ===")
+        # Collect events and build event sequences
+        self.events = SodaProfiler.collect_events_from_trace(self.trace)
+        self.logger.info(f"Analyzing {len(self.events['gpu']['kernels'])} kernel events from profiled run...")
+        event_sequences = SodaProfiler.get_linked_event_sequences(self.events)
+        event_sequences = SodaProfiler.calculate_per_seq_launch_tax(event_sequences)
         
         # Analyze per-stream metrics
         stream_info = self.analyze_per_stream()
@@ -884,14 +925,16 @@ class SodaProfiler:
         
         # Kernel metrics
         kernel_exec_time = self.calculate_kernel_exec_time()
-        launch_tax = self.calculate_launch_tax(event_sequences)
+        total_tax = SodaProfiler.calculate_total_launch_tax(event_sequences)
+        avg_tax = SodaProfiler.calculate_avg_launch_tax(event_sequences)
+        launch_tax = {"total": total_tax, "avg": avg_tax}
         avg_kernel_dur = self.get_average_kernel_duration()
         top_k_kernels = self.get_top_k_kernels(k=3)
         
         # Fusion analysis
         fusion_results = None
         if self.args.fusion:
-            self.logger.info("--- Kernel Fusion Analysis ---")
+            self.logger.info("=== Kernel Fusion Analysis ===")
             fusion_results = {}
             for f in self.args.fusion:
                 fusion_results[f] = self.kernelchains(event_sequences, f, self.args.prox_score)
@@ -899,21 +942,21 @@ class SodaProfiler:
         # Build metrics dictionary 
         metrics = {
             # General metrics
-            "inference_runtime_ms": total_inference_time / 1000,
+            "inference_runtime_ms": us_to_ms(total_inference_time),
             "active_streams": len(stream_info),
 
             # GPU metrics
-            "total_gpu_time_span_ms": total_gpu_time_span / 1000,
-            "gpu_busy_time_ms": true_gpu_busy_time / 1000,
-            "gpu_idle_time_ms": max(0.0, (total_gpu_time_span - true_gpu_busy_time) / 1000),
+            "total_gpu_time_span_ms": us_to_ms(total_gpu_time_span),
+            "gpu_busy_time_ms": us_to_ms(true_gpu_busy_time),
+            "gpu_idle_time_ms": us_to_ms(max(0.0, total_gpu_time_span - true_gpu_busy_time)),
             "gpu_utilization_percent": gpu_utilization,
  
             # Kernel metrics
-            "total_kernel_exec_time_ms": kernel_exec_time["total"] / 1000,
+            "total_kernel_exec_time_ms": us_to_ms(kernel_exec_time["total"]),
             "num_total_kernels": len(self.events["gpu"]["kernels"]),
-            "avg_kernel_exec_time_ms": kernel_exec_time["avg"] / 1000,
-            "total_kernel_launch_tax_ms": launch_tax["total"] / 1000,
-            "avg_kernel_launch_tax_ms": launch_tax["avg"] / 1000,
+            "avg_kernel_exec_time_ms": us_to_ms(kernel_exec_time["avg"]),
+            "total_kernel_launch_tax_ms": us_to_ms(launch_tax["total"]),
+            "avg_kernel_launch_tax_ms": us_to_ms(launch_tax["avg"]),
         }
         
         self.results = {
@@ -940,44 +983,48 @@ class SodaProfiler:
         top_k_kernels = self.results["top_k_kernels"]
         
         # --- Enhanced Reporting ---
-        self.logger.info("--- Performance Metrics ---")
-        self.logger.info(f"Inference runtime (ms): {metrics['inference_runtime_ms']:.4f}")
-        self.logger.info(f"Total kernel execution time (ms): {metrics['total_kernel_exec_time_ms']:.4f}")
-        self.logger.info(f"GPU busy time (concurrent-aware) (ms): {metrics['gpu_busy_time_ms']:.4f}")
-        self.logger.info(f"GPU idle time (ms): {metrics['gpu_idle_time_ms']:.4f}")
-        self.logger.info(f"GPU utilization: {metrics['gpu_utilization_percent']:.2f}%")
-        self.logger.info(f"Total kernel launch tax (TKLQT) (ms): {metrics['total_kernel_launch_tax_ms']:.4f}")
-        self.logger.info(f"Number of kernels: {metrics['num_total_kernels']}")
-        self.logger.info(f"Active streams: {metrics['active_streams']}")
+        self.logger.info("")
+        self.logger.info("=== Performance Metrics ===")
+        self.logger.info(f"\t* Inference runtime (ms): {metrics['inference_runtime_ms']:.4f}")
+        self.logger.info(f"\t* Total kernel execution time (ms): {metrics['total_kernel_exec_time_ms']:.4f}")
+        self.logger.info(f"\t* GPU busy time (concurrent-aware) (ms): {metrics['gpu_busy_time_ms']:.4f}")
+        self.logger.info(f"\t* GPU idle time (ms): {metrics['gpu_idle_time_ms']:.4f}")
+        self.logger.info(f"\t* GPU utilization: {metrics['gpu_utilization_percent']:.2f}%")
+        self.logger.info(f"\t* Total kernel launch tax (TKLQT) (ms): {metrics['total_kernel_launch_tax_ms']:.4f}")
+        self.logger.info(f"\t* Number of kernels: {metrics['num_total_kernels']}")
+        self.logger.info(f"\t* Active streams: {metrics['active_streams']}")
         
         if metrics['num_total_kernels'] > 0:
-            self.logger.info(f"Avg. kernel launch tax per kernel (ms): {metrics['avg_kernel_launch_tax_ms']:.4f}")
-            self.logger.info(f"Avg. execution time per kernel (ms): {metrics['avg_kernel_exec_time_ms']:.4f}")
+            self.logger.info(f"\t* Avg. kernel launch tax per kernel (ms): {metrics['avg_kernel_launch_tax_ms']:.4f}")
+            self.logger.info(f"\t* Avg. execution time per kernel (ms): {metrics['avg_kernel_exec_time_ms']:.4f}")
         
+        self.logger.info("")
         # --- Per-Stream Breakdown ---
-        self.logger.info("--- Per-Stream Analysis ---")
+        self.logger.info("=== Per-Stream Analysis ===")
         for stream_id, data in stream_info.items():
             self.logger.info(
-                f"  Stream {stream_id}: {data['op_count']} ops "
+                f"\t* Stream {stream_id}: {data['op_count']} ops "
                 f"({data['kernel_count']} kernels), "
-                f"Busy Time: {data['true_gpu_busy_time'] / 1000:.4f} ms"
+                f"Busy Time: {us_to_ms(data['true_gpu_busy_time']):.4f} ms"
             )
         
+        self.logger.info("")
         # Top-K kernels 
         if top_k_kernels["by_frequency"]:
-            self.logger.info("--- Top-3 Kernels by Frequency ---")
+            self.logger.info("=== Top-3 Kernels by Frequency ===")
             for i, (name, data) in enumerate(top_k_kernels["by_frequency"], 1):
                 self.logger.info(
-                    f"#{i}: {name} "
+                    f"\t* #{i}: {name} "
                     f"(Frequency: {int(data['frequency'])}, "
-                    f"Total Duration: {data['duration'] / 1000:.4f} ms)"
+                    f"Total Duration: {us_to_ms(data['duration']):.4f} ms)"
                 )
             
-            self.logger.info("--- Top-3 Kernels by Duration ---")
+            self.logger.info("")
+            self.logger.info("=== Top-3 Kernels by Duration ===")
             for i, (name, data) in enumerate(top_k_kernels["by_duration"], 1):
                 self.logger.info(
-                    f"#{i}: {name} "
-                    f"(Total Duration: {data['duration'] / 1000:.4f} ms, "
+                    f"\t* #{i}: {name} "
+                    f"(Total Duration: {us_to_ms(data['duration']):.4f} ms, "
                     f"Frequency: {int(data['frequency'])})"
                 )
     
@@ -1017,13 +1064,13 @@ class SodaProfiler:
                 "timestamp": datetime.now().isoformat(),
                 "config": config
             },
-            "performance_metrics": metrics,
+            "performance_metrics": metrics, 
             "per_stream_analysis": {
                 str(stream_id): {
                     "total_ops": data["op_count"],
                     "kernel_count": data["kernel_count"],
-                    "busy_time_ms": data["true_gpu_busy_time"] / 1000,
-                    "total_kernel_exec_time_ms": data["total_kernel_exec_time"] / 1000,
+                    "busy_time_ms": us_to_ms(data["true_gpu_busy_time"]),
+                    "total_kernel_exec_time_ms": us_to_ms(data["total_kernel_exec_time"]),
                 }
                 for stream_id, data in stream_info.items()
             },
@@ -1033,7 +1080,7 @@ class SodaProfiler:
                         "rank": i,
                         "name": name,
                         "frequency": data["frequency"],
-                        "total_duration_ms": data["duration"] / 1000
+                        "total_duration_ms": us_to_ms(data["duration"])
                     }
                     for i, (name, data) in enumerate(top_k_kernels["by_frequency"], 1)
                 ],
@@ -1042,7 +1089,7 @@ class SodaProfiler:
                         "rank": i,
                         "name": name,
                         "frequency": data["frequency"],
-                        "total_duration_ms": data["duration"] / 1000
+                        "total_duration_ms": us_to_ms(data["duration"])
                     }
                     for i, (name, data) in enumerate(top_k_kernels["by_duration"], 1)
                 ]
@@ -1057,7 +1104,7 @@ class SodaProfiler:
         with open(self.report_file_path, "w", encoding="utf-8") as f:
             json.dump(output, f, indent=2, ensure_ascii=False)
         
-        self.logger.info(f"Metrics exported to: {self.report_file_path}")
+        self.logger.info(f"* Metrics exported to: {self.report_file_path}")
         return str(self.report_file_path)
     
     def exit(self) -> None:

@@ -6,11 +6,13 @@ import os
 import copy
 import shutil
 from collections import defaultdict
+from pathlib import Path
 from torch.profiler import profile, ProfilerActivity
 from soda import ModelHandler, SodaProfiler
 
 # GEMM operations to extract
 GEMM_OPS = ['aten::addmm', 'aten::mm', 'aten::bmm']
+
 
 def collect_env_metadata():
     """
@@ -174,13 +176,13 @@ def make_kernel_identity_key(kernel, cpu_op):
     input_dims_tuple = tuple(tuple(d) if isinstance(d, list) else d for d in input_dims)
     return (kernel_name, grid_tuple, block_tuple, shared_mem, input_dims_tuple)
 
-def group_chains_by_identity(chains):
+def group_sequences_by_identity(sequences):
     """
-    Group kernel chains by kernel identity key.
-    Returns a dict: key -> list[chain]
+    Group event sequences by kernel identity key.
+    Returns a dict: key -> list[sequence]
     """
     grouped = defaultdict(list)
-    for e in chains:
+    for e in sequences:
         if e.get("kernel") and e.get("cpu_op"):
             key = make_kernel_identity_key(e["kernel"], e["cpu_op"])
             grouped[key].append(e)
@@ -188,25 +190,26 @@ def group_chains_by_identity(chains):
 
 def aggregate_execution_metrics(instances):
     """
-    Aggregate execution metrics across a group of identical kernel chains.
+    Aggregate execution metrics across a group of identical event sequences.
+    All time values in microseconds.
     Produces avg/min/max for:
-      - kernel.duration_us
+      - kernel.dur
       - cpu_op.dur
       - cuda_launch.dur
-      - kernel_tax_us 
+      - kernel_tax
     Returns a deep-copied, aggregated base instance.
     """
     base_instance = copy.deepcopy(instances[0])
     
     # Aggregate kernel duration
     kernel_durations = [
-        inst.get("kernel", {}).get("duration_us")
+        inst.get("kernel", {}).get("dur")
         for inst in instances
-        if inst.get("kernel", {}).get("duration_us") is not None
+        if inst.get("kernel", {}).get("dur") is not None
     ]
     if kernel_durations:
-        base_instance["kernel"].update(calculate_avg_min_max(kernel_durations, "duration_us"))
-        base_instance["kernel"]["all_duration_us"] = kernel_durations
+        base_instance["kernel"].update(calculate_avg_min_max(kernel_durations, "dur"))
+        base_instance["kernel"]["all_dur"] = kernel_durations
     
     # Aggregate cpu_op duration
     cpu_op_durations = [
@@ -215,8 +218,8 @@ def aggregate_execution_metrics(instances):
         if inst.get("cpu_op", {}).get("dur") is not None
     ]
     if cpu_op_durations:
-        base_instance["cpu_op"].update(calculate_avg_min_max(cpu_op_durations, "dur_us"))
-        base_instance["cpu_op"]["all_dur_us"] = cpu_op_durations
+        base_instance["cpu_op"].update(calculate_avg_min_max(cpu_op_durations, "dur"))
+        base_instance["cpu_op"]["all_dur"] = cpu_op_durations
     
     # Aggregate cuda_launch duration
     cuda_launch_durations = [
@@ -225,23 +228,23 @@ def aggregate_execution_metrics(instances):
         if inst.get("cuda_launch", {}).get("dur") is not None
     ]
     if cuda_launch_durations:
-        base_instance["cuda_launch"].update(calculate_avg_min_max(cuda_launch_durations, "dur_us"))
-        base_instance["cuda_launch"]["all_dur_us"] = cuda_launch_durations
+        base_instance["cuda_launch"].update(calculate_avg_min_max(cuda_launch_durations, "dur"))
+        base_instance["cuda_launch"]["all_dur"] = cuda_launch_durations
     
-    # Aggregate kernel_tax_us
+    # Aggregate kernel_tax
     kernel_tax_values = [
-        inst.get("kernel_tax_us")
+        inst.get("kernel_tax")
         for inst in instances
-        if inst.get("kernel_tax_us") is not None
+        if inst.get("kernel_tax") is not None
     ]
 
-    meta = {"count": len(instances), "all_kernel_tax_us": kernel_tax_values}
-    meta.update(calculate_avg_min_max(kernel_tax_values, "kernel_tax_us"))
+    meta = {"count": len(instances), "all_kernel_tax": kernel_tax_values}
+    meta.update(calculate_avg_min_max(kernel_tax_values, "kernel_tax"))
     base_instance["meta"] = meta
 
     # Clean up unneeded fields
-    base_instance.pop("kernel_tax_us")
-    base_instance["kernel"].pop("duration_us")
+    base_instance.pop("kernel_tax")
+    base_instance["kernel"].pop("dur")
     base_instance["cpu_op"].pop("dur")
     base_instance["cuda_launch"].pop("dur")
     base_instance["kernel"].pop("ts")
@@ -250,123 +253,45 @@ def aggregate_execution_metrics(instances):
     
     return base_instance
 
-def collect_events_from_trace(trace):
-    """First pass: collect all events by type from trace."""
-    cpu_ops = {}
-    cuda_launches = {}
-    kernels = []
-    
-    for event in trace.get("traceEvents", []):
-        cat = event.get("cat")
-        args = event.get("args", {})
-        external_id = args.get("External id")
-        correlation = args.get("correlation")
-        
-        if cat == "cpu_op" and external_id is not None:
-            cpu_ops[external_id] = {
-                "type": "cpu_op",
-                "name": event.get("name", ""),
-                "external_id": external_id,
-                "input_dims": args.get("Input Dims", []),
-                "input_strides": args.get("Input Strides", []),
-                "input_type": args.get("Input type", []),
-                "concrete_inputs": args.get("Concrete Inputs", []),
-                "ts": event.get("ts"),
-                "dur": event.get("dur")
-            }
-        elif cat == "cuda_runtime" and event.get("name") == "cudaLaunchKernel":
-            if external_id is not None and correlation is not None:
-                cuda_launches[correlation] = {
-                    "type": "cuda_launch",
-                    "external_id": external_id,
-                    "correlation": correlation,
-                    "ts": event.get("ts"),
-                    "dur": event.get("dur"),
-                    "cbid": args.get("cbid")
-                }
-        elif cat == "kernel" and external_id is not None and correlation is not None:
-            kernels.append({
-                "type": "kernel",
-                "name": event.get("name", ""),
-                "external_id": external_id,
-                "correlation": correlation,
-                "grid": args.get("grid"),
-                "block": args.get("block"),
-                "shared_memory": args.get("shared memory"),
-                "registers_per_thread": args.get("registers per thread"),
-                "blocks_per_SM": args.get("blocks per SM"),
-                "warps_per_SM": args.get("warps per SM"),
-                "occupancy": args.get("est. achieved occupancy %"),
-                "stream": args.get("stream"),
-                "device": args.get("device"),
-                "context": args.get("context"),
-                "queued": args.get("queued"),
-                "duration_us": event.get("dur"),
-                "ts": event.get("ts")
-            })
-    
-    return cpu_ops, cuda_launches, kernels
 
-def build_kernel_chains(kernels, cpu_ops, cuda_launches):
-    """Second pass: build linked kernel causal structure starting from kernels."""
-    kernel_chains = []
-    
-    for kernel in kernels:
-        external_id = kernel["external_id"]
-        correlation = kernel["correlation"]
-        cpu_op = cpu_ops.get(external_id)
-        cuda_launch = cuda_launches.get(correlation)
-        
-        kernel_tax = None
-        if kernel.get('ts') is not None and cuda_launch and cuda_launch.get('ts') is not None:
-            kernel_tax = kernel['ts'] - cuda_launch['ts']
-            assert kernel_tax >= 0, f"Negative kernel tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={cuda_launch['ts']}, tax={kernel_tax}"
-        
-        kernel_chains.append({
-            "kernel": kernel,
-            "cuda_launch": cuda_launch,
-            "cpu_op": cpu_op,
-            "kernel_tax_us": kernel_tax
-        })
-    
-    return kernel_chains
 
-def filter_gemm_kernel_chains(kernel_chains):
+def filter_gemm_sequences(event_sequences):
     """Filter for GEMM kernels only."""
-    gemm_chains = []
-    for e in kernel_chains:
+    gemm_sequences = []
+    for e in event_sequences:
         # Must be from a GEMM operation
         if e.get('cpu_op') and e['cpu_op']['name'] in GEMM_OPS:
             # Kernel name must contain 'gemm' (eg: volta_sgemm_64x32_sliced1x4_nn)
             if 'gemm' in e.get('kernel', {}).get('name', '').lower():
-                gemm_chains.append(copy.deepcopy(e))
-    return gemm_chains
+                gemm_sequences.append(copy.deepcopy(e))
+    return gemm_sequences
 
-def save_output(output_dir, filename, data, env_metadata, summary=None):
-    """Save data to JSON file."""
+def save_output(file_path, data, env_metadata, summary=None):
+    """Save data to JSON file. All time values in microseconds."""
     if summary is None:
         summary = {
             "total_kernels": len([c for c in data if c.get("kernel")]),
             "total_cpu_ops": len([c for c in data if c.get("cpu_op")]),
             "total_cuda_launches": len([c for c in data if c.get("cuda_launch")]),
-            "total_chains": len(data)
+            "total_sequences": len(data)
         }
     
     output = {
         "summary": summary,
-        "causal_chains": data,
+        "sequences": data,
         "env_metadata": env_metadata
     }
     
-    path = os.path.join(output_dir, filename)
+    path = Path(file_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         json.dump(output, f, indent=2)
 
-def create_unique_kernels(gemm_chains):
+def create_unique_kernels(gemm_sequences):
     """Create unique GEMM kernels with averaged execution metrics."""
-    unique_groups = group_chains_by_identity(gemm_chains)
+    unique_groups = group_sequences_by_identity(gemm_sequences)
     
-    unique_gemm_chains = []
+    unique_gemm_sequences = []
     for key, instances in unique_groups.items():
         
         # Verify static properties 
@@ -386,80 +311,59 @@ def create_unique_kernels(gemm_chains):
         base_instance['kernel'].pop('ts', None)
         
         # Construct output structure 
-        chain_entry = {
+        sequence_entry = {
             "meta": base_instance.get('meta'),
             "kernel": base_instance['kernel'],
             "cuda_launch": base_instance.get('cuda_launch'),
             "cpu_op": base_instance.get('cpu_op')
         }
         
-        unique_gemm_chains.append(chain_entry)
+        unique_gemm_sequences.append(sequence_entry)
     
-    return unique_gemm_chains
+    return unique_gemm_sequences
 
-def extract_kernel_chains(trace_file):
-    """
-    Extract all kernel causal chains from trace file.
-    Returns: kernel_chains
-    """
-    with open(trace_file, "r") as f:
-        trace = json.load(f)
-    
-    cpu_ops, cuda_launches, kernels = collect_events_from_trace(trace)
-    kernel_chains = build_kernel_chains(kernels, cpu_ops, cuda_launches)
-    
-    return kernel_chains
-
-def save_all_kernel_chains(kernel_chains, env_metadata, output_dir):
-    """Save all extracted kernel causal chains."""
-    save_output(output_dir, "all_kernel_chains.json", kernel_chains, env_metadata)
-
-def save_gemm_kernel_chains(gemm_chains, env_metadata, output_dir):
-    """Save filtered GEMM kernel causal chains."""
-    save_output(output_dir, "gemm_kernel_chains.json", gemm_chains, env_metadata)
-
-def save_unique_gemm_kernel_chains(unique_chains, gemm_chains, env_metadata, output_dir):
-    """Save deduplicated unique GEMM kernel causal chains."""
-    summary = {
-        "total_kernels": len(unique_chains),
-        "total_cpu_ops": len(unique_chains),
-        "total_cuda_launches": len(unique_chains),
-        "total_chains": len(unique_chains),
-        "original_count": len(gemm_chains),
-        "deduplication_ratio": f"{len(unique_chains)}/{len(gemm_chains)}"
-    }
-    save_output(output_dir, "unique_gemm_kernel_chains.json", unique_chains, env_metadata, summary=summary)
 
 def run_extraction_pipeline(trace_file):
     """
     Main pipeline: extract -> save, filter -> save, deduplicate -> save.
     """
-    output_dir = os.environ.get("PYTORCH_OUTPUT", "output")
-    os.makedirs(output_dir, exist_ok=True)
+    trace_file = Path(trace_file)
+    traces_dir = SodaProfiler.get_path("PYTORCH_TRACES")
     
     # Save model trace to traces/model_trace folder
-    model_trace_dir = os.path.join(output_dir, "traces", "model_trace")
-    os.makedirs(model_trace_dir, exist_ok=True)
-    model_trace_path = os.path.join(model_trace_dir, "model_trace.json")
-    shutil.copy2(trace_file, model_trace_path)
+    model_trace_dir = SodaProfiler.get_path("PYTORCH_MODEL_TRACE_DIR")
+    SodaProfiler.ensure_dir(model_trace_dir)
+    model_trace_file = SodaProfiler.get_path("PYTORCH_MODEL_TRACE_FILE")
+    shutil.copy2(trace_file, model_trace_file)
     
     # Collect environment metadata once
     env_metadata = collect_env_metadata()
     
-    # Step 1: Extract all kernel chains
-    kernel_chains = extract_kernel_chains(trace_file)
-    save_all_kernel_chains(kernel_chains, env_metadata, output_dir)
+    # Step 1: Extract all event sequences
+    trace = SodaProfiler.load_json(trace_file)
+    events = SodaProfiler.collect_events_from_trace(trace)
+    event_sequences = SodaProfiler.get_linked_event_sequences(events)
+    event_sequences = SodaProfiler.calculate_per_seq_launch_tax(event_sequences)
+    save_output(SodaProfiler.get_path("PYTORCH_ALL_KERNELS"), event_sequences, env_metadata)
     
-    # Step 2: Filter GEMM kernel chains
-    gemm_chains = filter_gemm_kernel_chains(kernel_chains)
-    save_gemm_kernel_chains(gemm_chains, env_metadata, output_dir)
+    # Step 2: Filter GEMM event sequences
+    gemm_sequences = filter_gemm_sequences(event_sequences)
+    save_output(SodaProfiler.get_path("PYTORCH_GEMM_KERNELS"), gemm_sequences, env_metadata)
     
-    # Step 3: Create unique kernel chains
-    unique_gemm_chains = create_unique_kernels(gemm_chains)
-    save_unique_gemm_kernel_chains(unique_gemm_chains, gemm_chains, env_metadata, output_dir)
+    # Step 3: Create unique event sequences
+    unique_gemm_sequences = create_unique_kernels(gemm_sequences)
+    summary = {
+        "total_kernels": len(unique_gemm_sequences),
+        "total_cpu_ops": len(unique_gemm_sequences),
+        "total_cuda_launches": len(unique_gemm_sequences),
+        "total_sequences": len(unique_gemm_sequences),
+        "original_count": len(gemm_sequences),
+        "deduplication_ratio": f"{len(unique_gemm_sequences)}/{len(gemm_sequences)}"
+    }
+    save_output(SodaProfiler.get_path("PYTORCH_UNIQUE_KERNELS"), unique_gemm_sequences, env_metadata, summary=summary)
     
     return {
-        "chains": kernel_chains,
+        "sequences": event_sequences,
         "env_metadata": env_metadata
     }
 
@@ -486,19 +390,19 @@ def generate_trace(model_handler, model_inputs):
 
 def print_summary():
     """Print extraction summary from saved files."""
-    output_dir = os.environ.get("PYTORCH_OUTPUT", "output")
-    with open(os.path.join(output_dir, 'all_kernel_chains.json'), 'r') as f:
-        all_data = json.load(f)
-    with open(os.path.join(output_dir, 'gemm_kernel_chains.json'), 'r') as f:
-        gemm_data = json.load(f)
-    with open(os.path.join(output_dir, 'unique_gemm_kernel_chains.json'), 'r') as f:
-        unique_data = json.load(f)
+    all_kernels_file = SodaProfiler.get_path("PYTORCH_ALL_KERNELS")
+    gemm_kernels_file = SodaProfiler.get_path("PYTORCH_GEMM_KERNELS")
+    unique_kernels_file = SodaProfiler.get_path("PYTORCH_UNIQUE_KERNELS")
+    
+    all_data = SodaProfiler.load_json(all_kernels_file)
+    gemm_data = SodaProfiler.load_json(gemm_kernels_file)
+    unique_data = SodaProfiler.load_json(unique_kernels_file)
     
     print(f"Extracted {all_data['summary']['total_kernels']} kernels")
-    print(f"Linked {all_data['summary']['total_chains']} kernel chains")
-    print(f"Saved to {os.path.join(output_dir, 'all_kernel_chains.json')}")
-    print(f"Saved {gemm_data['summary']['total_kernels']} GEMM kernel chains to {os.path.join(output_dir, 'gemm_kernel_chains.json')}")
-    print(f"Saved {unique_data['summary']['total_kernels']} unique GEMM kernel chains to {os.path.join(output_dir, 'unique_gemm_kernel_chains.json')}")
+    print(f"Linked {all_data['summary']['total_sequences']} event sequences")
+    print(f"Saved to {all_kernels_file}")
+    print(f"Saved {gemm_data['summary']['total_kernels']} GEMM event sequences to {gemm_kernels_file}")
+    print(f"Saved {unique_data['summary']['total_kernels']} unique GEMM event sequences to {unique_kernels_file}")
     print(f"\t* Uniqueness key: kernel_name + grid + block + shared_memory + input_dims")
 
 if __name__ == "__main__":

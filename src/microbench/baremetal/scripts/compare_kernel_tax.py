@@ -2,7 +2,7 @@
 """
 Compare PyTorch and baremetal GEMM kernel launch tax.
 
-Joins results from framework/pytorch/output/unique_gemm_kernel_chains.json and
+Joins results from framework/pytorch/output/unique_gemm_kernel_sequences.json and
 baremetal/output/baremetal_gemm_runs.json, verifies kernel matching,
 computes per-kernel launch tax deltas and percentages, and emits
 baremetal/output/bm_vs_framework_report.json.
@@ -29,22 +29,22 @@ def normalize_kernel_name(name):
 
 def load_pytorch_results(pytorch_file):
     """
-    Load PyTorch kernel chains and extract per-kernel statistics.
+    Load PyTorch event sequences and extract per-kernel statistics.
     
     Returns: dict mapping job_id -> {kernel, op_signature, stats}
     """
     with open(pytorch_file, 'r') as f:
         data = json.load(f)
     
-    chains = data.get("causal_chains", [])
+    sequences = data.get("sequences", [])
     results = {}
     
-    for idx, chain in enumerate(chains):
+    for idx, sequence in enumerate(sequences):
         job_id = f"{idx+1:04d}"
         
-        kernel = chain.get("kernel", {})
-        cpu_op = chain.get("cpu_op", {})
-        meta = chain.get("meta", {})
+        kernel = sequence.get("kernel", {})
+        cpu_op = sequence.get("cpu_op", {})
+        meta = sequence.get("meta", {})
         
         # Extract op signature
         op_signature = {
@@ -65,9 +65,9 @@ def load_pytorch_results(pytorch_file):
         
         # Extract stats
         stats = {
-            "avg_kernel_tax_us": meta.get("avg_kernel_tax_us", 0.0),
-            "min_kernel_tax_us": meta.get("min_kernel_tax_us", 0.0),
-            "max_kernel_tax_us": meta.get("max_kernel_tax_us", 0.0),
+            "avg_kernel_tax": meta.get("avg_kernel_tax", 0.0),
+            "min_kernel_tax": meta.get("min_kernel_tax", 0.0),
+            "max_kernel_tax": meta.get("max_kernel_tax", 0.0),
             "count": meta.get("count", 0),
         }
         
@@ -94,6 +94,9 @@ def load_baremetal_results(baremetal_file):
     
     for run in runs:
         job_id = run["id"]
+        # Skip null kernel job (0000) from comparison results
+        if run.get("target_kernel") == "__null__":
+            continue
         results[job_id] = {
             "kernel": run["kernel"],
             "stats": run["stats"],
@@ -148,6 +151,7 @@ def verify_kernel_match(pytorch_kernel, baremetal_kernel):
     pytorch_config = extract_config(pytorch_kernel)
     baremetal_config = extract_config(baremetal_kernel)
     
+    # Require exact match 
     config_match = (
         pytorch_config["grid"] == baremetal_config["grid"] and
         pytorch_config["block"] == baremetal_config["block"] and
@@ -176,11 +180,11 @@ def compare_results(pytorch_results, baremetal_results):
         # Verify kernel match
         name_match, config_match = verify_kernel_match(pytorch["kernel"], baremetal["kernel"])
         
-        # Compute deltas
-        fw_avg = pytorch["stats"]["avg_kernel_tax_us"]
-        bm_avg = baremetal["stats"]["avg_kernel_tax_us"]
+        # Compute deltas (all values in microseconds)
+        fw_avg = pytorch["stats"]["avg_kernel_tax"]
+        bm_avg = baremetal["stats"]["avg_kernel_tax"]
         
-        delta_us = fw_avg - bm_avg
+        delta = fw_avg - bm_avg
         # Calculate percentage difference: (FW - BM) / FW * 100
         # Shows how much faster BM is compared to FW (base)
         delta_pct = ((fw_avg - bm_avg) / fw_avg * 100) if fw_avg > 0 else 0.0
@@ -200,19 +204,19 @@ def compare_results(pytorch_results, baremetal_results):
                 "config_match": config_match,
             },
             "framework": {
-                "avg_kernel_tax_us": fw_avg,
-                "min_kernel_tax_us": pytorch["stats"]["min_kernel_tax_us"],
-                "max_kernel_tax_us": pytorch["stats"]["max_kernel_tax_us"],
+                "avg_kernel_tax": fw_avg,
+                "min_kernel_tax": pytorch["stats"]["min_kernel_tax"],
+                "max_kernel_tax": pytorch["stats"]["max_kernel_tax"],
                 "count": pytorch["stats"]["count"],
             },
             "baremetal": {
                 "kernel_name": baremetal["kernel"]["name"],
-                "avg_kernel_tax_us": bm_avg,
-                "min_kernel_tax_us": baremetal["stats"]["min_kernel_tax_us"],
-                "max_kernel_tax_us": baremetal["stats"]["max_kernel_tax_us"],
+                "avg_kernel_tax": bm_avg,
+                "min_kernel_tax": baremetal["stats"]["min_kernel_tax"],
+                "max_kernel_tax": baremetal["stats"]["max_kernel_tax"],
                 "count": baremetal["stats"]["count"],
             },
-            "delta_us": delta_us,
+            "delta": delta,
             "delta_pct": delta_pct,
         }
         
@@ -234,9 +238,9 @@ def print_summary(matches):
     
     for match in matches:
         kernel_short = match["kernel"]["name"][:38]
-        fw_avg = match["framework"]["avg_kernel_tax_us"]
-        bm_avg = match["baremetal"]["avg_kernel_tax_us"]
-        delta = match["delta_us"]
+        fw_avg = match["framework"]["avg_kernel_tax"]
+        bm_avg = match["baremetal"]["avg_kernel_tax"]
+        delta = match["delta"]
         delta_pct = match["delta_pct"]
         
         name_match = "✓" if match["match_status"]["name_match"] else "✗"
@@ -252,9 +256,9 @@ def print_summary(matches):
     exact_matches = sum(1 for m in matches if m["match_status"]["name_match"] and m["match_status"]["config_match"])
     
     print(f"\nMatch Statistics:")
-    print(f"  Exact matches (name + config): {exact_matches}/{len(matches)}")
-    print(f"  Name matches:                  {name_matches}/{len(matches)}")
-    print(f"  Config matches:                {config_matches}/{len(matches)}")
+    print(f"\tExact matches (name + config): {exact_matches}/{len(matches)}")
+    print(f"\tName matches:                  {name_matches}/{len(matches)}")
+    print(f"\tConfig matches:                {config_matches}/{len(matches)}")
 
 
 def compare(pytorch_file, baremetal_file, output_file):
@@ -262,20 +266,32 @@ def compare(pytorch_file, baremetal_file, output_file):
     Main comparison function.
     """
     rel_pytorch = os.path.relpath(pytorch_file, microbench_dir) if microbench_dir else pytorch_file
-    print(f"Loading PyTorch results from {rel_pytorch}...")
+    print(f"Loading PyTorch results from {rel_pytorch}...", end=" ")
     pytorch_results = load_pytorch_results(pytorch_file)
-    print(f"  Loaded {len(pytorch_results)} PyTorch kernel chains")
+    print(f"Loaded {len(pytorch_results)} PyTorch event sequences")
     
     rel_baremetal = os.path.relpath(baremetal_file, microbench_dir) if microbench_dir else baremetal_file
-    print(f"Loading baremetal results from {rel_baremetal}...")
+    print(f"Loading baremetal results from {rel_baremetal}...", end=" ")
     baremetal_results = load_baremetal_results(baremetal_file)
-    print(f"  Loaded {len(baremetal_results)} baremetal runs")
+    print(f"Loaded {len(baremetal_results)} baremetal runs")
+    
+    # Extract null kernel tax (baseline launch tax)
+    null_kernel_tax = None
+    with open(baremetal_file, 'r') as f:
+        data = json.load(f)
+    for run in data.get("runs", []):
+        if run.get("target_kernel") == "__null__":
+            null_kernel_tax = run["stats"]["avg_kernel_tax"]
+            break
     
     # Compare
     print("Comparing results...")
     matches = compare_results(pytorch_results, baremetal_results)
     
     # Print summary
+    if null_kernel_tax is not None:
+        print(f"\nBaseline launch tax (null kernel): {null_kernel_tax:.2f} μs")
+    
     print_summary(matches)
     
     # Write output
@@ -315,7 +331,7 @@ if __name__ == "__main__":
     
     if not os.path.exists(baremetal_file):
         print(f"Error: Baremetal results not found: {baremetal_file}", file=sys.stderr)
-        print("Run run_bm_suite.py first", file=sys.stderr)
+        print("Run profile_baremetal.py first", file=sys.stderr)
         sys.exit(1)
     
     compare(pytorch_file, baremetal_file, output_file)
