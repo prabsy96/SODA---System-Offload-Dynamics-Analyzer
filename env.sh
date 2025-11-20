@@ -49,9 +49,16 @@ export BAREMETAL_REPORT="$BAREMETAL_OUTPUT/bm_vs_framework_report.json"
 # Trace directories
 export BAREMETAL_TRACES="$BAREMETAL_OUTPUT/traces"
 export PYTORCH_TRACES="$PYTORCH_OUTPUT/traces"
+export PYTORCH_MODEL_TRACE_DIR="$PYTORCH_TRACES/model_trace"
+export PYTORCH_KERNEL_TRACES_DIR="$PYTORCH_TRACES/kernel_traces"
+export PYTORCH_MODEL_TRACE_FILE="$PYTORCH_MODEL_TRACE_DIR/model_trace.json"
 
 # Graphs output
 export PYTORCH_GRAPHS="$PYTORCH_OUTPUT/graphs"
+export PYTORCH_KERNEL_TAX_GRAPHS="$PYTORCH_GRAPHS/kernel_tax"
+
+# Log files
+export PYTORCH_VERIFY_LOG="$PYTORCH_OUTPUT/verify_replayed_kernels.log"
 
 # HuggingFace cache (set default if not already set)
 export HF_HOME="${HF_HOME:-/tmp/hf_cache_$USER}"
@@ -107,6 +114,13 @@ cleanup() {
     fi
 }
 
+# Helper function to reinstall the soda package
+reinstall() {
+    echo "Reinstalling soda package..."
+    pip install --ignore-installed --force-reinstall --no-deps -e "$SODA_ROOT"
+    echo "Soda package reinstalled"
+}
+
 # Print SODA banner when sourced
 print_soda_banner() {
     # ANSI color codes for pastel colors
@@ -160,5 +174,6 @@ if [ -z "${SODA_ENV_QUIET:-}" ]; then
     echo "  * print_soda_env    - Show all environment variables and paths"
     echo "  * activate_venv     - Activate Python virtual environment"
     echo "  * cleanup           - Delete output directory ($SODA_OUTPUT)"
+    echo "  * reinstall    - Reinstall the soda package (use after making changes)"
     echo ""
 fi

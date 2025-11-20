@@ -209,8 +209,9 @@ def generate_jobs(input_file, output_file):
     sequences = data.get("sequences", [])
     
     # Profiling parameters (same for all jobs)
-    WARMUP_RUNS = 500
-    MEASUREMENT_RUNS = 1000
+    # Read from environment variables if set, otherwise use defaults
+    WARMUP_RUNS = int(os.environ.get("WARMUP_RUNS", "1000"))
+    MEASUREMENT_RUNS = int(os.environ.get("MEASUREMENT_RUNS", "2000"))
     
     jobs = []
     

@@ -2,6 +2,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 from soda import SodaProfiler
 
 def _to_tuple_int(x):
@@ -249,35 +250,22 @@ def verify_event_sequences(original_sequences, replayed_sequences):
     
     return matches, partial_matches, mismatches
 
-def run_verification_pipeline(original_file, replayed_file):
+def run_verification_pipeline():
     """
     Main pipeline: load -> verify -> save results.
     """
-    output_dir = os.environ.get("PYTORCH_OUTPUT", "output")
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir = SodaProfiler.get_path("PYTORCH_OUTPUT")
+    output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Step 1: Load event sequence files
-    # Resolve file paths (absolute or relative to output dir)
-    if os.path.isabs(original_file) or os.path.exists(original_file):
-        original_path = original_file
-    else:
-        original_path = os.path.join(output_dir, original_file)
-    
-    if os.path.isabs(replayed_file) or os.path.exists(replayed_file):
-        replayed_path = replayed_file
-    else:
-        replayed_path = os.path.join(output_dir, replayed_file)
-    
-    # Load original and replayed event sequence data
-    with open(original_path, "r") as f:
-        original_sequences = json.load(f)
-    
-    with open(replayed_path, "r") as f:
-        replayed_sequences = json.load(f)
+    # Step 1: Load event sequence files from env vars
+    original_file = SodaProfiler.get_path("PYTORCH_UNIQUE_KERNELS")
+    replayed_file = SodaProfiler.get_path("PYTORCH_REPLAYED_KERNELS")
+    original_sequences = SodaProfiler.load_json(original_file)
+    replayed_sequences = SodaProfiler.load_json(replayed_file)
     
     # Step 2: Setup logging
     # Redirect print to both stdout and log file
-    log_path = os.path.join(output_dir, "verify_replayed_kernels.log")
+    log_path = SodaProfiler.get_path("PYTORCH_VERIFY_LOG")
     output_file = open(log_path, "w")
     
     import builtins
@@ -317,11 +305,4 @@ def run_verification_pipeline(original_file, replayed_file):
     print(f"\nVerification output saved to {log_path}")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: python verify_replayed_kernels.py <original_file> <replayed_file>")
-        print("Example: python verify_replayed_kernels.py unique_gemm_kernel_sequences.json replayed_gemm_kernel_sequences.json")
-        sys.exit(1)
-    
-    original_file = sys.argv[1]
-    replayed_file = sys.argv[2]
-    run_verification_pipeline(original_file, replayed_file)
+    run_verification_pipeline()

@@ -6,11 +6,13 @@ import os
 import copy
 import shutil
 from collections import defaultdict
+from pathlib import Path
 from torch.profiler import profile, ProfilerActivity
 from soda import ModelHandler, SodaProfiler
 
 # GEMM operations to extract
 GEMM_OPS = ['aten::addmm', 'aten::mm', 'aten::bmm']
+
 
 def collect_env_metadata():
     """
@@ -264,7 +266,7 @@ def filter_gemm_sequences(event_sequences):
                 gemm_sequences.append(copy.deepcopy(e))
     return gemm_sequences
 
-def save_output(output_dir, filename, data, env_metadata, summary=None):
+def save_output(file_path, data, env_metadata, summary=None):
     """Save data to JSON file. All time values in microseconds."""
     if summary is None:
         summary = {
@@ -280,7 +282,8 @@ def save_output(output_dir, filename, data, env_metadata, summary=None):
         "env_metadata": env_metadata
     }
     
-    path = os.path.join(output_dir, filename)
+    path = Path(file_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         json.dump(output, f, indent=2)
 
@@ -319,72 +322,45 @@ def create_unique_kernels(gemm_sequences):
     
     return unique_gemm_sequences
 
-def extract_event_sequences(trace_file):
-    """
-    Extract all event sequences from trace file.
-    Returns: event_sequences
-    """
-    with open(trace_file, "r") as f:
-        trace = json.load(f)
-    
-    # Collect events from trace
-    events = SodaProfiler.collect_events_from_trace(trace)
-    
-    # Use SodaProfiler function to build event sequences
-    event_sequences = SodaProfiler.get_linked_event_sequences(events)
-    
-    # Calculate kernel tax for each sequence using SodaProfiler function
-    event_sequences = SodaProfiler.calculate_per_seq_launch_tax(event_sequences)
-    
-    return event_sequences
-
-def save_all_sequences(event_sequences, env_metadata, output_dir):
-    """Save all extracted event sequences."""
-    save_output(output_dir, "all_kernel_sequences.json", event_sequences, env_metadata)
-
-def save_gemm_sequences(gemm_sequences, env_metadata, output_dir):
-    """Save filtered GEMM event sequences."""
-    save_output(output_dir, "gemm_kernel_sequences.json", gemm_sequences, env_metadata)
-
-def save_unique_gemm_sequences(unique_sequences, gemm_sequences, env_metadata, output_dir):
-    """Save deduplicated unique GEMM event sequences."""
-    summary = {
-        "total_kernels": len(unique_sequences),
-        "total_cpu_ops": len(unique_sequences),
-        "total_cuda_launches": len(unique_sequences),
-        "total_sequences": len(unique_sequences),
-        "original_count": len(gemm_sequences),
-        "deduplication_ratio": f"{len(unique_sequences)}/{len(gemm_sequences)}"
-    }
-    save_output(output_dir, "unique_gemm_kernel_sequences.json", unique_sequences, env_metadata, summary=summary)
 
 def run_extraction_pipeline(trace_file):
     """
     Main pipeline: extract -> save, filter -> save, deduplicate -> save.
     """
-    output_dir = os.environ.get("PYTORCH_OUTPUT", "output")
-    os.makedirs(output_dir, exist_ok=True)
+    trace_file = Path(trace_file)
+    traces_dir = SodaProfiler.get_path("PYTORCH_TRACES")
     
     # Save model trace to traces/model_trace folder
-    model_trace_dir = os.path.join(output_dir, "traces", "model_trace")
-    os.makedirs(model_trace_dir, exist_ok=True)
-    model_trace_path = os.path.join(model_trace_dir, "model_trace.json")
-    shutil.copy2(trace_file, model_trace_path)
+    model_trace_dir = SodaProfiler.get_path("PYTORCH_MODEL_TRACE_DIR")
+    SodaProfiler.ensure_dir(model_trace_dir)
+    model_trace_file = SodaProfiler.get_path("PYTORCH_MODEL_TRACE_FILE")
+    shutil.copy2(trace_file, model_trace_file)
     
     # Collect environment metadata once
     env_metadata = collect_env_metadata()
     
     # Step 1: Extract all event sequences
-    event_sequences = extract_event_sequences(trace_file)
-    save_all_sequences(event_sequences, env_metadata, output_dir)
+    trace = SodaProfiler.load_json(trace_file)
+    events = SodaProfiler.collect_events_from_trace(trace)
+    event_sequences = SodaProfiler.get_linked_event_sequences(events)
+    event_sequences = SodaProfiler.calculate_per_seq_launch_tax(event_sequences)
+    save_output(SodaProfiler.get_path("PYTORCH_ALL_KERNELS"), event_sequences, env_metadata)
     
     # Step 2: Filter GEMM event sequences
     gemm_sequences = filter_gemm_sequences(event_sequences)
-    save_gemm_sequences(gemm_sequences, env_metadata, output_dir)
+    save_output(SodaProfiler.get_path("PYTORCH_GEMM_KERNELS"), gemm_sequences, env_metadata)
     
     # Step 3: Create unique event sequences
     unique_gemm_sequences = create_unique_kernels(gemm_sequences)
-    save_unique_gemm_sequences(unique_gemm_sequences, gemm_sequences, env_metadata, output_dir)
+    summary = {
+        "total_kernels": len(unique_gemm_sequences),
+        "total_cpu_ops": len(unique_gemm_sequences),
+        "total_cuda_launches": len(unique_gemm_sequences),
+        "total_sequences": len(unique_gemm_sequences),
+        "original_count": len(gemm_sequences),
+        "deduplication_ratio": f"{len(unique_gemm_sequences)}/{len(gemm_sequences)}"
+    }
+    save_output(SodaProfiler.get_path("PYTORCH_UNIQUE_KERNELS"), unique_gemm_sequences, env_metadata, summary=summary)
     
     return {
         "sequences": event_sequences,
@@ -414,19 +390,19 @@ def generate_trace(model_handler, model_inputs):
 
 def print_summary():
     """Print extraction summary from saved files."""
-    output_dir = os.environ.get("PYTORCH_OUTPUT", "output")
-    with open(os.path.join(output_dir, 'all_kernel_sequences.json'), 'r') as f:
-        all_data = json.load(f)
-    with open(os.path.join(output_dir, 'gemm_kernel_sequences.json'), 'r') as f:
-        gemm_data = json.load(f)
-    with open(os.path.join(output_dir, 'unique_gemm_kernel_sequences.json'), 'r') as f:
-        unique_data = json.load(f)
+    all_kernels_file = SodaProfiler.get_path("PYTORCH_ALL_KERNELS")
+    gemm_kernels_file = SodaProfiler.get_path("PYTORCH_GEMM_KERNELS")
+    unique_kernels_file = SodaProfiler.get_path("PYTORCH_UNIQUE_KERNELS")
+    
+    all_data = SodaProfiler.load_json(all_kernels_file)
+    gemm_data = SodaProfiler.load_json(gemm_kernels_file)
+    unique_data = SodaProfiler.load_json(unique_kernels_file)
     
     print(f"Extracted {all_data['summary']['total_kernels']} kernels")
     print(f"Linked {all_data['summary']['total_sequences']} event sequences")
-    print(f"Saved to {os.path.join(output_dir, 'all_kernel_sequences.json')}")
-    print(f"Saved {gemm_data['summary']['total_kernels']} GEMM event sequences to {os.path.join(output_dir, 'gemm_kernel_sequences.json')}")
-    print(f"Saved {unique_data['summary']['total_kernels']} unique GEMM event sequences to {os.path.join(output_dir, 'unique_gemm_kernel_sequences.json')}")
+    print(f"Saved to {all_kernels_file}")
+    print(f"Saved {gemm_data['summary']['total_kernels']} GEMM event sequences to {gemm_kernels_file}")
+    print(f"Saved {unique_data['summary']['total_kernels']} unique GEMM event sequences to {unique_kernels_file}")
     print(f"\t* Uniqueness key: kernel_name + grid + block + shared_memory + input_dims")
 
 if __name__ == "__main__":

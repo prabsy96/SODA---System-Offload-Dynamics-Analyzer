@@ -194,7 +194,7 @@ class SodaProfiler:
         prof.export_chrome_trace(str(self.trace_file_path))
         
         # Load trace data into memory immediately
-        self.trace = self.load_trace_file(self.trace_file_path)
+        self.trace = SodaProfiler.load_json(self.trace_file_path)
         
         self.logger.info(f"* Chrome trace file generated at: {self.trace_file_path}")
         return str(self.trace_file_path)
@@ -253,15 +253,29 @@ class SodaProfiler:
         prof.export_chrome_trace(str(self.trace_file_path))
         
         # Load trace data into memory immediately
-        self.trace = self.load_trace_file(self.trace_file_path)
+        self.trace = SodaProfiler.load_json(self.trace_file_path)
         
         self.logger.info(f"* Chrome trace file generated at: {self.trace_file_path}")
         return str(self.trace_file_path)
 
-    def load_trace_file(self, file_path: Path) -> Dict[str, Any]:
-        """Loads and returns the content of a JSON trace file."""
+    @staticmethod
+    def get_path(env_var: str) -> Path:
+        """Get path from environment variable."""
+        return Path(os.environ[env_var])
+    
+    @staticmethod
+    def ensure_dir(path) -> None:
+        """Ensure directory exists, creating parent directories if needed. Accepts Path or str."""
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+    
+    @staticmethod
+    def load_json(file_path) -> Dict[str, Any]:
+        """Load JSON file."""
+        file_path = Path(file_path)
         if not file_path.is_file():
-            raise FileNotFoundError(f"Trace file does not exist: {file_path}")
+            raise FileNotFoundError(f"File does not exist: {file_path}")
+        
         with open(file_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
@@ -876,19 +890,6 @@ class SodaProfiler:
         }
 
     
-    def preprocess_trace(self) -> List[Dict]:
-        """
-        Preprocesses trace data by collecting events and getting event sequences.
-        
-        Returns:
-            Event sequences (list of dictionaries).
-        """
-        # Get all events organized by category 
-        self.events = SodaProfiler.collect_events_from_trace(self.trace)
-        self.logger.info(f"Analyzing {len(self.events['gpu']['kernels'])} kernel events from profiled run...")
-        event_sequences = SodaProfiler.get_linked_event_sequences(self.events)
-        return event_sequences
-    
     def analyze(self) -> Dict[str, Any]:
         """
         Performs complete analysis of the trace data.
@@ -905,8 +906,10 @@ class SodaProfiler:
             - avg_kernel_dur: Average kernel duration results
         """
         self.logger.info("=== Analyzing Trace Data ===")
-        # Preprocess trace data
-        event_sequences = self.preprocess_trace()
+        # Collect events and build event sequences
+        self.events = SodaProfiler.collect_events_from_trace(self.trace)
+        self.logger.info(f"Analyzing {len(self.events['gpu']['kernels'])} kernel events from profiled run...")
+        event_sequences = SodaProfiler.get_linked_event_sequences(self.events)
         event_sequences = SodaProfiler.calculate_per_seq_launch_tax(event_sequences)
         
         # Analyze per-stream metrics
