@@ -9,7 +9,6 @@ from pathlib import Path
 from torch.profiler import profile, ProfilerActivity
 
 profiling_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-from soda import SodaProfiler
 from soda import utils
 sys.path.insert(0, profiling_dir)
 
@@ -156,7 +155,7 @@ def replay_kernel_from_cpu_op(cpu_op, exp_kernel_name, metadata, kernel_idx, run
     trace_file = profile_operation(cpu_op["name"], inputs, runs=runs, trace_filename=trace_filename, warmup_runs=warmup_runs)
     trace = utils.load_json(trace_file)
     events = utils.collect_events(trace)
-    event_sequences = utils.get_linked_event_sequences(events)
+    event_sequences = utils.link_sequences(events)
     event_sequences = utils.calculate_per_seq_launch_tax(event_sequences)
     
     unique_sequences = utils.deduplicate_and_aggregate(event_sequences)

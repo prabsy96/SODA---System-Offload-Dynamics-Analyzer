@@ -358,6 +358,11 @@ def get_args_parser() -> argparse.ArgumentParser:
         "--seed", type=int, default=42, help="Random seed for reproducibility."
     )
     parser.add_argument(
+        "--microbench",
+        action="store_true",
+        help="Enable deterministic setup for microbench reproducibility.",
+    )
+    parser.add_argument(
         "--version", action="version", version="%(prog)s 0.1.0"
     )
     
@@ -379,17 +384,11 @@ def parse_and_validate_args(args=None) -> argparse.Namespace:
     
     return parsed_args
 
-def setup_deterministic_mode(seed=1234):
+def setup_deterministic_mode(seed=42):
     """
     Lock down all non-determinism knobs for reproducible kernel selection.
     Sets PyTorch flags and environment variables to minimize randomness.
     """
-    # Set random seeds
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    
     # Core determinism flags
     torch.backends.cudnn.benchmark = False  # Disable autotuner
     torch.backends.cudnn.deterministic = True  # Force deterministic algos
@@ -548,14 +547,12 @@ def run_extraction_pipeline(trace_file, event_sequences):
     model_trace_file = get_path("PYTORCH_MODEL_TRACE_FILE")
     shutil.copy2(trace_file, model_trace_file)
     
-    # Collect environment metadata once
-    env_metadata = collect_env_metadata()
-    
     # Ensure data directory exists
     data_dir = get_path("PYTORCH_OUTPUT") / "data"
     ensure_dir(data_dir)
     
     # Save env_metadata separately
+    env_metadata = collect_env_metadata()
     env_metadata_file = get_path("PYTORCH_ENV_METADATA")
     ensure_dir(env_metadata_file.parent)
     save_json(env_metadata_file, env_metadata)
@@ -588,7 +585,7 @@ def run_extraction_pipeline(trace_file, event_sequences):
     
     return {
         "sequences": event_sequences,
-        "env_metadata": env_metadata
+        "env_metadata": env_metadata,
     }
 
 def print_summary():
@@ -711,7 +708,7 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
     return events
 
 
-def get_linked_event_sequences(events: Dict[str, Any]) -> List[Dict]:
+def link_sequences(events: Dict[str, Any]) -> List[Dict]:
     """
     TODO: refactor - Move to SodaTraceProcessor.link_sequences()
     
@@ -1210,4 +1207,26 @@ def analyze_kernel_fusion_candidates(event_sequences: List[Dict], exact_length: 
             }
             for chain, count, score in sorted_recommendations
         ]
+    }
+
+def generate_synthetic_inputs(tokenizer, device: torch.device, batch_size: int, seq_len: int) -> Dict[str, torch.Tensor]:
+    """
+    Generates synthetic tokenized inputs for profiling.
+    
+    Args:
+        tokenizer: Tokenizer providing vocab_size.
+        device: Torch device for the tensors.
+        batch_size: Batch size for the inputs.
+        seq_len: Sequence length for the inputs.
+        
+    Returns:
+        Dictionary with 'input_ids' and 'attention_mask' tensors.
+    """
+    return {
+        "input_ids": torch.randint(
+            1, tokenizer.vocab_size, size=(batch_size, seq_len), device=device
+        ),
+        "attention_mask": torch.ones(
+            batch_size, seq_len, device=device
+        ),
     }
