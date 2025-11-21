@@ -16,6 +16,7 @@ import subprocess
 import re
 from pathlib import Path
 from search_algorithm_indices import build_binary
+from soda import utils
 
 # Module-level variable for microbench directory (set in __main__)
 microbench_dir = None
@@ -248,12 +249,8 @@ def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
         print(f"Warning: No matched kernel-launch pairs found in {rel_path}", file=sys.stderr)
         return None
     
-    stats = {
-        "avg_kernel_tax": sum(kernel_tax_values) / len(kernel_tax_values),
-        "min_kernel_tax": min(kernel_tax_values),
-        "max_kernel_tax": max(kernel_tax_values),
-        "count": len(kernel_tax_values),
-    }
+    stats = utils.calculate_avg_min_max(kernel_tax_values, "kernel_tax")
+    stats["count"] = len(kernel_tax_values)
     
     return {
         "kernel": kernel_info,
@@ -373,9 +370,7 @@ def run_profiling(jobs_file, baremetal_dir, output_file):
         "env": env,
     }
     
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    with open(output_file, 'w') as f:
-        json.dump(output_data, f, indent=2)
+    utils.save_json(output_file, output_data)
     
     rel_path = os.path.relpath(output_file, microbench_dir) if microbench_dir else output_file
     print(f"\nCompleted {len(runs)} jobs -> {rel_path}")

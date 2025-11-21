@@ -36,20 +36,29 @@ cd "$SCRIPT_DIR"
 mkdir -p "$HF_HOME"
 
 # Profiling parameters (shared with baremetal)
-WARMUP_RUNS=1000
-MEASUREMENT_RUNS=2000
+WARMUP_RUNS=100
+MEASUREMENT_RUNS=20
 
 # Export for use in other scripts
 export WARMUP_RUNS
 export MEASUREMENT_RUNS
 
+# MODEL="${PYTORCH_MODEL:-meta-llama/Llama-3.2-3B}"
+# MODEL="${PYTORCH_MODEL:-cerebras/btlm-3b-8k-base}"
+MODEL="${PYTORCH_MODEL:-gpt2}"
+BATCH_SIZE="${PYTORCH_BATCH_SIZE:-1}"
+SEQ_LEN="${PYTORCH_SEQ_LEN:-16}"
+PRECISION="${PYTORCH_PRECISION:-float32}"
+COMPILE_TYPE="${PYTORCH_COMPILE_TYPE:-eager}"
+
 echo "=== Phase 1: Extract Event Sequences ==="
+echo "Model: $MODEL (batch=$BATCH_SIZE, seq_len=$SEQ_LEN, precision=$PRECISION, compile=$COMPILE_TYPE)"
 python scripts/extract_kernel_sequences.py \
-  --model gpt2 \
-  --batch-size 1 \
-  --seq-len 16 \
-  --precision float32 \
-  --compile-type eager
+  --model "$MODEL" \
+  --batch-size "$BATCH_SIZE" \
+  --seq-len "$SEQ_LEN" \
+  --precision "$PRECISION" \
+  --compile-type "$COMPILE_TYPE"
 echo ""
 
 echo "=== Phase 2: Replay Event Sequences ==="

@@ -3,7 +3,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from soda import SodaProfiler
+from soda import utils
 
 def _to_tuple_int(x):
     if isinstance(x, (list, tuple)):
@@ -137,6 +137,7 @@ def find_matching_replayed_sequences(original_sequence, replayed_sequences):
 def verify_kernel_match(original_kernel, original_config, replayed_sequences):
     """Check if any replayed kernel matches the original kernel."""
     original_kernel_name = original_kernel["name"]
+    original_kernel_name_clean = utils.clean_kernel_name(original_kernel_name)
     exact_match = False
     name_match = False
     matched_kernel = None
@@ -149,7 +150,8 @@ def verify_kernel_match(original_kernel, original_config, replayed_sequences):
             continue
         
         replayed_name = replayed_kernel["name"]
-        if replayed_name == original_kernel_name:
+        replayed_name_clean = utils.clean_kernel_name(replayed_name)
+        if replayed_name_clean == original_kernel_name_clean:
             name_match = True
             matched_kernel = replayed_kernel
             matched_sequence = replayed_sequence
@@ -227,7 +229,7 @@ def verify_event_sequences(original_sequences, replayed_sequences):
                     used_replayed_indices.add(idx)
                     break
         
-        print(f"\t* Kernel: {SodaProfiler.get_clean_kernel_name(original_kernel['name'])}")
+        print(f"\t* Kernel: {utils.clean_kernel_name(original_kernel['name'])}")
         
         if matched_kernel:
             print_launch_config_table(original_config, matched_kernel)
@@ -243,7 +245,7 @@ def verify_event_sequences(original_sequences, replayed_sequences):
             for replayed_sequence in matching_sequences[:3]:
                 replayed_k = replayed_sequence.get("kernel", {})
                 if replayed_k:
-                    print(f"\t\t- {SodaProfiler.get_clean_kernel_name(replayed_k.get('name', ''))}\tgrid={replayed_k.get('grid')}\tblock={replayed_k.get('block')}\tshared_mem={replayed_k.get('shared_memory', 'N/A')}")
+                    print(f"\t\t- {utils.clean_kernel_name(replayed_k.get('name', ''))}\tgrid={replayed_k.get('grid')}\tblock={replayed_k.get('block')}\tshared_mem={replayed_k.get('shared_memory', 'N/A')}")
             if len(matching_sequences) > 3:
                 print(f"\t\t... and {len(matching_sequences) - 3} more")
             mismatches += 1
@@ -254,18 +256,18 @@ def run_verification_pipeline():
     """
     Main pipeline: load -> verify -> save results.
     """
-    output_dir = SodaProfiler.get_path("PYTORCH_OUTPUT")
+    output_dir = utils.get_path("PYTORCH_OUTPUT")
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Step 1: Load event sequence files from env vars
-    original_file = SodaProfiler.get_path("PYTORCH_UNIQUE_KERNELS")
-    replayed_file = SodaProfiler.get_path("PYTORCH_REPLAYED_KERNELS")
-    original_sequences = SodaProfiler.load_json(original_file)
-    replayed_sequences = SodaProfiler.load_json(replayed_file)
+    original_file = utils.get_path("PYTORCH_UNIQUE_KERNELS")
+    replayed_file = utils.get_path("PYTORCH_REPLAYED_KERNELS")
+    original_sequences = utils.load_json(original_file)
+    replayed_sequences = utils.load_json(replayed_file)
     
     # Step 2: Setup logging
     # Redirect print to both stdout and log file
-    log_path = SodaProfiler.get_path("PYTORCH_VERIFY_LOG")
+    log_path = utils.get_path("PYTORCH_VERIFY_LOG")
     output_file = open(log_path, "w")
     
     import builtins

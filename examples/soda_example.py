@@ -10,6 +10,7 @@ import os
 import sys
 
 from soda import SodaProfiler, ModelHandler
+import utils
 
 def main():
     """Example usage of SODA programmatically."""
@@ -22,7 +23,7 @@ def main():
     
     # Parse arguments (or create a simple namespace object)
     # Option 1: Use the built-in argument parser
-    args = SodaProfiler.parse_and_validate_args([
+    args = utils.parse_and_validate_args([
         "--model", "gpt2",
         "--output-dir", os.environ.get("SODA_OUTPUT", "."),
         "--compile-type", "eager",

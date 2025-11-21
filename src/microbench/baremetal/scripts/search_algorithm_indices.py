@@ -15,7 +15,7 @@ import sys
 import subprocess
 import re
 from pathlib import Path
-from soda import SodaProfiler
+from soda import utils
 
 # Module-level variable for microbench directory (set in __main__)
 microbench_dir = None
@@ -199,7 +199,7 @@ def _run_nsys_for_algorithm(job, binary_path, algo_idx, base_args, trace_dir):
     ] + test_args
     
     try:
-        result = subprocess.run(nsys_cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(nsys_cmd, capture_output=True, text=True, timeout=100)
         if result.returncode != 0:
             # Check if we've hit the end of available algorithms
             if result.stderr:
@@ -254,7 +254,9 @@ def _compare_kernel_config(kernel_config, target_kernel, target_grid, target_blo
     block = kernel_config.get("block", [256, 1, 1])
     shared_mem = kernel_config.get("shared_memory", 0)
     
-    name_match = target_kernel.lower() == kernel_name.lower()
+    target_kernel_clean = utils.clean_kernel_name(target_kernel or "")
+    kernel_name_clean = utils.clean_kernel_name(kernel_name or "")
+    name_match = target_kernel_clean == kernel_name_clean
     grid_match = (grid == target_grid)
     block_match = (block == target_block)
     shared_match = (shared_mem == target_shared_mem)
@@ -294,7 +296,7 @@ def _print_algorithm_result(algo_idx, matches):
     block = matches["block"]
     shared_mem = matches["shared_mem"]
     
-    clean_kernel_name = SodaProfiler.get_clean_kernel_name(kernel_name)
+    clean_kernel_name = utils.clean_kernel_name(kernel_name)
     
     grid_ticks = f"[{'✓' if matches['grid_x'] else '✗'} {'✓' if matches['grid_y'] else '✗'} {'✓' if matches['grid_z'] else '✗'}]"
     block_ticks = f"[{'✓' if matches['block_x'] else '✗'} {'✓' if matches['block_y'] else '✗'} {'✓' if matches['block_z'] else '✗'}]"
@@ -415,6 +417,13 @@ def search_algorithm_indices(jobs_file, baremetal_dir):
     trace_dir = os.path.join(output_dir, "traces")
     os.makedirs(trace_dir, exist_ok=True)
     
+    # Only count jobs that actually require a search (exclude null/unknown targets)
+    searchable_jobs = [
+        job for job in jobs
+        if job.get("target_kernel") and job["target_kernel"] != "unknown" and not job.get("null_kernel")
+    ]
+    total_searchable = len(searchable_jobs)
+    
     # Search for algorithm indices for each job
     algorithms_found = 0
     no_algorithm = []
@@ -450,16 +459,17 @@ def search_algorithm_indices(jobs_file, baremetal_dir):
         jobs_data["matching_summary"] = {}
     jobs_data["matching_summary"]["matches_found"] = algorithms_found
     jobs_data["matching_summary"]["no_matches"] = no_algorithm
-    jobs_data["matching_summary"]["total_jobs"] = len(jobs)
+    jobs_data["matching_summary"]["total_jobs"] = total_searchable
     
-    os.makedirs(os.path.dirname(jobs_file), exist_ok=True)
-    with open(jobs_file, 'w') as f:
-        json.dump(jobs_data, f, indent=2)
+    utils.save_json(jobs_file, jobs_data)
     
     rel_path = os.path.relpath(jobs_file, microbench_dir) if microbench_dir else jobs_file
     print(f"\n==============================================")
     print(f"Summary")
-    print(f"- Algorithms found: {algorithms_found}/{len(jobs)}")
+
+    
+    denominator = total_searchable if total_searchable > 0 else len(jobs)
+    print(f"- Algorithms found: {algorithms_found}/{denominator}")
     if no_algorithm:
         # Format job IDs: remove one leading zero (0002 -> 002) and limit to 5
         no_algo_ids = []

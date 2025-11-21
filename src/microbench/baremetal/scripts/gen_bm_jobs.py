@@ -10,6 +10,7 @@ each GEMM in baremetal cuBLASLt.
 import json
 import os
 import sys
+from soda import utils
 
 # Module-level variable for microbench directory (set in __main__)
 microbench_dir = None
@@ -290,9 +291,7 @@ def generate_jobs(input_file, output_file):
         "jobs": jobs
     }
     
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    with open(output_file, 'w') as f:
-        json.dump(output_data, f, indent=2)
+    utils.save_json(output_file, output_data)
     
     rel_path = os.path.relpath(output_file, microbench_dir) if microbench_dir else output_file
     print(f"Generated {len(jobs)} jobs -> {rel_path}")

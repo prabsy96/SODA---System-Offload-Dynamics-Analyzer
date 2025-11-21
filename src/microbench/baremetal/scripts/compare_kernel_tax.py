@@ -12,19 +12,12 @@ import json
 import os
 import sys
 
+from soda import utils
+
 # Module-level variable for microbench directory (set in __main__)
 microbench_dir = None
 
 
-def normalize_kernel_name(name):
-    """Extract short kernel name for easier comparison."""
-    # Remove 'void ' prefix and template parameters for cleaner comparison
-    name = name.replace("void ", "")
-    # For very long names, just use the first part
-    if "<" in name:
-        base = name.split("<")[0]
-        return base
-    return name
 
 
 def load_pytorch_results(pytorch_file):
@@ -145,7 +138,7 @@ def verify_kernel_match(pytorch_kernel, baremetal_kernel):
     
     # Exact match or normalized match
     name_match = (pytorch_name == baremetal_name or 
-                  normalize_kernel_name(pytorch_name) == normalize_kernel_name(baremetal_name))
+                  utils.clean_kernel_name(pytorch_name) == utils.clean_kernel_name(baremetal_name))
     
     # Config match (grid, block, shared_memory) - use normalized comparison
     pytorch_config = extract_config(pytorch_kernel)
@@ -304,9 +297,7 @@ def compare(pytorch_file, baremetal_file, output_file):
         "matches": matches,
     }
     
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    with open(output_file, 'w') as f:
-        json.dump(output_data, f, indent=2)
+    utils.save_json(output_file, output_data)
     
     rel_output = os.path.relpath(output_file, microbench_dir) if microbench_dir else output_file
     print(f"\nComparison results written to {rel_output}")
