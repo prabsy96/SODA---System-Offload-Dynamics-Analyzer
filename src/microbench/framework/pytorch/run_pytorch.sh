@@ -51,9 +51,9 @@ SEQ_LEN="${PYTORCH_SEQ_LEN:-16}"
 PRECISION="${PYTORCH_PRECISION:-float32}"
 COMPILE_TYPE="${PYTORCH_COMPILE_TYPE:-eager}"
 
-echo "=== Phase 1: Extract Event Sequences ==="
+echo "=== Phase 1: Extract Event Sequences (via SODA) ==="
 echo "Model: $MODEL (batch=$BATCH_SIZE, seq_len=$SEQ_LEN, precision=$PRECISION, compile=$COMPILE_TYPE)"
-python scripts/extract_kernel_sequences.py \
+python -m soda \
   --model "$MODEL" \
   --batch-size "$BATCH_SIZE" \
   --seq-len "$SEQ_LEN" \

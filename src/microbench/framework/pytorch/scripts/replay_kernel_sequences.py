@@ -12,7 +12,6 @@ profiling_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 from soda import SodaProfiler, SodaTraceProcessor
 from soda import utils
 sys.path.insert(0, profiling_dir)
-from extract_kernel_sequences import setup_deterministic_mode, generate_summary
 
 def restore_environment(metadata):
     torch.manual_seed(metadata["seeds"]["torch_manual_seed"])
@@ -203,7 +202,7 @@ def run_replay_pipeline(runs=1, warmup_runs=100):
     
     # Step 2: Setup environment
     restore_environment(env_metadata)
-    setup_deterministic_mode(seed=env_metadata["seeds"]["torch_manual_seed"])
+    utils.setup_deterministic_mode(seed=env_metadata["seeds"]["torch_manual_seed"])
     
     # Step 3: Replay all event sequences (each N times if runs > 1)
     replayed_sequences = replay_all_event_sequences(data["sequences"], env_metadata, runs=runs, warmup_runs=warmup_runs)
@@ -211,7 +210,7 @@ def run_replay_pipeline(runs=1, warmup_runs=100):
     # Step 4: Filter GEMM event sequences
     replayed_gemm_sequences = utils.filter_gemm_sequences(replayed_sequences)
     utils.save_json(utils.get_path("PYTORCH_REPLAYED_KERNELS"), {
-        "summary": generate_summary(replayed_gemm_sequences),
+        "summary": utils.generate_summary(replayed_gemm_sequences),
         "sequences": replayed_gemm_sequences
     })
 

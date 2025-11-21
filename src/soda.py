@@ -19,6 +19,7 @@ from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple
 
 # Import and expose utils module for 'from soda import utils'
 import utils
+
 # Make utils accessible as soda.utils
 __all__ = ['ModelHandler', 'SodaProfiler', 'SodaTraceProcessor', 'utils']
 
@@ -64,9 +65,8 @@ class SodaProfiler:
         self._soda_logger = SodaLogger(self.output_dir, is_console=log_console, is_file=log_file)
         self.logger = self._soda_logger.logger
         
-        # Set seed for reproducibility
-        torch.manual_seed(args.seed)
-        np.random.seed(args.seed)
+        # Setup deterministic mode for reproducibility
+        utils.setup_deterministic_mode(seed=args.seed)
         
         self.trace_file_path = self.output_dir / "trace.json"
         self.report_file_path = self.output_dir / "report.json"
@@ -127,12 +127,12 @@ class SodaProfiler:
         batch_size = self.args.batch_size if batch_size is None else batch_size
         seq_len = self.args.seq_len if seq_len is None else seq_len
             
-        # TODO: 
+        
+        return self.trace_forward_pass_for_encoder(inputs) # FIXME 
         if self.model_handler.is_decoder:
             return self.trace_forward_pass_for_decoder(inputs, batch_size, seq_len)
         else:
             return self.trace_forward_pass_for_encoder(inputs)
-        # return self.trace_forward_pass_for_encoder(inputs)
 
     def trace_forward_pass_for_decoder(self, inputs: Dict[str, torch.Tensor], bs: int, sq: int) -> str:
         """
@@ -797,6 +797,8 @@ class SodaProfiler:
             fusion_results = {}
             for f in self.args.fusion:
                 fusion_results[f] = self.kernelchains(event_sequences, f, self.args.prox_score)
+        
+        utils.run_extraction_pipeline(self.trace_file_path, event_sequences)
         
         # Build metrics dictionary 
         metrics = {

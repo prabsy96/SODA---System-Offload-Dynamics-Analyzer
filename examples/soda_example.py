@@ -28,9 +28,9 @@ def main():
         "--output-dir", os.environ.get("SODA_OUTPUT", "."),
         "--compile-type", "eager",
         "--device", "cuda",
-        "--precision", "float16",
+        "--precision", "float32",
         "--batch-size", "1",
-        "--seq-len", "128",
+        "--seq-len", "16",
         "--fusion", "2", "3",
         "--prox-score", "1.0",
     ])
@@ -42,9 +42,9 @@ def main():
     #     output_dir=Path(os.environ.get("SODA_OUTPUT", ".")),
     #     compile_type="eager",
     #     device="cuda",
-    #     precision="float16",
+    #     precision="float32",
     #     batch_size=1,
-    #     seq_len=128,
+    #     seq_len=16,
     #     fusion=[2, 3],
     #     prox_score=1.0,
     #     seed=42
