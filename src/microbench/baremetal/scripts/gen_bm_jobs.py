@@ -2,7 +2,7 @@
 """
 Generate baremetal GEMM jobs from PyTorch unique event sequences.
 
-Parses microbench/framework/pytorch/output/unique_gemm_kernel_sequences.json and emits
+Parses microbench/framework/pytorch/output/unique_gemm_sequences.json and emits
 microbench/baremetal/output/jobs.json with all parameters needed to reproduce
 each GEMM in baremetal cuBLASLt.
 """
@@ -306,7 +306,7 @@ if __name__ == "__main__":
         sys.exit(1)
     
     # Get paths from environment
-    input_file = os.environ["PYTORCH_UNIQUE_KERNELS"]
+    input_file = os.environ["UNIQUE_GEMM_SEQUENCES"]
     output_file = os.environ["BAREMETAL_JOBS"]
     microbench_dir = os.environ.get("MICROBENCH_DIR")  
     

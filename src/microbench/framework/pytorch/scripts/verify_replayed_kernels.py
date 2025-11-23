@@ -252,22 +252,23 @@ def verify_event_sequences(original_sequences, replayed_sequences):
     
     return matches, partial_matches, mismatches
 
-def run_verification_pipeline():
+def run_verification_pipeline(experiment_dir: Path):
     """
     Main pipeline: load -> verify -> save results.
-    """
-    output_dir = utils.get_path("PYTORCH_OUTPUT")
-    output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Step 1: Load event sequence files from env vars
-    original_file = utils.get_path("PYTORCH_UNIQUE_KERNELS")
-    replayed_file = utils.get_path("PYTORCH_REPLAYED_KERNELS")
+    Args:
+        experiment_dir: Path to the experiment directory containing the sequence files.
+    """
+    # Step 1: Load event sequence files from env vars (relative to experiment_dir)
+    original_file = utils.get_path("UNIQUE_GEMM_SEQUENCES", base_path=experiment_dir)
+    replayed_file = utils.get_path("REPLAYED_GEMM_SEQUENCES", base_path=experiment_dir)
     original_sequences = utils.load_json(original_file)
     replayed_sequences = utils.load_json(replayed_file)
     
     # Step 2: Setup logging
     # Redirect print to both stdout and log file
-    log_path = utils.get_path("PYTORCH_VERIFY_LOG")
+    log_path = utils.get_path("PYTORCH_VERIFY_LOG", base_path=experiment_dir)
+    utils.ensure_dir(log_path.parent)
     output_file = open(log_path, "w")
     
     import builtins
@@ -306,5 +307,3 @@ def run_verification_pipeline():
     output_file.close()
     print(f"\nVerification output saved to {log_path}")
 
-if __name__ == "__main__":
-    run_verification_pipeline()

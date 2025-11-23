@@ -36,30 +36,28 @@ export BAREMETAL_BUILD="$BAREMETAL_MICROBENCH_DIR/build"
 # Virtual environment
 export PYTHON_VENV="$SODA_ROOT/.venv"
 
-# Common data files referenced across scripts
-export PYTORCH_UNIQUE_KERNELS="$PYTORCH_OUTPUT/data/unique_gemm_kernel_sequences.json"
-export PYTORCH_ALL_KERNELS="$PYTORCH_OUTPUT/data/all_kernel_sequences.json"
-export PYTORCH_GEMM_KERNELS="$PYTORCH_OUTPUT/data/gemm_kernel_sequences.json"
-export PYTORCH_REPLAYED_KERNELS="$PYTORCH_OUTPUT/data/replayed_gemm_kernel_sequences.json"
-export PYTORCH_ENV_METADATA="$PYTORCH_OUTPUT/data/env_metadata.json"
+# Common data files referenced across scripts (relative to experiment directory)
+export ALL_SEQUENCES="microbench/input/all_sequences.json"
+export ALL_GEMM_SEQUENCES="microbench/input/all_gemm_sequences.json"
+export UNIQUE_GEMM_SEQUENCES="microbench/input/unique_gemm_sequences.json"
+export REPLAYED_GEMM_SEQUENCES="microbench/output/replayed_gemm_sequences.json"
+export ENV_METADATA="env_metadata.json"
 
 export BAREMETAL_JOBS="$BAREMETAL_OUTPUT/jobs.json"
 export BAREMETAL_RUNS="$BAREMETAL_OUTPUT/baremetal_gemm_runs.json"
 export BAREMETAL_REPORT="$BAREMETAL_OUTPUT/bm_vs_framework_report.json"
 
-# Trace directories
+# Trace directories 
 export BAREMETAL_TRACES="$BAREMETAL_OUTPUT/traces"
 export PYTORCH_TRACES="$PYTORCH_OUTPUT/traces"
 export PYTORCH_MODEL_TRACE_DIR="$PYTORCH_TRACES/model_trace"
-export PYTORCH_KERNEL_TRACES_DIR="$PYTORCH_TRACES/kernel_traces"
-export PYTORCH_MODEL_TRACE_FILE="$PYTORCH_MODEL_TRACE_DIR/model_trace.json"
+export PYTORCH_KERNEL_TRACES_DIR="microbench/traces/kernel_traces"
 
-# Graphs output
-export PYTORCH_GRAPHS="$PYTORCH_OUTPUT/graphs"
-export PYTORCH_KERNEL_TAX_GRAPHS="$PYTORCH_GRAPHS/kernel_tax"
+# Graphs output (relative to experiment directory)
+export PYTORCH_KERNEL_TAX_GRAPHS="microbench/graphs/kernel_tax"
 
-# Log files
-export PYTORCH_VERIFY_LOG="$PYTORCH_OUTPUT/verify_replayed_kernels.log"
+# Log files (relative to experiment directory)
+export PYTORCH_VERIFY_LOG="microbench/microbench.log"
 
 # HuggingFace cache (set default if not already set)
 export HF_HOME="${HF_HOME:-/tmp/hf_cache_$USER}"
@@ -97,7 +95,7 @@ print_soda_env() {
     echo "PYTORCH_OUTPUT: $PYTORCH_OUTPUT"
     echo ""
     echo "=== Key Files ==="
-    echo "PYTORCH_UNIQUE_KERNELS: $PYTORCH_UNIQUE_KERNELS"
+    echo "UNIQUE_GEMM_SEQUENCES: $UNIQUE_GEMM_SEQUENCES"
     echo "BAREMETAL_JOBS: $BAREMETAL_JOBS"
     echo "BAREMETAL_RUNS: $BAREMETAL_RUNS"
     echo "BAREMETAL_REPORT: $BAREMETAL_REPORT"

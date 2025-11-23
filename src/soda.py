@@ -50,8 +50,8 @@ class SodaAnalyzer:
         self.experiment_name = tracer.experiment_name
         self.output_dir = tracer.output_dir
         
-        self.trace_file_path = tracer.trace_file_path
-        self.report_file_path = self.output_dir / "report.json"
+        self.trace_file = tracer.trace_file
+        self.report_file = self.output_dir / "report.json"
         
         self.trace = tracer.trace_data
         self.events = tracer.events
@@ -76,10 +76,6 @@ class SodaAnalyzer:
         LOGGER.info("=== Analyzing Trace Data ===")
         LOGGER.info(f"* Analyzing {len(self.event_sequences)} event sequences...")
         event_sequences = utils.calculate_per_seq_launch_tax(list(self.event_sequences))
-
-        # FIXME 
-        # Moving this to replay_kernel_sequences.py
-        # utils.run_extraction_pipeline(self.trace_file_path, event_sequences)
         
         # Analyze per-stream metrics
         stream_info = utils.analyze_per_stream(self.events)
@@ -269,11 +265,22 @@ class SodaAnalyzer:
             output["fusion_analysis"] = fusion_results
         
         # Save to file
-        utils.save_json(self.report_file_path, output)
+        utils.save_json(self.report_file, output)
         
-        LOGGER.info(f"* Metrics exported to: {self.report_file_path}")
-        return str(self.report_file_path)
+        LOGGER.info(f"* Metrics exported to: {self.report_file}")
+        return str(self.report_file)
     
+    def run(self) -> str:
+        """
+        Runs the complete analysis pipeline: analyze -> report -> save.
+        
+        Returns:
+            Path to the saved report file.
+        """
+        self.analyze()
+        self.report()
+        return self.save()
+
 class SodaLogger:
     """
     Logger class for SODA that supports both file and console output.
@@ -355,28 +362,43 @@ class ModelTracer:
 
         # Setup deterministic mode for microbench
         if bool(getattr(args, "microbench", False)):
-            utils.setup_deterministic_mode(seed=args.seed)
+            utils.setup_deterministic_mode()
         
         # Store run parameters
         self.batch_size = args.batch_size
         self.seq_len = args.seq_len
-        self.output_root = Path(args.output_dir)
         
         # Determine if model is decoder or encoder
-        self.is_decoder = not ("bert" in self.model_name.lower() or "roberta" in self.model_name.lower())
+        encoder_models = ["bert", "roberta"]
+        self.is_decoder = not any(
+            model.lower() in self.model_name.lower() 
+            for model in encoder_models
+        )
 
         # Derive experiment/output paths
         self.experiment_name = utils.generate_experiment_name(
             self.model_name, self.compile_type, self.batch_size, self.seq_len
         )
-        self.output_dir = self.output_root / self.experiment_name
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.trace_file_path = self.output_dir / "trace.json"
 
-        # Model/tokenizer placeholders
+        # Output directory for trace: <output_dir>/<experiment_name>
+        self.output_dir = args.output_dir / self.experiment_name
+        utils.ensure_dir(self.output_dir)
+
+        # Trace file: <output_dir>/<experiment_name>/<experiment_name>_trace.json
+        self.trace_file = self.output_dir / f"{self.experiment_name}_trace.json"
+        utils.ensure_dir(self.trace_file.parent)
+
+        # Collect and save env_metadata in experiment directory
+        env_metadata = utils.collect_env_metadata()
+        env_metadata_file = utils.get_path("ENV_METADATA", base_path=self.output_dir)
+        utils.save_json(env_metadata_file, env_metadata)
+
+        # Objects related to model loading and tracing
         self.model = None
         self.tokenizer = None
         self.model_inputs = None
+
+        # Objects related to trace data collection and processing
         self.trace_data = None
         self.events = None
         self.event_sequences = None
@@ -388,14 +410,10 @@ class ModelTracer:
 
         # Load model and tokenizer
         if self.is_decoder:
-            model, tokenizer = self.load_decoder()
+            self.model, self.tokenizer = self.load_decoder()
         else:
-            model, tokenizer = self.load_encoder()
+            self.model, self.tokenizer = self.load_encoder()
         
-        # Store model and tokenizer
-        self.model = model
-        self.tokenizer = tokenizer
-
         print(f"Generating synthetic input: batch_size={self.batch_size}, seq_len={self.seq_len}")
         self.model_inputs = utils.generate_synthetic_inputs(
             self.tokenizer, self.device, self.batch_size, self.seq_len
@@ -488,15 +506,17 @@ class ModelTracer:
         """
         Profiles the forward pass of the model (encoder or decoder).
         """
-        self.trace_forward_pass_for_encoder()
-        # FIXME
-        # if self.is_decoder:
-        #     self.trace_forward_pass_for_decoder()
-        # else:
-        #     self.trace_forward_pass_for_encoder()
+        # FIXME: Check with prabhu
+        # self.trace_forward_pass_for_encoder()
+
+        if self.is_decoder:
+            self.trace_forward_pass_for_decoder()
+        else:
+            self.trace_forward_pass_for_encoder
+        
         # Load trace data into memory immediately
-        self.trace_data = utils.load_json(self.trace_file_path)
-        LOGGER.info(f"* Chrome trace file generated at: {self.trace_file_path}")
+        self.trace_data = utils.load_json(self.trace_file)
+        LOGGER.info(f"* Chrome trace file generated at: {self.trace_file}")
 
     def process(self) -> None:
         """
@@ -531,7 +551,7 @@ class ModelTracer:
             ) as prof:
                 self.model.generate(**self.model_inputs, max_new_tokens=1, do_sample=False, pad_token_id=self.tokenizer.pad_token_id)
         
-        prof.export_chrome_trace(str(self.trace_file_path))
+        prof.export_chrome_trace(str(self.trace_file))
 
     def trace_forward_pass_for_encoder(self) -> None:
         """
@@ -558,7 +578,7 @@ class ModelTracer:
             ) as prof:
                 self.model(**self.model_inputs)
 
-        prof.export_chrome_trace(str(self.trace_file_path))
+        prof.export_chrome_trace(str(self.trace_file))
 
 def main() -> int:
     """Main entry point for the SODA CLI."""
@@ -586,20 +606,15 @@ def main() -> int:
 
         if args.microbench:
             # Microbench mode: extract -> replay -> verify -> plot
-            event_sequences = utils.calculate_per_seq_launch_tax(list(tracer.event_sequences))
-            utils.run_extraction_pipeline(tracer.trace_file_path, event_sequences)
-            from microbench.framework.pytorch.scripts import replay_kernel_sequences as replay
-            replay_runs = int(os.environ.get("MICROBENCH_REPLAY_RUNS", os.environ.get("MEASUREMENT_RUNS", "1")))
-            warmup_runs = int(os.environ.get("MICROBENCH_WARMUP_RUNS", os.environ.get("WARMUP_RUNS", "100")))
-            replay.run_replay_pipeline(runs=replay_runs, warmup_runs=warmup_runs)
+            from microbench.framework.pytorch.scripts.microbench import SodaMicrobench
+            microbench = SodaMicrobench(tracer=tracer, args=args)
+            microbench.run()
             return 0
         else:
-            # Create analyzer and analyze (all analyzer operations)
+            # Create analyzer and run
             analyzer = SodaAnalyzer(tracer=tracer, args=args)
-            analyzer.analyze()
-            analyzer.report()
-            analyzer.save()
-            return 0
+            analyzer.run()
+        return 0
 
     except FileNotFoundError as e:
         print(f"Error: File not found: {e}", file=sys.stderr)

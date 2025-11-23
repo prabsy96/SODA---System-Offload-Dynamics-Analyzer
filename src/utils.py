@@ -89,26 +89,33 @@ def us_to_ms(microseconds: float) -> float:
     """
     return microseconds / 1000.0
 
-def get_path(env_var: str) -> Path:
+def get_path(env_var: str, base_path: Optional[Path] = None) -> Path:
     """
     Get path from environment variable.
     
     Args:
         env_var: Environment variable name.
+        base_path: Optional base path to append the env var path to.
     
     Returns:
-        Path object from environment variable.
+        Path object from environment variable, optionally appended to base_path.
     """
-    return Path(os.environ[env_var])
+    path = Path(os.environ[env_var])
+    if base_path is not None:
+        return base_path / path
+    return path
 
-def ensure_dir(path) -> None:
+def ensure_dir(path, cleanup: bool = False) -> None:
     """
     Ensure directory exists, creating parent directories if needed.
     
     Args:
         path: Path or string to directory.
+        cleanup: If True, remove existing directory before creating.
     """
     path = Path(path)
+    if cleanup and path.is_dir():
+        shutil.rmtree(path)
     path.mkdir(parents=True, exist_ok=True)
 
 def load_json(file_path: str | Path) -> Dict[str, Any]:
@@ -148,7 +155,7 @@ def save_json(file_path: str | Path, data: Dict[str, Any], indent: int = 2) -> N
 # GEMM operations to extract
 GEMM_OPS = ['aten::addmm', 'aten::mm', 'aten::bmm']
 
-def filter_gemm_sequences(event_sequences):
+def filter_gemm_sequences(event_sequences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Filter for GEMM kernels only."""
     gemm_sequences = []
     for e in event_sequences:
@@ -363,6 +370,18 @@ def get_args_parser() -> argparse.ArgumentParser:
         help="Enable deterministic setup for microbench reproducibility.",
     )
     parser.add_argument(
+        "--runs",
+        type=int,
+        default=5,
+        help="Number of times to replay each kernel for microbenchmarking.",
+    )
+    parser.add_argument(
+        "--warmup",
+        type=int,
+        default=10,
+        help="Number of warmup iterations before profiling.",
+    )
+    parser.add_argument(
         "--version", action="version", version="%(prog)s 0.1.0"
     )
     
@@ -384,7 +403,7 @@ def parse_and_validate_args(args=None) -> argparse.Namespace:
     
     return parsed_args
 
-def setup_deterministic_mode(seed=42):
+def setup_deterministic_mode():
     """
     Lock down all non-determinism knobs for reproducible kernel selection.
     Sets PyTorch flags and environment variables to minimize randomness.
@@ -513,98 +532,6 @@ def collect_env_metadata():
     }
     
     return metadata
-
-
-def generate_summary(data, **extra):
-    """Generate default summary from event sequences data.
-    
-    Args:
-        data: List of event sequences.
-        **extra: Additional summary fields to include.
-    
-    Returns:
-        Summary dictionary with default fields plus any additional fields.
-    """
-    summary = {
-        "total_kernels": len([c for c in data if c.get("kernel")]),
-        "total_cpu_ops": len([c for c in data if c.get("cpu_op")]),
-        "total_cuda_launches": len([c for c in data if c.get("cuda_launch")]),
-        "total_sequences": len(data)
-    }
-    summary.update(extra)  # Unwrap additional fields
-    return summary
-
-def run_extraction_pipeline(trace_file, event_sequences):
-    """
-    Main pipeline: extract -> save, filter -> save, deduplicate -> save.
-    """
-    trace_file = Path(trace_file)
-    
-    # Save model trace to traces/model_trace folder
-    model_trace_dir = get_path("PYTORCH_MODEL_TRACE_DIR")
-    ensure_dir(model_trace_dir)
-    
-    model_trace_file = get_path("PYTORCH_MODEL_TRACE_FILE")
-    shutil.copy2(trace_file, model_trace_file)
-    
-    # Ensure data directory exists
-    data_dir = get_path("PYTORCH_OUTPUT") / "data"
-    ensure_dir(data_dir)
-    
-    # Save env_metadata separately
-    env_metadata = collect_env_metadata()
-    env_metadata_file = get_path("PYTORCH_ENV_METADATA")
-    ensure_dir(env_metadata_file.parent)
-    save_json(env_metadata_file, env_metadata)
-    
-    # Step 1: Save all event sequences 
-    save_json(get_path("PYTORCH_ALL_KERNELS"), {
-        "summary": generate_summary(event_sequences),
-        "sequences": event_sequences
-    })
-    
-    # Step 2: Filter GEMM event sequences
-    gemm_sequences = filter_gemm_sequences(event_sequences)
-    save_json(get_path("PYTORCH_GEMM_KERNELS"), {
-        "summary": generate_summary(gemm_sequences),
-        "sequences": gemm_sequences
-    })
-    
-    # Step 3: Create unique event sequences
-    unique_gemm_sequences = deduplicate_and_aggregate(gemm_sequences)
-    save_json(get_path("PYTORCH_UNIQUE_KERNELS"), {
-        "summary": generate_summary(
-            unique_gemm_sequences,
-            original_count=len(gemm_sequences),
-            deduplication_ratio=f"{len(unique_gemm_sequences)}/{len(gemm_sequences)}"
-        ),
-        "sequences": unique_gemm_sequences
-    })
-    
-    print_summary()
-    
-    return {
-        "sequences": event_sequences,
-        "env_metadata": env_metadata,
-    }
-
-def print_summary():
-    """Print extraction summary from saved JSON files."""
-    all_kernels_file = get_path("PYTORCH_ALL_KERNELS")
-    all_data = load_json(all_kernels_file)
-    print(f"Extracted {all_data['summary']['total_kernels']} kernels")
-    print(f"Linked {all_data['summary']['total_sequences']} event sequences")
-    print(f"Saved to {all_kernels_file}")
-    
-    gemm_kernels_file = get_path("PYTORCH_GEMM_KERNELS")
-    gemm_data = load_json(gemm_kernels_file)
-    print(f"Saved {gemm_data['summary']['total_kernels']} GEMM event sequences to {gemm_kernels_file}")
-    
-    unique_kernels_file = get_path("PYTORCH_UNIQUE_KERNELS")
-    unique_data = load_json(unique_kernels_file)
-    print(f"Saved {unique_data['summary']['total_kernels']} unique GEMM event sequences to {unique_kernels_file}")
-    print(f"\t* Uniqueness key: kernel_name + grid + block + shared_memory + input_dims")
-
 
 def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
     """

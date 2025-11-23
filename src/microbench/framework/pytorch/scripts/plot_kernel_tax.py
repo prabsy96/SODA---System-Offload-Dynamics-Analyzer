@@ -1,5 +1,3 @@
-import os
-import json
 from pathlib import Path
 from typing import List
 
@@ -31,14 +29,20 @@ def plot_kernel_tax(values: List[float], title: str, out_path: str) -> None:
     plt.close()
 
 
-def main() -> None:
-    # Load from env var
-    input_file = utils.get_path("PYTORCH_REPLAYED_KERNELS")
-    data = utils.load_json(input_file)
+def plot_kernel_tax_pipeline(experiment_dir: Path) -> None:
+    """
+    Plot kernel tax graphs from replayed sequences.
+    
+    Args:
+        experiment_dir: Path to experiment directory containing the sequence files.
+    """
+    # Load from env var (relative to experiment_dir)
+    replayed_gemm_sequences_file = utils.get_path("REPLAYED_GEMM_SEQUENCES", base_path=experiment_dir)
+    replayed_gemm_sequences_data = utils.load_json(replayed_gemm_sequences_file)
 
-    sequences = data.get("sequences", [])
+    sequences = replayed_gemm_sequences_data.get("sequences", [])
 
-    graphs_dir = utils.get_path("PYTORCH_KERNEL_TAX_GRAPHS")
+    graphs_dir = utils.get_path("PYTORCH_KERNEL_TAX_GRAPHS", base_path=experiment_dir)
     utils.ensure_dir(graphs_dir)
 
     for idx, sequence in enumerate(sequences, start=1):
@@ -56,8 +60,4 @@ def main() -> None:
         filename = format_filename(idx, op_name, kernel_name)
         out_path = graphs_dir / filename
         plot_kernel_tax(values, f"{op_name} -> {utils.clean_kernel_name(kernel_name)}", str(out_path))
-
-
-if __name__ == "__main__":
-    main()
 

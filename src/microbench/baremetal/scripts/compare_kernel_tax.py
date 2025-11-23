@@ -2,7 +2,7 @@
 """
 Compare PyTorch and baremetal GEMM kernel launch tax.
 
-Joins results from framework/pytorch/output/unique_gemm_kernel_sequences.json and
+Joins results from framework/pytorch/output/unique_gemm_sequences.json and
 baremetal/output/baremetal_gemm_runs.json, verifies kernel matching,
 computes per-kernel launch tax deltas and percentages, and emits
 baremetal/output/bm_vs_framework_report.json.
@@ -311,7 +311,7 @@ if __name__ == "__main__":
         sys.exit(1)
     
     # Get paths from environment
-    pytorch_file = os.environ["PYTORCH_UNIQUE_KERNELS"]
+    pytorch_file = os.environ["UNIQUE_GEMM_SEQUENCES"]
     baremetal_file = os.environ["BAREMETAL_RUNS"]
     output_file = os.environ["BAREMETAL_REPORT"]
     microbench_dir = os.environ.get("MICROBENCH_DIR")

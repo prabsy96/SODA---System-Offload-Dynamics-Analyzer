@@ -31,9 +31,9 @@ echo "Python version: $(python --version)"
 echo ""
 
 # Check if PyTorch results exist
-if [ ! -f "$PYTORCH_UNIQUE_KERNELS" ]; then
+if [ ! -f "$UNIQUE_GEMM_SEQUENCES" ]; then
     echo "WARNING: PyTorch results not found at:"
-    echo "  $PYTORCH_UNIQUE_KERNELS"
+    echo "  $UNIQUE_GEMM_SEQUENCES"
     echo ""
     echo "You need to run the PyTorch profiling pipeline first:"
     echo "  cd $PYTORCH_MICROBENCH_DIR && ./run_pytorch.sh"
