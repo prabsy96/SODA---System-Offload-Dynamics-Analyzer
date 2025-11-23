@@ -23,8 +23,8 @@ export FRAMEWORK_DIR="$MICROBENCH_DIR/framework"
 export PYTORCH_MICROBENCH_DIR="$FRAMEWORK_DIR/pytorch"
 
 # Microbenchmark output directories
-export BAREMETAL_OUTPUT="$SODA_OUTPUT/microbench/baremetal"
-export PYTORCH_OUTPUT="$SODA_OUTPUT/microbench/framework/pytorch"
+export BAREMETAL_OUTPUT_DIR="microbench/baremetal"
+export PYTORCH_OUTPUT_DIR="microbench/framework/pytorch"
 
 # Microbenchmark script directories
 export BAREMETAL_SCRIPTS="$BAREMETAL_MICROBENCH_DIR/scripts"
@@ -36,28 +36,29 @@ export BAREMETAL_BUILD="$BAREMETAL_MICROBENCH_DIR/build"
 # Virtual environment
 export PYTHON_VENV="$SODA_ROOT/.venv"
 
-# Common data files referenced across scripts (relative to experiment directory)
-export ALL_SEQUENCES="microbench/input/all_sequences.json"
-export ALL_GEMM_SEQUENCES="microbench/input/all_gemm_sequences.json"
-export UNIQUE_GEMM_SEQUENCES="microbench/input/unique_gemm_sequences.json"
-export REPLAYED_GEMM_SEQUENCES="microbench/output/replayed_gemm_sequences.json"
+# Environment metadata file
 export ENV_METADATA="env_metadata.json"
 
-export BAREMETAL_JOBS="$BAREMETAL_OUTPUT/jobs.json"
-export BAREMETAL_RUNS="$BAREMETAL_OUTPUT/baremetal_gemm_runs.json"
-export BAREMETAL_REPORT="$BAREMETAL_OUTPUT/bm_vs_framework_report.json"
+# Common data files referenced across scripts (relative to experiment directory)
+export ALL_SEQUENCES="sequences/all_sequences.json"
+export ALL_GEMM_SEQUENCES="sequences/all_gemm_sequences.json"
+export UNIQUE_GEMM_SEQUENCES="sequences/unique_gemm_sequences.json"
 
-# Trace directories 
-export BAREMETAL_TRACES="$BAREMETAL_OUTPUT/traces"
-export PYTORCH_TRACES="$PYTORCH_OUTPUT/traces"
-export PYTORCH_MODEL_TRACE_DIR="$PYTORCH_TRACES/model_trace"
-export PYTORCH_KERNEL_TRACES_DIR="microbench/traces/kernel_traces"
+# Framework/pytorch
+export PYTORCH_REPLAYED_GEMM_SEQUENCES="$PYTORCH_OUTPUT_DIR/replayed_gemm_sequences.json"
+export PYTORCH_TRACES="$PYTORCH_OUTPUT_DIR/traces"
+export PYTORCH_KERNEL_TAX_GRAPHS="$PYTORCH_OUTPUT_DIR/graphs/kernel_tax"
+
+# Baremetal
+export BAREMETAL_JOBS="$BAREMETAL_OUTPUT_DIR/jobs.json"
+export BAREMETAL_RUNS="$BAREMETAL_OUTPUT_DIR/baremetal_gemm_runs.json"
+export BAREMETAL_REPORT="$BAREMETAL_OUTPUT_DIR/bm_vs_framework_report.json"
+export BAREMETAL_TRACES="$BAREMETAL_OUTPUT_DIR/traces"
 
 # Graphs output (relative to experiment directory)
-export PYTORCH_KERNEL_TAX_GRAPHS="microbench/graphs/kernel_tax"
 
 # Log files (relative to experiment directory)
-export PYTORCH_VERIFY_LOG="microbench/microbench.log"
+export PYTORCH_VERIFY_LOG="$PYTORCH_OUTPUT_DIR/microbench.log"
 
 # HuggingFace cache (set default if not already set)
 export HF_HOME="${HF_HOME:-/tmp/hf_cache_$USER}"
@@ -91,8 +92,8 @@ print_soda_env() {
     echo "PYTORCH_MICROBENCH_DIR: $PYTORCH_MICROBENCH_DIR"
     echo ""
     echo "=== Output Directories ==="
-    echo "BAREMETAL_OUTPUT: $BAREMETAL_OUTPUT"
-    echo "PYTORCH_OUTPUT: $PYTORCH_OUTPUT"
+    echo "BAREMETAL_OUTPUT_DIR: $BAREMETAL_OUTPUT_DIR"
+    echo "PYTORCH_OUTPUT_DIR: $PYTORCH_OUTPUT_DIR"
     echo ""
     echo "=== Key Files ==="
     echo "UNIQUE_GEMM_SEQUENCES: $UNIQUE_GEMM_SEQUENCES"

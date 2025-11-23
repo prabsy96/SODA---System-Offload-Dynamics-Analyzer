@@ -384,8 +384,8 @@ class ModelTracer:
         self.output_dir = args.output_dir / self.experiment_name
         utils.ensure_dir(self.output_dir)
 
-        # Trace file: <output_dir>/<experiment_name>/<experiment_name>_trace.json
-        self.trace_file = self.output_dir / f"{self.experiment_name}_trace.json"
+        # Trace file: <output_dir>/<experiment_name>/trace.json
+        self.trace_file = self.output_dir / "trace.json"
         utils.ensure_dir(self.trace_file.parent)
 
         # Collect and save env_metadata in experiment directory
@@ -606,7 +606,7 @@ def main() -> int:
 
         if args.microbench:
             # Microbench mode: extract -> replay -> verify -> plot
-            from microbench.framework.pytorch.scripts.microbench import SodaMicrobench
+            from soda_microbench import SodaMicrobench
             microbench = SodaMicrobench(tracer=tracer, args=args)
             microbench.run()
             return 0

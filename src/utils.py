@@ -38,6 +38,23 @@ def calculate_avg_min_max(values, base_name=None):
 
     return result
 
+def format_sequence_filename(index: int, op_name: str, kernel_name: str, extension: str = "png") -> str:
+    """
+    Format a filename for a sequence file (trace, plot, etc.) using index, op name, and kernel name.
+    
+    Args:
+        index: Sequence index (1-based).
+        op_name: CPU operation name (e.g., "aten::addmm").
+        kernel_name: Kernel name.
+        extension: File extension (default: "png").
+    
+    Returns:
+        Formatted filename: "{index:02d}_{op_short}_{kernel_short}.{extension}"
+    """
+    op_short = op_name.replace("::", "_")
+    kernel_short = clean_kernel_name(kernel_name).strip()
+    return f"{index:02d}_{op_short}_{kernel_short}.{extension}"
+
 def clean_kernel_name(kernel_name: str) -> str:
     """
     Extract a clean kernel name from the full signature.
@@ -105,6 +122,26 @@ def get_path(env_var: str, base_path: Optional[Path] = None) -> Path:
         return base_path / path
     return path
 
+def ensure_file(file_path: Path) -> None:
+    """
+    Check if a file exists at the given path, print error if not found.
+    
+    Args:
+        file_path: Path to file.
+    """
+    file_path = Path(file_path)
+    if not file_path.exists():
+        print(f"{file_path.name} not found at {file_path}")
+
+def print_subsection(title: str) -> None:
+    """
+    Print a subsection header.
+    
+    Args:
+        title: Subsection title.
+    """
+    print(f"\n=== {title} ===")
+
 def ensure_dir(path, cleanup: bool = False) -> None:
     """
     Ensure directory exists, creating parent directories if needed.
@@ -155,6 +192,20 @@ def save_json(file_path: str | Path, data: Dict[str, Any], indent: int = 2) -> N
 # GEMM operations to extract
 GEMM_OPS = ['aten::addmm', 'aten::mm', 'aten::bmm']
 
+def validate_sequences(event_sequences: List[Dict[str, Any]]) -> None:
+    """Validate that all sequences have required fields (kernel, cpu_op, cuda_launch).
+    
+    Args:
+        event_sequences: List of event sequences.
+    
+    Raises:
+        AssertionError: If any sequence is missing required fields.
+    """
+    num_sequences = len(event_sequences)
+    assert all(c.get("kernel") for c in event_sequences), f"Some sequences missing kernel (total: {num_sequences})"
+    assert all(c.get("cpu_op") for c in event_sequences), f"Some sequences missing cpu_op (total: {num_sequences})"
+    assert all(c.get("cuda_launch") for c in event_sequences), f"Some sequences missing cuda_launch (total: {num_sequences})"
+
 def filter_gemm_sequences(event_sequences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Filter for GEMM kernels only."""
     gemm_sequences = []
@@ -164,6 +215,8 @@ def filter_gemm_sequences(event_sequences: List[Dict[str, Any]]) -> List[Dict[st
             # Kernel name must contain 'gemm' (eg: volta_sgemm_64x32_sliced1x4_nn)
             if 'gemm' in e.get('kernel', {}).get('name', '').lower():
                 gemm_sequences.append(copy.deepcopy(e))
+                
+    validate_sequences(gemm_sequences)
     return gemm_sequences
 
 def make_kernel_identity_key(kernel, input_dims):
@@ -298,6 +351,7 @@ def deduplicate_and_aggregate(sequences):
         
         unique_gemm_sequences.append(sequence_entry)
     
+    validate_sequences(unique_gemm_sequences)
     return unique_gemm_sequences
 
 def get_args_parser() -> argparse.ArgumentParser:
@@ -665,6 +719,7 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
             "cpu_op": cpu_op,
         })
     
+    validate_sequences(event_sequences)
     return event_sequences
 
 
@@ -687,6 +742,7 @@ def calculate_per_seq_launch_tax(event_sequences: List[Dict]) -> List[Dict]:
             seq["kernel_tax"] = launch_tax
         else:
             seq["kernel_tax"] = None
+
     return event_sequences
 
 

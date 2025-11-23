@@ -11,6 +11,7 @@ baremetal/output/bm_vs_framework_report.json.
 import json
 import os
 import sys
+from pathlib import Path
 
 from soda import utils
 
@@ -303,7 +304,7 @@ def compare(pytorch_file, baremetal_file, output_file):
     print(f"\nComparison results written to {rel_output}")
 
 
-if __name__ == "__main__":
+def entry_point(experiment_dir: Path) -> None:
     # Check if env.sh has been sourced
     if not os.environ.get("SODA_ENV_LOADED"):
         print("Error: SODA environment not loaded.", file=sys.stderr)
@@ -311,19 +312,15 @@ if __name__ == "__main__":
         sys.exit(1)
     
     # Get paths from environment
-    pytorch_file = os.environ["UNIQUE_GEMM_SEQUENCES"]
-    baremetal_file = os.environ["BAREMETAL_RUNS"]
-    output_file = os.environ["BAREMETAL_REPORT"]
+    pytorch_file = utils.get_path("UNIQUE_GEMM_SEQUENCES", base_path=experiment_dir)
+    baremetal_file = utils.get_path("BAREMETAL_RUNS", base_path=experiment_dir)
+    output_file = utils.get_path("BAREMETAL_REPORT", base_path=experiment_dir)
+    global microbench_dir
     microbench_dir = os.environ.get("MICROBENCH_DIR")
     
-    if not os.path.exists(pytorch_file):
-        print(f"Error: PyTorch results not found: {pytorch_file}", file=sys.stderr)
-        sys.exit(1)
-    
-    if not os.path.exists(baremetal_file):
-        print(f"Error: Baremetal results not found: {baremetal_file}", file=sys.stderr)
-        print("Run profile_baremetal.py first", file=sys.stderr)
-        sys.exit(1)
+    # Check if input files exist
+    utils.ensure_file(pytorch_file)
+    utils.ensure_file(baremetal_file)
     
     compare(pytorch_file, baremetal_file, output_file)
 

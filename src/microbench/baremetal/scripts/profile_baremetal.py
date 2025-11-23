@@ -292,10 +292,13 @@ def collect_gpu_info():
     return env
 
 
-def run_profiling(jobs_file, baremetal_dir, output_file):
+def run_profiling(jobs_file, output_file):
     """
     Run profiling for all jobs using matched algorithms.
     """
+    # Check if jobs file exists
+    utils.ensure_file(jobs_file)
+    
     # Load jobs
     with open(jobs_file, 'r') as f:
         jobs_data = json.load(f)
@@ -314,14 +317,12 @@ def run_profiling(jobs_file, baremetal_dir, output_file):
         print(f"Using {matches_found} matched algorithms")
     
     # Build binary
-    if not build_binary(baremetal_dir):
-        print("Build failed, exiting", file=sys.stderr)
-        return False
+    build_binary()
     
+    baremetal_dir = os.environ["BAREMETAL_MICROBENCH_DIR"]
     binary_path = os.path.join(baremetal_dir, "build", "main_gemm_bm")
     if not os.path.exists(binary_path):
-        print(f"Binary not found: {binary_path}", file=sys.stderr)
-        return False
+        raise RuntimeError(f"Binary not found: {binary_path}")
     
     # Run each job
     output_dir = os.path.dirname(output_file)
@@ -364,7 +365,7 @@ def run_profiling(jobs_file, baremetal_dir, output_file):
     output_data = {
         "summary": {
             "jobs": len(runs),
-            "source": jobs_file,
+            "source": str(jobs_file),
         },
         "runs": runs,
         "env": env,
@@ -374,27 +375,4 @@ def run_profiling(jobs_file, baremetal_dir, output_file):
     
     rel_path = os.path.relpath(output_file, microbench_dir) if microbench_dir else output_file
     print(f"\nCompleted {len(runs)} jobs -> {rel_path}")
-    return True
-
-
-if __name__ == "__main__":
-    # Check if env.sh has been sourced
-    if not os.environ.get("SODA_ENV_LOADED"):
-        print("Error: SODA environment not loaded.", file=sys.stderr)
-        print("Please run: source env.sh", file=sys.stderr)
-        sys.exit(1)
-    
-    # Get paths from environment
-    baremetal_dir = os.environ["BAREMETAL_MICROBENCH_DIR"]
-    jobs_file = os.environ["BAREMETAL_JOBS"]
-    output_file = os.environ["BAREMETAL_RUNS"]
-    microbench_dir = os.environ.get("MICROBENCH_DIR")
-    
-    if not os.path.exists(jobs_file):
-        print(f"Error: Jobs file not found: {jobs_file}", file=sys.stderr)
-        print("Run gen_bm_jobs.py first", file=sys.stderr)
-        sys.exit(1)
-    
-    success = run_profiling(jobs_file, baremetal_dir, output_file)
-    sys.exit(0 if success else 1)
 

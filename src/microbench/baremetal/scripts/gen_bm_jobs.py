@@ -7,13 +7,9 @@ microbench/baremetal/output/jobs.json with all parameters needed to reproduce
 each GEMM in baremetal cuBLASLt.
 """
 
-import json
-import os
 import sys
+from pathlib import Path
 from soda import utils
-
-# Module-level variable for microbench directory (set in __main__)
-microbench_dir = None
 
 
 def parse_dtype(dtype_str):
@@ -199,20 +195,17 @@ def extract_gemm_params(sequence):
     return params
 
 
-def generate_jobs(input_file, output_file):
+def generate_jobs(target_sequences: dict, output_file, warmup: int, runs: int):
     """
-    Parse PyTorch unique event sequences and generate baremetal jobs.
+    Generate baremetal jobs from PyTorch unique event sequences data.
+    
+    Args:
+        target_sequences: Dictionary with 'sequences' key containing event sequences.
+        output_file: Path to output file for jobs JSON.
+        warmup: Number of warmup runs.
+        runs: Number of measurement runs.
     """
-    # Read PyTorch unique event sequences
-    with open(input_file, 'r') as f:
-        data = json.load(f)
-    
-    sequences = data.get("sequences", [])
-    
-    # Profiling parameters (same for all jobs)
-    # Read from environment variables if set, otherwise use defaults
-    WARMUP_RUNS = int(os.environ.get("WARMUP_RUNS", "1000"))
-    MEASUREMENT_RUNS = int(os.environ.get("MEASUREMENT_RUNS", "2000"))
+    sequences = target_sequences.get("sequences", [])
     
     jobs = []
     
@@ -225,8 +218,8 @@ def generate_jobs(input_file, output_file):
         "target_shared_mem": 0,
         "op": "null_kernel",
         "null_kernel": True,
-        "warmup": WARMUP_RUNS,
-        "runs": MEASUREMENT_RUNS,
+        "warmup": warmup,
+        "runs": runs,
     })
     
     for idx, sequence in enumerate(sequences):
@@ -272,8 +265,8 @@ def generate_jobs(input_file, output_file):
             "dtype": params.get("dtype", "f32"),
             "alpha": params.get("alpha", 1.0),
             "beta": params.get("beta", 0.0),
-            "warmup": WARMUP_RUNS,
-            "runs": MEASUREMENT_RUNS,
+            "warmup": warmup,
+            "runs": runs,
         }
         
         # Add batch count for bmm
@@ -286,32 +279,11 @@ def generate_jobs(input_file, output_file):
     output_data = {
         "summary": {
             "total_jobs": len(jobs),
-            "source": input_file,
         },
         "jobs": jobs
     }
     
     utils.save_json(output_file, output_data)
     
-    rel_path = os.path.relpath(output_file, microbench_dir) if microbench_dir else output_file
-    print(f"Generated {len(jobs)} jobs -> {rel_path}")
+    print(f"Generated {len(jobs)} jobs -> {output_file}")
     return len(jobs)
-
-
-if __name__ == "__main__":
-    # Check if env.sh has been sourced
-    if not os.environ.get("SODA_ENV_LOADED"):
-        print("Error: SODA environment not loaded.", file=sys.stderr)
-        print("Please run: source env.sh", file=sys.stderr)
-        sys.exit(1)
-    
-    # Get paths from environment
-    input_file = os.environ["UNIQUE_GEMM_SEQUENCES"]
-    output_file = os.environ["BAREMETAL_JOBS"]
-    microbench_dir = os.environ.get("MICROBENCH_DIR")  
-    
-    if not os.path.exists(input_file):
-        print(f"Error: Input file not found: {input_file}", file=sys.stderr)
-        sys.exit(1)
-    
-    generate_jobs(input_file, output_file)

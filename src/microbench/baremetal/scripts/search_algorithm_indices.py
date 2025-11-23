@@ -17,12 +17,10 @@ import re
 from pathlib import Path
 from soda import utils
 
-# Module-level variable for microbench directory (set in __main__)
-microbench_dir = None
 
-
-def build_binary(baremetal_dir):
+def build_binary():
     """Build the C++ binary using cmake."""
+    baremetal_dir = os.environ["BAREMETAL_MICROBENCH_DIR"]
     print("Building C++ binary...")
     build_dir = os.path.join(baremetal_dir, "build")
     
@@ -34,8 +32,7 @@ def build_binary(baremetal_dir):
         text=True
     )
     if result.returncode != 0:
-        print(f"CMake configure failed:\n{result.stderr}", file=sys.stderr)
-        return False
+        raise RuntimeError(f"CMake configure failed:\n{result.stderr}")
     
     # Build
     result = subprocess.run(
@@ -45,11 +42,9 @@ def build_binary(baremetal_dir):
         text=True
     )
     if result.returncode != 0:
-        print(f"Build failed:\n{result.stderr}", file=sys.stderr)
-        return False
+        raise RuntimeError(f"Build failed:\n{result.stderr}")
     
     print("Build successful")
-    return True
 
 
 def get_available_algorithm_count(job, binary_path):
@@ -390,27 +385,27 @@ def search_algorithm_index(job, binary_path, output_dir, max_algorithms=200):
     return None
 
 
-def search_algorithm_indices(jobs_file, baremetal_dir):
+def search_algorithm_indices(jobs_file):
     """
     Search for algorithm indices for all jobs and update jobs.json.
     """
+    # Check if jobs file exists
+    utils.ensure_file(jobs_file)
+    
     # Load jobs
     with open(jobs_file, 'r') as f:
         jobs_data = json.load(f)
     
     jobs = jobs_data.get("jobs", [])
-    rel_path = os.path.relpath(jobs_file, microbench_dir) if microbench_dir else jobs_file
-    print(f"Loaded {len(jobs)} jobs from {rel_path}")
+    print(f"Loaded {len(jobs)} jobs from {jobs_file}")
     
     # Build binary
-    if not build_binary(baremetal_dir):
-        print("Build failed, exiting", file=sys.stderr)
-        return False
+    build_binary()
     
+    baremetal_dir = os.environ["BAREMETAL_MICROBENCH_DIR"]
     binary_path = os.path.join(baremetal_dir, "build", "main_gemm_bm")
     if not os.path.exists(binary_path):
-        print(f"Binary not found: {binary_path}", file=sys.stderr)
-        return False
+        raise RuntimeError(f"Binary not found: {binary_path}")
     
     # Create temporary output dir for test traces
     output_dir = os.path.dirname(jobs_file)
@@ -463,7 +458,6 @@ def search_algorithm_indices(jobs_file, baremetal_dir):
     
     utils.save_json(jobs_file, jobs_data)
     
-    rel_path = os.path.relpath(jobs_file, microbench_dir) if microbench_dir else jobs_file
     print(f"\n==============================================")
     print(f"Summary")
 
@@ -483,28 +477,6 @@ def search_algorithm_indices(jobs_file, baremetal_dir):
         if len(no_algorithm) > 5:
             no_algo_str += f" ({len(no_algorithm) - 5} more)"
         print(f"- No algorithm found: {no_algo_str}")
-    print(f"- Updated {rel_path}")
+    print(f"- Updated {jobs_file}")
     print(f"==============================================")
-    return True
-
-
-if __name__ == "__main__":
-    # Check if env.sh has been sourced
-    if not os.environ.get("SODA_ENV_LOADED"):
-        print("Error: SODA environment not loaded.", file=sys.stderr)
-        print("Please run: source env.sh", file=sys.stderr)
-        sys.exit(1)
-    
-    # Get paths from environment
-    baremetal_dir = os.environ["BAREMETAL_MICROBENCH_DIR"]
-    jobs_file = os.environ["BAREMETAL_JOBS"]
-    microbench_dir = os.environ.get("MICROBENCH_DIR")
-    
-    if not os.path.exists(jobs_file):
-        print(f"Error: Jobs file not found: {jobs_file}", file=sys.stderr)
-        print("Run gen_bm_jobs.py first", file=sys.stderr)
-        sys.exit(1)
-    
-    success = search_algorithm_indices(jobs_file, baremetal_dir)
-    sys.exit(0 if success else 1)
 
