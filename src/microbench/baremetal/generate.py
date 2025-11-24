@@ -248,7 +248,7 @@ def generate_jobs(target_sequences: dict, warmup: int, runs: int):
         "target_grid": [1, 1, 1],
         "target_block": [1, 1, 1],
         "target_shared_mem": 0,
-        "op": "null_kernel",
+        "cpu_op": "null_kernel",
         "null_kernel": True,
         "warmup": warmup,
         "runs": runs,
@@ -265,25 +265,16 @@ def generate_jobs(target_sequences: dict, warmup: int, runs: int):
             print(f"Warning: Skipping sequence {job_id} - missing M/N/K", file=sys.stderr)
             continue
         
-        # Get target kernel name and config
-        kernel = sequence.get("kernel", {})
-        target_kernel = kernel.get("name", "unknown")
-        target_grid = kernel.get("grid", [1, 1, 1])
-        target_block = kernel.get("block", [256, 1, 1])
-        target_shared_mem = kernel.get("shared_memory", 0)
-        
-        # Get operation type
-        cpu_op = sequence.get("cpu_op", {})
-        op_name = cpu_op.get("name", "").replace("aten::", "")
-        
         # Build job entry
+        kernel = sequence.get("kernel", {})
+        cpu_op = sequence.get("cpu_op", {})
         job = {
             "id": job_id,
-            "target_kernel": target_kernel,
-            "target_grid": target_grid,
-            "target_block": target_block,
-            "target_shared_mem": target_shared_mem,
-            "op": op_name,
+            "target_kernel": kernel.get("name", "unknown"),
+            "target_grid": kernel.get("grid", [1, 1, 1]),
+            "target_block": kernel.get("block", [256, 1, 1]),
+            "target_shared_mem": kernel.get("shared_memory", 0),
+            "cpu_op": cpu_op.get("name", ""),
             "m": params["m"],
             "n": params["n"],
             "k": params["k"],
@@ -308,14 +299,13 @@ def generate_jobs(target_sequences: dict, warmup: int, runs: int):
         jobs.append(job)
     
     # Write jobs to output file
-    output_data = {
+    jobs_data = {
         "summary": {
             "total_jobs": len(jobs),
         },
         "jobs": jobs
     }
     
-    utils.save_json(output_file, output_data)
+    utils.save_json(output_file, jobs_data)
     
     print(f"Generated {len(jobs)} jobs -> {output_file}")
-    return len(jobs)
