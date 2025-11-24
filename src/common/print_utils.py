@@ -6,6 +6,8 @@ from typing import Any, List
 from rich.console import Console
 from rich.table import Table
 from rich.rule import Rule
+from rich.panel import Panel
+from rich.padding import Padding
 
 def bool_to_match(match: bool) -> str:
     """Convert boolean match to colored tick mark."""
@@ -29,6 +31,19 @@ def iter_end(style: str = "cyan") -> None:
     """
     console = Console()
     console.print(Rule(characters="·", style=style))
+
+def subsection(title: str, level: int = 1, style: str = "cyan") -> None:
+    """Print a subsection using Panel with indentation.
+    
+    Args:
+        title: Subsection title text
+        level: Indentation level (0 = no indent, 1 = 2 spaces, 2 = 4 spaces, etc.)
+        style: Style/color for the panel border (default: "cyan")
+    """
+    console = Console()
+    indent = level * 2  # 2 spaces per level
+    panel = Panel(title, border_style=style, style="bold")
+    console.print(Padding(panel, (0, 0, 0, indent)))
 
 def comp_table(title: str, headers: List[str], data: List[List[Any]]):
     """Print a rich table with automatic boolean formatting and justification.

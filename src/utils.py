@@ -218,12 +218,35 @@ def save_json(file_path: str | Path, data: Dict[str, Any], indent: int = 2) -> N
 # GEMM operations to extract
 GEMM_OPS = ['aten::addmm', 'aten::mm', 'aten::bmm']
 
-def _parse_scalar(s):
-    """Parse a scalar value to float, returning None if invalid or empty."""
+def _parse_scalar(value, default):
+    if value is None or value == '':
+        return default
     try:
-        return float(s) if s not in (None, '') else None
+        return float(value)
     except (TypeError, ValueError):
-        return None
+        return default
+
+def extract_alpha_beta(concrete_inputs: List[Any], default_alpha: float = 1.0, default_beta: float = 1.0) -> Tuple[float, float]:
+    """Extract alpha and beta scalars from concrete_inputs for addmm operations.
+    
+    Args:
+        concrete_inputs: List of concrete input values from cpu_op
+        default_alpha: Default alpha value if not found (default: 1.0)
+        default_beta: Default beta value if not found (default: 1.0)
+    
+    Returns:
+        Tuple of (alpha, beta) floats
+    """    
+    # Alpha is at index 3, beta is at index 4
+    if len(concrete_inputs) >= 5:
+        alpha = _parse_scalar(concrete_inputs[3], default_alpha)
+        beta = _parse_scalar(concrete_inputs[4], default_beta)
+    else:
+        alpha = default_alpha
+        beta = default_beta
+    
+    return alpha, beta
+
 
 def extract_cpu_op_signature(cpu_op: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -307,22 +330,21 @@ def compare_cpu_ops(actual: Dict[str, Any], target: Dict[str, Any], show_table=F
         if len(actual_concrete) >= 5 and len(target_concrete) >= 5:
             has_a_b = True
 
-            # Parse alpha/beta scalars
-            parse = lambda arr, idx: _parse_scalar(arr[idx]) if len(arr) > idx else None
-            actual_a, actual_b = parse(actual_concrete, 3), parse(actual_concrete, 4)
-            target_a, target_b = parse(target_concrete, 3), parse(target_concrete, 4)
+            # Parse alpha/beta scalars 
+            actual_a, actual_b = extract_alpha_beta(actual_concrete)
+            target_a, target_b = extract_alpha_beta(target_concrete)
 
             # Check alpha/beta scalars for addmm (affects epilogue fusion)
             a_match = (actual_a == target_a)
             b_match = (actual_b == target_b)
             match = match and a_match and b_match
-            
+    
             table_data.append(["alpha (concrete_inputs[3])", actual_a or "N/A", target_a or "N/A", a_match])
             table_data.append(["beta (concrete_inputs[4])", actual_b or "N/A", target_b or "N/A", b_match])
-    else:
+        else:
         # For non-addmm ops, compare concrete_inputs as-is
-        actual_value = actual_sig.get("concrete_inputs") or "N/A"
-        target_value = target_sig.get("concrete_inputs") or "N/A"
+            actual_value = actual_sig.get("concrete_inputs") or "N/A"
+            target_value = target_sig.get("concrete_inputs") or "N/A"
         field_match = (actual_value == target_value)
         if not field_match:
             match = False
@@ -356,20 +378,15 @@ def compare_kernels(actual, target, show_table=False):
     table_data = []
     all_fields = set(actual_sig.keys()) | set(target_sig.keys())
     for field in sorted(all_fields):
-        if field == "name":
-            # Compare cleaned names
-            actual_value = clean_kernel_name(actual["name"])
-            target_value = clean_kernel_name(target["name"])
-        else:
-            actual_value = actual_sig.get(field) or "N/A"
-            target_value = target_sig.get(field) or "N/A"
+        actual_value = actual_sig.get(field) or "N/A"
+        target_value = target_sig.get(field) or "N/A"
         
         field_match = (actual_value == target_value)
         if not field_match:
             match = False
         
         table_data.append([field, actual_value, target_value, field_match])
-    
+        
     if show_table:
         print_utils.comp_table("Kernel comparison", ["Field", "Actual", "Target", "Match"], table_data)
     
@@ -1425,10 +1442,11 @@ def extract_kernel_signature(kernel, full=False):
     
     Returns:
         Dictionary with kernel signature fields:
-        - grid, block, shared_memory (always included)
+        - name, grid, block, shared_memory (always included)
         - registers_per_thread, occupancy, stream, dur (if full=True)
     """
     signature = {
+        "name": clean_kernel_name(kernel.get("name", "")),
         "grid": _to_tuple_int(kernel.get("grid") or ()),
         "block": _to_tuple_int(kernel.get("block") or ()),
         "shared_memory": _norm_shared_mem(kernel.get("shared_memory")),
@@ -1436,7 +1454,7 @@ def extract_kernel_signature(kernel, full=False):
     
     if full:
         # Include all remaining fields except metadata/runtime fields
-        exclude_fields = {"external_id", "correlation", "type", "ts", "dur"}
+        exclude_fields = {"external_id", "correlation", "type", "ts", "dur", "name"}
         for key, value in kernel.items():
             if key not in signature and key not in exclude_fields and "dur" not in key.lower():
                 signature[key] = value

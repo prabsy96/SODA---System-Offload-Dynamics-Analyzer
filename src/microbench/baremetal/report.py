@@ -34,22 +34,9 @@ def load_pytorch_results(pytorch_file):
         cpu_op = sequence.get("cpu_op", {})
         meta = sequence.get("meta", {})
         
-        # Extract op signature
-        op_signature = {
-            "op": cpu_op.get("name", ""),
-            "input_dims": cpu_op.get("input_dims", []),
-            "input_strides": cpu_op.get("input_strides", []),
-            "input_type": cpu_op.get("input_type", []),
-            "concrete_inputs": cpu_op.get("concrete_inputs", []),
-        }
+        op_signature = utils.extract_cpu_op_signature(cpu_op)  
         
-        # Extract kernel info
-        kernel_info = {
-            "name": kernel.get("name", ""),
-            "grid": kernel.get("grid", []),
-            "block": kernel.get("block", []),
-            "shared_memory": kernel.get("shared_memory", 0),
-        }
+        kernel_info = utils.extract_kernel_signature(kernel)
         
         # Extract stats
         stats = {

@@ -1,9 +1,14 @@
 from typing import Dict, Any
 from soda import utils
+import sys
+from pathlib import Path
+# Add src to path for common imports
+sys.path.insert(0, str(Path(__file__).parent))
+from common import print_utils
 
 from microbench.framework.pytorch.profile import profile_pytorch_gemm_sequences
 from microbench.framework.pytorch.plot import plot_pytorch_gemm_sequences
-from microbench.framework.pytorch.verify import verify_pytorch_gemm_sequences
+from microbench.framework.pytorch.verify import compare_sequences
 
 from microbench.baremetal.generate import generate_jobs
 from microbench.baremetal.search import search_algorithm_indices
@@ -76,22 +81,24 @@ class SodaMicrobench:
             warmup=self.warmup,
             runs=self.runs
         )
-        verify_pytorch_gemm_sequences(target_gemm_sequences, pytorch_gemm_sequences)
+        
+        print_utils.subsection("Verifying pytorch gemm sequences", level=0)
+        compare_sequences(target_gemm_sequences, pytorch_gemm_sequences)
         plot_pytorch_gemm_sequences(pytorch_gemm_sequences)
 
         # Benchmark baremetal performance
-        utils.print_subsection("Generate Baremetal Jobs")
+        print_utils.subsection("Generate Baremetal Jobs", level=0)
         generate_jobs(target_gemm_sequences, warmup=self.warmup, runs=self.runs)
         
-        utils.print_subsection("Offline Search for Algorithm Indices")
+        print_utils.subsection("Offline Search for Algorithm Indices", level=0)
         print("Searching for cuBLASLt algorithm indices for each job...")
         search_algorithm_indices()
         
-        utils.print_subsection("Profile Baremetal (under nsys profiling)")
+        print_utils.subsection("Profile Baremetal (under nsys profiling)", level=0)
         print("This will run nsys profiling for multiple jobs, may take several minutes...")
         profile_baremetal_gemm_kernels()
         
-        utils.print_subsection("Compare PyTorch vs Baremetal")
+        print_utils.subsection("Compare PyTorch vs Baremetal", level=0)
         compare()
         
         # Print summary

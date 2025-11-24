@@ -62,8 +62,7 @@ def infer_layout_and_ld(dims, strides):
         # Assume column-major
         return ('col', stride_inner)
 
-
-def extract_gemm_params(sequence):
+def extract_gemm_params_old(sequence):
     """
     Extract GEMM parameters from a PyTorch event sequence.
     
@@ -108,19 +107,8 @@ def extract_gemm_params(sequence):
                 # For output C, dimensions are [M, N], assume row-major
                 params["ldc"] = N
         
-        # Extract alpha, beta scalars
-        if len(concrete_inputs) >= 5:
-            try:
-                params["alpha"] = float(concrete_inputs[3]) if concrete_inputs[3] else 1.0
-            except (ValueError, TypeError):
-                params["alpha"] = 1.0
-            try:
-                params["beta"] = float(concrete_inputs[4]) if concrete_inputs[4] else 1.0
-            except (ValueError, TypeError):
-                params["beta"] = 1.0
-        else:
-            params["alpha"] = 1.0
-            params["beta"] = 1.0
+        # Extract alpha, beta scalars (defaults: alpha=1.0, beta=1.0 for addmm)
+        params["alpha"], params["beta"] = utils.extract_alpha_beta(concrete_inputs)
     
     elif op_name == "aten::mm":
         # mm(mat1, mat2) -> mat1 @ mat2
@@ -191,6 +179,171 @@ def extract_gemm_params(sequence):
             dtype_str = t
             break
     params["dtype"] = parse_dtype(dtype_str)
+    
+    return params
+
+
+def extract_dtype_from_input_types(input_types):
+    """Extract dtype from input_types (use first non-Scalar type)."""
+    # Extract dtype (use first non-Scalar type)
+    dtype_str = "float"
+    for t in input_types:
+        if t and t != "Scalar":
+            dtype_str = t
+            break
+    return parse_dtype(dtype_str)
+
+
+def extract_addmm_params(input_dims, input_strides, concrete_inputs):
+    """Extract GEMM parameters for aten::addmm operation.
+    
+    addmm(bias, mat1, mat2, alpha=1, beta=1) -> bias + alpha * mat1 @ mat2
+    input_dims: [[bias_dim], [M, K], [K, N], [], []]
+    Result: [M, N]
+    """
+    params = {}
+    
+    # addmm(bias, mat1, mat2, alpha=1, beta=1) -> bias + alpha * mat1 @ mat2
+    # input_dims: [[bias_dim], [M, K], [K, N], [], []]
+    # Result: [M, N]
+    if len(input_dims) >= 3:
+        bias_dims = input_dims[0]
+        mat1_dims = input_dims[1]
+        mat2_dims = input_dims[2]
+        
+        if len(mat1_dims) == 2 and len(mat2_dims) == 2:
+            M, K1 = mat1_dims
+            K2, N = mat2_dims
+            params["m"] = M
+            params["n"] = N
+            params["k"] = K1  # Should equal K2
+            
+            # Get layouts
+            mat1_strides = input_strides[1] if len(input_strides) > 1 else []
+            mat2_strides = input_strides[2] if len(input_strides) > 2 else []
+            bias_strides = input_strides[0] if len(input_strides) > 0 else []
+            
+            params["order_a"], params["lda"] = infer_layout_and_ld(mat1_dims, mat1_strides)
+            params["order_b"], params["ldb"] = infer_layout_and_ld(mat2_dims, mat2_strides)
+            params["trans_a"] = 'N'  # No transpose operation
+            params["trans_b"] = 'N'
+            
+            # For output C, dimensions are [M, N], assume row-major
+            params["ldc"] = N
+    
+    # Extract alpha, beta scalars (defaults: alpha=1.0, beta=1.0 for addmm)
+    params["alpha"], params["beta"] = utils.extract_alpha_beta(concrete_inputs)
+    
+    return params
+
+
+def extract_mm_params(input_dims, input_strides):
+    """Extract GEMM parameters for aten::mm operation.
+    
+    mm(mat1, mat2) -> mat1 @ mat2
+    input_dims: [[M, K], [K, N]]
+    """
+    params = {}
+    
+    # mm(mat1, mat2) -> mat1 @ mat2
+    # input_dims: [[M, K], [K, N]]
+    if len(input_dims) >= 2:
+        mat1_dims = input_dims[0]
+        mat2_dims = input_dims[1]
+        
+        if len(mat1_dims) == 2 and len(mat2_dims) == 2:
+            M, K1 = mat1_dims
+            K2, N = mat2_dims
+            params["m"] = M
+            params["n"] = N
+            params["k"] = K1
+            
+            mat1_strides = input_strides[0] if len(input_strides) > 0 else []
+            mat2_strides = input_strides[1] if len(input_strides) > 1 else []
+            
+            params["order_a"], params["lda"] = infer_layout_and_ld(mat1_dims, mat1_strides)
+            params["order_b"], params["ldb"] = infer_layout_and_ld(mat2_dims, mat2_strides)
+            params["trans_a"] = 'N'
+            params["trans_b"] = 'N'
+            params["ldc"] = N
+    
+    # mm has no bias, so beta=0
+    params["alpha"] = 1.0
+    params["beta"] = 0.0
+    
+    return params
+
+
+def extract_bmm_params(input_dims, input_strides):
+    """Extract GEMM parameters for aten::bmm operation.
+    
+    bmm(batch1, batch2) -> batched matmul
+    input_dims: [[B, M, K], [B, K, N]]
+    """
+    params = {}
+    
+    # bmm(batch1, batch2) -> batched matmul
+    # input_dims: [[B, M, K], [B, K, N]]
+    if len(input_dims) >= 2:
+        batch1_dims = input_dims[0]
+        batch2_dims = input_dims[1]
+        
+        if len(batch1_dims) == 3 and len(batch2_dims) == 3:
+            B1, M, K1 = batch1_dims
+            B2, K2, N = batch2_dims
+            params["m"] = M
+            params["n"] = N
+            params["k"] = K1
+            params["batch"] = B1
+            
+            # For batched, we still need 2D layout for each matrix
+            mat1_dims_2d = [M, K1]
+            mat2_dims_2d = [K2, N]
+            
+            # Extract 2D strides (last 2 dims)
+            batch1_strides = input_strides[0] if len(input_strides) > 0 else []
+            batch2_strides = input_strides[1] if len(input_strides) > 1 else []
+            
+            mat1_strides_2d = batch1_strides[-2:] if len(batch1_strides) >= 2 else []
+            mat2_strides_2d = batch2_strides[-2:] if len(batch2_strides) >= 2 else []
+            
+            params["order_a"], params["lda"] = infer_layout_and_ld(mat1_dims_2d, mat1_strides_2d)
+            params["order_b"], params["ldb"] = infer_layout_and_ld(mat2_dims_2d, mat2_strides_2d)
+            params["trans_a"] = 'N'
+            params["trans_b"] = 'N'
+            params["ldc"] = N
+    
+    params["alpha"] = 1.0
+    params["beta"] = 0.0
+    
+    return params
+
+
+def extract_gemm_params(sequence):
+    """
+    Extract GEMM parameters from a PyTorch event sequence.
+    
+    Returns dict with M, N, K, trans_a, trans_b, lda, ldb, ldc, alpha, beta, dtype
+    """
+    cpu_op = sequence.get("cpu_op", {})
+    op_name = cpu_op.get("name", "")
+    input_dims = cpu_op.get("input_dims", [])
+    input_strides = cpu_op.get("input_strides", [])
+    input_types = cpu_op.get("input_type", [])
+    concrete_inputs = cpu_op.get("concrete_inputs", [])
+    
+    # Dispatch to operation-specific extractors
+    if op_name == "aten::addmm":
+        params = extract_addmm_params(input_dims, input_strides, concrete_inputs)
+    elif op_name == "aten::mm":
+        params = extract_mm_params(input_dims, input_strides)
+    elif op_name == "aten::bmm":
+        params = extract_bmm_params(input_dims, input_strides)
+    else:
+        params = {}
+    
+    # Extract dtype (common for all operations)
+    params["dtype"] = extract_dtype_from_input_types(input_types)
     
     return params
 
