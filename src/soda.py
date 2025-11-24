@@ -416,7 +416,7 @@ class ModelTracer:
             self.model, self.tokenizer = self.load_decoder()
         else:
             self.model, self.tokenizer = self.load_encoder()
-        
+
         print(f"Generating synthetic input: batch_size={self.batch_size}, seq_len={self.seq_len}")
         self.model_inputs = utils.generate_synthetic_inputs(
             self.tokenizer, self.device, self.batch_size, self.seq_len

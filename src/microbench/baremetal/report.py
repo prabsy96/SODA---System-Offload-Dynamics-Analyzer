@@ -110,8 +110,8 @@ def verify_kernel_match(pytorch_kernel, baremetal_kernel):
                   utils.clean_kernel_name(pytorch_name) == utils.clean_kernel_name(baremetal_name))
     
     # Config match (grid, block, shared_memory) - use normalized comparison
-    pytorch_config = utils.extract_config(pytorch_kernel)
-    baremetal_config = utils.extract_config(baremetal_kernel)
+    pytorch_config = utils.extract_kernel_signature(pytorch_kernel)
+    baremetal_config = utils.extract_kernel_signature(baremetal_kernel)
     
     # Require exact match 
     config_match = (

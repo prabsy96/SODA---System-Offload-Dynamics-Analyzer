@@ -42,8 +42,10 @@ BATCH_SIZE="1"
 SEQ_LEN="16"
 PRECISION="float32"
 COMPILE_TYPE="eager"
-WARMUP="500"
-RUNS="1000"
+# WARMUP="500"
+# RUNS="1000"
+WARMUP="1"
+RUNS="1"
 
 echo "=== Microbenchmarking GEMM Kernels via SodaMicrobench ==="
 python -m soda \

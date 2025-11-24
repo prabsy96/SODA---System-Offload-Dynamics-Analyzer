@@ -14,6 +14,7 @@ from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple
 from collections import defaultdict, deque
 import numpy as np
 import shutil
+from common import print_utils
 
 def calculate_avg_min_max(values, base_name=None):
     """
@@ -93,6 +94,22 @@ def clean_kernel_name(kernel_name: str) -> str:
         clean_kernel_name = clean_kernel_name.split('::')[-1]
     
     return clean_kernel_name.strip()
+
+def get_sequence_str(sequence: Dict[str, Any]) -> str:
+    """
+    Build a sequence string from a sequence dictionary.
+    
+    Args:
+        sequence: Dictionary containing 'cpu_op' and 'kernel' keys.
+    
+    Returns:
+        Formatted sequence string: "{op_name} -> {kernel_name}".
+    """
+    cpu_op = sequence.get('cpu_op', {})
+    kernel = sequence.get('kernel', {})
+    op_name = cpu_op.get('name')
+    kernel_name = clean_kernel_name(kernel.get('name'))
+    return f"{op_name} -> {kernel_name}"
 
 def us_to_ms(microseconds: float) -> float:
     """
@@ -200,6 +217,163 @@ def save_json(file_path: str | Path, data: Dict[str, Any], indent: int = 2) -> N
 
 # GEMM operations to extract
 GEMM_OPS = ['aten::addmm', 'aten::mm', 'aten::bmm']
+
+def _parse_scalar(s):
+    """Parse a scalar value to float, returning None if invalid or empty."""
+    try:
+        return float(s) if s not in (None, '') else None
+    except (TypeError, ValueError):
+        return None
+
+def extract_cpu_op_signature(cpu_op: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract canonical operation signature (input conditions) from cpu_op.
+    
+    This signature uniquely identifies an operation's inputs and determines
+    which kernel should be dispatched. Used consistently across:
+    - Matching operations (verify.py)
+    - Op signature extraction (report.py)  
+    - Job generation (generate.py)
+    
+    Args:
+        cpu_op: Dictionary containing cpu_op data with fields:
+            - name: operation name (e.g., "aten::addmm")
+            - input_dims: list of input dimension lists
+            - input_strides: list of input stride lists
+            - input_type: list of input type strings
+            - concrete_inputs: list of concrete input values (scalars, etc.)
+    
+    Returns:
+        Dictionary with canonical signature fields:
+            - name: operation name
+            - input_dims: input dimensions 
+            - input_strides: input strides 
+            - input_type: input types 
+            - concrete_inputs: concrete input values 
+        Returns empty dict if cpu_op is None or empty.
+    """
+    if not cpu_op:
+        return {}
+    
+    sig_fields = ["name", "input_dims", "input_strides", "input_type", "concrete_inputs"]
+    defaults = {"name": "", "concrete_inputs": []}
+    return {field: cpu_op.get(field, defaults.get(field)) for field in sig_fields}
+
+def compare_cpu_ops(actual: Dict[str, Any], target: Dict[str, Any], show_table=False) -> bool:
+    """
+    Compare two cpu_op objects and return True if all fields match.
+    
+    Compares: name, input_dims, input_strides, input_type, and concrete_inputs
+    (alpha/beta scalars for addmm operations).
+    
+    Args:
+        actual: Actual cpu_op dictionary to compare
+        target: Target cpu_op dictionary to compare
+        show_table: If True, print comparison table with match indicators
+    
+    Returns:
+        True if all fields match, False otherwise.
+    """
+    actual_sig = extract_cpu_op_signature(actual)
+    target_sig = extract_cpu_op_signature(target)
+    
+    if not actual_sig or not target_sig:
+        return False
+    
+    # Compare all fields including name
+    match = True
+    table_data = []
+    skip_fields = {"concrete_inputs"}
+    all_fields = set(actual_sig.keys()) | set(target_sig.keys())
+    for field in sorted(all_fields):
+        if field not in skip_fields:
+            actual_value = actual_sig.get(field) or "N/A"
+            target_value = target_sig.get(field) or "N/A"
+            field_match = (actual_value == target_value)
+            if not field_match:
+                match = False
+            
+            table_data.append([field, actual_value, target_value, field_match])
+    
+    # Handle concrete_inputs separately
+    actual_a = target_a = actual_b = target_b = None
+    a_match = b_match = False
+    has_a_b = False
+    
+    if actual_sig["name"] == "aten::addmm":
+        # For addmm, compare alpha/beta separately
+        actual_concrete = actual_sig.get("concrete_inputs", [])
+        target_concrete = target_sig.get("concrete_inputs", [])
+        if len(actual_concrete) >= 5 and len(target_concrete) >= 5:
+            has_a_b = True
+
+            # Parse alpha/beta scalars
+            parse = lambda arr, idx: _parse_scalar(arr[idx]) if len(arr) > idx else None
+            actual_a, actual_b = parse(actual_concrete, 3), parse(actual_concrete, 4)
+            target_a, target_b = parse(target_concrete, 3), parse(target_concrete, 4)
+
+            # Check alpha/beta scalars for addmm (affects epilogue fusion)
+            a_match = (actual_a == target_a)
+            b_match = (actual_b == target_b)
+            match = match and a_match and b_match
+            
+            table_data.append(["alpha (concrete_inputs[3])", actual_a or "N/A", target_a or "N/A", a_match])
+            table_data.append(["beta (concrete_inputs[4])", actual_b or "N/A", target_b or "N/A", b_match])
+    else:
+        # For non-addmm ops, compare concrete_inputs as-is
+        actual_value = actual_sig.get("concrete_inputs") or "N/A"
+        target_value = target_sig.get("concrete_inputs") or "N/A"
+        field_match = (actual_value == target_value)
+        if not field_match:
+            match = False
+        
+        table_data.append(["concrete_inputs", actual_value, target_value, field_match])
+    
+    if show_table:
+        print_utils.comp_table("CPU op comparison", ["Field", "Actual", "Target", "Match"], table_data)
+    
+    return match
+
+def compare_kernels(actual, target, show_table=False):
+    """Compare two kernels and return True if all fields match.
+    
+    Args:
+        actual: Actual kernel dictionary (first parameter)
+        target: Target kernel dictionary (second parameter)
+        show_table: If True, print comparison table with match indicators
+    
+    Returns:
+        True if all fields match, False otherwise.
+    """
+    if actual is None or target is None:
+        return False
+    
+    # Compare all fields
+    actual_sig = extract_kernel_signature(actual, full=True)
+    target_sig = extract_kernel_signature(target, full=True)
+    
+    match = True
+    table_data = []
+    all_fields = set(actual_sig.keys()) | set(target_sig.keys())
+    for field in sorted(all_fields):
+        if field == "name":
+            # Compare cleaned names
+            actual_value = clean_kernel_name(actual["name"])
+            target_value = clean_kernel_name(target["name"])
+        else:
+            actual_value = actual_sig.get(field) or "N/A"
+            target_value = target_sig.get(field) or "N/A"
+        
+        field_match = (actual_value == target_value)
+        if not field_match:
+            match = False
+        
+        table_data.append([field, actual_value, target_value, field_match])
+    
+    if show_table:
+        print_utils.comp_table("Kernel comparison", ["Field", "Actual", "Target", "Match"], table_data)
+    
+    return match
 
 def validate_sequences(event_sequences: List[Dict[str, Any]]) -> None:
     """Validate that all sequences have required fields (kernel, cpu_op, cuda_launch).
@@ -1241,10 +1415,30 @@ def _norm_shared_mem(v):
     except Exception:
         return 0
 
-def extract_config(kernel):
-    """Extract normalized kernel config (grid, block, shared_memory)."""
-    return {
+def extract_kernel_signature(kernel, full=False):
+    """
+    Extract kernel signature for comparison.
+    
+    Args:
+        kernel: Kernel dictionary
+        full: If True, include additional signature fields
+    
+    Returns:
+        Dictionary with kernel signature fields:
+        - grid, block, shared_memory (always included)
+        - registers_per_thread, occupancy, stream, dur (if full=True)
+    """
+    signature = {
         "grid": _to_tuple_int(kernel.get("grid") or ()),
         "block": _to_tuple_int(kernel.get("block") or ()),
         "shared_memory": _norm_shared_mem(kernel.get("shared_memory")),
     }
+    
+    if full:
+        # Include all remaining fields except metadata/runtime fields
+        exclude_fields = {"external_id", "correlation", "type", "ts", "dur"}
+        for key, value in kernel.items():
+            if key not in signature and key not in exclude_fields and "dur" not in key.lower():
+                signature[key] = value
+    
+    return signature

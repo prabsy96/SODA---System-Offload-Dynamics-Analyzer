@@ -2,14 +2,14 @@
 """
 Example script showing how to use SODA.
 
-This demonstrates how to import and use SodaProfiler and ModelHandler
+This demonstrates how to import and use SodaAnalyzer and ModelTracer
 directly in Python code instead of using the CLI.
 """
 
 import os
 import sys
 
-from soda import SodaProfiler, ModelHandler
+from soda import SodaAnalyzer, ModelTracer, SodaLogger
 import utils
 
 def main():
@@ -49,38 +49,22 @@ def main():
     #     prox_score=1.0,
     #     seed=42
     # )
+
+    # Create tracer (derives experiment/output paths internally)
+    tracer = ModelTracer(args=args)
     
-    # Prepare model handler
-    model_handler = ModelHandler(
-        model_name=args.model,
-        device=args.device,
-        compile_type=args.compile_type,
-        precision=args.precision,
-    )
+    # Setup logger for tracer
+    SodaLogger(tracer.output_dir, is_console=True, is_file=True)
     
-    # Generate synthetic inputs
-    model_inputs = model_handler.generate_synthetic_inputs(
-        args.batch_size, args.seq_len
-    )
-    
-    # Initialize profiler
-    profiler = SodaProfiler(
-        model_handler=model_handler, 
-        args=args, 
-        log_console=True, 
-        log_file=True
-    )
-    
-    # Profile forward pass and analyze
-    profiler.profile_forward_pass(model_inputs)
+    tracer.run()
+
+    # Create analyzer and analyze (all analyzer operations)
+    profiler = SodaAnalyzer(tracer=tracer, args=args)
     profiler.analyze()
     
     # Report and save results
     profiler.report()
     profiler.save()
-    
-    # Cleanup and exit
-    profiler.exit()
 
 if __name__ == "__main__":
     main()
