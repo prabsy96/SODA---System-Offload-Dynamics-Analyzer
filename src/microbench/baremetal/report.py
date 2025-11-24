@@ -94,32 +94,6 @@ def load_baremetal_results(baremetal_file):
     return results
 
 
-def _to_tuple_int(x):
-    """Convert list/tuple to tuple of ints (same as PyTorch verify_replayed_kernels.py)."""
-    if isinstance(x, (list, tuple)):
-        try:
-            return tuple(int(v) for v in x)
-        except Exception:
-            return tuple()
-    return tuple()
-
-def _norm_shared_mem(v):
-    """Normalize shared memory (same as PyTorch verify_replayed_kernels.py)."""
-    if v in (None, '0'):
-        return 0
-    try:
-        return int(v)
-    except Exception:
-        return 0
-
-def extract_config(kernel):
-    """Extract normalized config (same as PyTorch verify_replayed_kernels.py)."""
-    return {
-        "grid": _to_tuple_int(kernel.get("grid") or ()),
-        "block": _to_tuple_int(kernel.get("block") or ()),
-        "shared_memory": _norm_shared_mem(kernel.get("shared_memory")),
-    }
-
 def verify_kernel_match(pytorch_kernel, baremetal_kernel):
     """
     Verify that kernels match by name and optionally by config.
@@ -136,8 +110,8 @@ def verify_kernel_match(pytorch_kernel, baremetal_kernel):
                   utils.clean_kernel_name(pytorch_name) == utils.clean_kernel_name(baremetal_name))
     
     # Config match (grid, block, shared_memory) - use normalized comparison
-    pytorch_config = extract_config(pytorch_kernel)
-    baremetal_config = extract_config(baremetal_kernel)
+    pytorch_config = utils.extract_config(pytorch_kernel)
+    baremetal_config = utils.extract_config(baremetal_kernel)
     
     # Require exact match 
     config_match = (

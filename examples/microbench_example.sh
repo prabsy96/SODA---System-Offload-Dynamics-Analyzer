@@ -1,6 +1,8 @@
 #!/bin/bash
 # Microbenchmark example script
-# Runs the complete microbenchmark suite
+# Runs the complete microbenchmark suite: framework + baremetal
+
+set -e
 
 # Check running from root directory
 if [ ! -f "pyproject.toml" ]; then
@@ -24,5 +26,37 @@ fi
 
 source "$PYTHON_VENV/bin/activate"
 
-"$MICROBENCH_DIR/run_suite.sh"
+echo "=============================================="
+echo "Kernel Launch Tax Microbenchmark Suite"
+echo "=============================================="
+echo "Using Python: $(which python)"
+echo "Python version: $(python --version)"
+echo ""
 
+# HuggingFace cache is already set in env.sh
+mkdir -p "$HF_HOME"
+
+# Configuration 
+MODEL="gpt2"
+BATCH_SIZE="1"
+SEQ_LEN="16"
+PRECISION="float32"
+COMPILE_TYPE="eager"
+WARMUP="500"
+RUNS="1000"
+
+echo "=== Microbenchmarking GEMM Kernels via SodaMicrobench ==="
+python -m soda \
+  --model "$MODEL" \
+  --batch-size "$BATCH_SIZE" \
+  --seq-len "$SEQ_LEN" \
+  --precision "$PRECISION" \
+  --compile-type "$COMPILE_TYPE" \
+  --microbench \
+  --warmup "$WARMUP" \
+  --runs "$RUNS"
+
+echo ""
+echo "=============================================="
+echo "Done! Check results in the experiment output directory."
+echo "=============================================="

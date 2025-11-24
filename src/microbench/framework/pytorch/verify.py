@@ -6,34 +6,11 @@ from pathlib import Path
 from typing import Dict, Any
 from soda import utils
 
-def _to_tuple_int(x):
-    if isinstance(x, (list, tuple)):
-        try:
-            return tuple(int(v) for v in x)
-        except Exception:
-            return tuple()
-    return tuple()
-
-def _norm_shared_mem(v):
-    if v in (None, '0'):
-        return 0
-    try:
-        return int(v)
-    except Exception:
-        return 0
-
 def _parse_scalar(s):
     try:
         return float(s) if s not in (None, '') else None
     except (TypeError, ValueError):
         return None
-
-def extract_config(k):
-    return {
-        "grid": _to_tuple_int(k.get("grid") or ()),
-        "block": _to_tuple_int(k.get("block") or ()),
-        "shared_memory": _norm_shared_mem(k.get("shared_memory")),
-    }
 
 def print_input_details(cpu_op):
     """Print input details for an operation."""
@@ -158,8 +135,8 @@ def compare_kernels(original_kernel, original_config, replayed_sequences):
             matched_sequence = replayed_sequence
             
             # Extract normalized configs for exact match comparison
-            replayed_config = extract_config(replayed_kernel)
-            original_config_norm = extract_config({
+            replayed_config = utils.extract_config(replayed_kernel)
+            original_config_norm = utils.extract_config({
                 "grid": original_config["grid"],
                 "block": original_config["block"],
                 "shared_memory": original_config.get("shared_memory", 0)

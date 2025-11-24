@@ -1222,3 +1222,29 @@ def generate_synthetic_inputs(tokenizer, device: torch.device, batch_size: int, 
             batch_size, seq_len, device=device
         ),
     }
+
+def _to_tuple_int(x):
+    """Convert list/tuple to tuple of ints for normalized comparison."""
+    if isinstance(x, (list, tuple)):
+        try:
+            return tuple(int(v) for v in x)
+        except Exception:
+            return tuple()
+    return tuple()
+
+def _norm_shared_mem(v):
+    """Normalize shared memory value to int."""
+    if v in (None, '0'):
+        return 0
+    try:
+        return int(v)
+    except Exception:
+        return 0
+
+def extract_config(kernel):
+    """Extract normalized kernel config (grid, block, shared_memory)."""
+    return {
+        "grid": _to_tuple_int(kernel.get("grid") or ()),
+        "block": _to_tuple_int(kernel.get("block") or ()),
+        "shared_memory": _norm_shared_mem(kernel.get("shared_memory")),
+    }
