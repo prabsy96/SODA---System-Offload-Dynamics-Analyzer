@@ -195,16 +195,16 @@ def extract_gemm_params(sequence):
     return params
 
 
-def generate_jobs(target_sequences: dict, output_file, warmup: int, runs: int):
+def generate_jobs(target_sequences: dict, warmup: int, runs: int):
     """
     Generate baremetal jobs from PyTorch unique event sequences data.
     
     Args:
         target_sequences: Dictionary with 'sequences' key containing event sequences.
-        output_file: Path to output file for jobs JSON.
         warmup: Number of warmup runs.
         runs: Number of measurement runs.
     """
+    output_file = utils.get_path("BAREMETAL_JOBS")
     sequences = target_sequences.get("sequences", [])
     
     jobs = []

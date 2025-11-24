@@ -383,6 +383,9 @@ class ModelTracer:
         # Output directory for trace: <output_dir>/<experiment_name>
         self.output_dir = args.output_dir / self.experiment_name
         utils.ensure_dir(self.output_dir)
+        
+        # Set EXPERIMENT_DIR environment variable for microbench scripts
+        os.environ["EXPERIMENT_DIR"] = str(self.output_dir)
 
         # Trace file: <output_dir>/<experiment_name>/trace.json
         self.trace_file = self.output_dir / "trace.json"
@@ -390,7 +393,7 @@ class ModelTracer:
 
         # Collect and save env_metadata in experiment directory
         env_metadata = utils.collect_env_metadata()
-        env_metadata_file = utils.get_path("ENV_METADATA", base_path=self.output_dir)
+        env_metadata_file = utils.get_path("ENV_METADATA")
         utils.save_json(env_metadata_file, env_metadata)
 
         # Objects related to model loading and tracing

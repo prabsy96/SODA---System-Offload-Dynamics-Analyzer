@@ -106,20 +106,29 @@ def us_to_ms(microseconds: float) -> float:
     """
     return microseconds / 1000.0
 
-def get_path(env_var: str, base_path: Optional[Path] = None) -> Path:
+def get_path(env_var: str) -> Path:
     """
     Get path from environment variable.
     
+    - If the path is absolute (e.g., source code paths, tool paths), returns it as-is.
+    - If the path is relative (e.g., output files), resolves it against EXPERIMENT_DIR.
+    
+    Use this function for ALL environment variable paths. It automatically handles
+    both absolute and relative paths correctly.
+    
     Args:
         env_var: Environment variable name.
-        base_path: Optional base path to append the env var path to.
     
     Returns:
-        Path object from environment variable, optionally appended to base_path.
+        Path object from environment variable, resolved if relative.
     """
     path = Path(os.environ[env_var])
-    if base_path is not None:
-        return base_path / path
+    experiment_dir = Path(os.environ["EXPERIMENT_DIR"])
+    
+    # If path is relative, resolve against EXPERIMENT_DIR
+    if not path.is_absolute():
+        path = experiment_dir / path
+    
     return path
 
 def ensure_file(file_path: Path) -> None:

@@ -15,11 +15,8 @@ import sys
 import subprocess
 import re
 from pathlib import Path
-from search_algorithm_indices import build_binary
+from microbench.baremetal.search import build_binary
 from soda import utils
-
-# Module-level variable for microbench directory (set in __main__)
-microbench_dir = None
 
 
 def run_job_under_nsys(job, binary_path, output_dir):
@@ -117,10 +114,8 @@ def run_job_under_nsys(job, binary_path, output_dir):
         print(f"nsys export failed for job {job_id}:\n{result.stderr}", file=sys.stderr)
         return None, None
     
-    # Print relative path
-    rel_path = os.path.relpath(sqlite_path, microbench_dir) if microbench_dir else sqlite_path
     if not job.get("null_kernel"):
-        print(f"\t** Job {job_id} completed, trace exported to {rel_path}")
+        print(f"\t** Job {job_id} completed, trace exported to {sqlite_path}")
     return qdrep_path, sqlite_path
 
 
@@ -149,8 +144,7 @@ def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
         conn = sqlite3.connect(sqlite_path)
         cursor = conn.cursor()
     except Exception as e:
-        rel_path = os.path.relpath(sqlite_path, microbench_dir) if microbench_dir else sqlite_path
-        print(f"Error opening sqlite database {rel_path}: {e}", file=sys.stderr)
+        print(f"Error opening sqlite database {sqlite_path}: {e}", file=sys.stderr)
         return None
     
     # Query for CUDA runtime API calls (cudaLaunchKernel)
@@ -205,13 +199,11 @@ def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
     conn.close()
     
     if not cuda_launches:
-        rel_path = os.path.relpath(sqlite_path, microbench_dir) if microbench_dir else sqlite_path
-        print(f"Warning: No CUDA launch events found in {rel_path}", file=sys.stderr)
+        print(f"Warning: No CUDA launch events found in {sqlite_path}", file=sys.stderr)
         return None
     
     if not kernels:
-        rel_path = os.path.relpath(sqlite_path, microbench_dir) if microbench_dir else sqlite_path
-        print(f"Warning: No kernel events found in {rel_path}", file=sys.stderr)
+        print(f"Warning: No kernel events found in {sqlite_path}", file=sys.stderr)
         return None
     
     # Link kernels to cuda launches and compute kernel tax
@@ -245,8 +237,7 @@ def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
     
     # Compute statistics
     if not kernel_tax_values:
-        rel_path = os.path.relpath(sqlite_path, microbench_dir) if microbench_dir else sqlite_path
-        print(f"Warning: No matched kernel-launch pairs found in {rel_path}", file=sys.stderr)
+        print(f"Warning: No matched kernel-launch pairs found in {sqlite_path}", file=sys.stderr)
         return None
     
     stats = utils.calculate_avg_min_max(kernel_tax_values, "kernel_tax")
@@ -292,10 +283,13 @@ def collect_gpu_info():
     return env
 
 
-def run_profiling(jobs_file, output_file):
+def profile_baremetal_gemm_kernels():
     """
-    Run profiling for all jobs using matched algorithms.
+    Profile baremetal GEMM kernels for all jobs using matched algorithms.
     """
+    jobs_file = utils.get_path("BAREMETAL_JOBS")
+    output_file = utils.get_path("BAREMETAL_GEMM_KERNELS")
+    
     # Check if jobs file exists
     utils.ensure_file(jobs_file)
     
@@ -304,8 +298,7 @@ def run_profiling(jobs_file, output_file):
         jobs_data = json.load(f)
     
     jobs = jobs_data.get("jobs", [])
-    rel_path = os.path.relpath(jobs_file, microbench_dir) if microbench_dir else jobs_file
-    print(f"Loaded {len(jobs)} jobs from {rel_path}")
+    print(f"Loaded {len(jobs)} jobs from {jobs_file}")
     
     # Check if matching has been done
     matching_summary = jobs_data.get("matching_summary", {})
@@ -319,14 +312,14 @@ def run_profiling(jobs_file, output_file):
     # Build binary
     build_binary()
     
-    baremetal_dir = os.environ["BAREMETAL_MICROBENCH_DIR"]
-    binary_path = os.path.join(baremetal_dir, "build", "main_gemm_bm")
+    baremetal_dir = utils.get_path("BAREMETAL_MICROBENCH_DIR")
+    binary_path = baremetal_dir / "build" / "main_gemm_bm"
     if not os.path.exists(binary_path):
         raise RuntimeError(f"Binary not found: {binary_path}")
     
     # Run each job
     output_dir = os.path.dirname(output_file)
-    runs = []
+    kernels = []
     
     for job in jobs:
         qdrep_path, sqlite_path = run_job_under_nsys(job, binary_path, output_dir)
@@ -342,14 +335,14 @@ def run_profiling(jobs_file, output_file):
             continue
         
         # Add job ID and target kernel to result
-        run_entry = {
+        kernel_entry = {
             "id": job["id"],
             "target_kernel": job.get("target_kernel", "unknown"),
             "kernel": result["kernel"],
             "stats": result["stats"],
         }
         
-        runs.append(run_entry)
+        kernels.append(kernel_entry)
         
         if job.get("null_kernel"):
             print(f"\t** Kernel: __null__")
@@ -364,15 +357,14 @@ def run_profiling(jobs_file, output_file):
     # Write output
     output_data = {
         "summary": {
-            "jobs": len(runs),
+            "count": len(kernels),
             "source": str(jobs_file),
         },
-        "runs": runs,
+        "kernels": kernels,
         "env": env,
     }
     
     utils.save_json(output_file, output_data)
     
-    rel_path = os.path.relpath(output_file, microbench_dir) if microbench_dir else output_file
-    print(f"\nCompleted {len(runs)} jobs -> {rel_path}")
+    print(f"\nCompleted {len(kernels)} jobs -> {output_file}")
 

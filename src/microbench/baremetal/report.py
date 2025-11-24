@@ -15,12 +15,6 @@ from pathlib import Path
 
 from soda import utils
 
-# Module-level variable for microbench directory (set in __main__)
-microbench_dir = None
-
-
-
-
 def load_pytorch_results(pytorch_file):
     """
     Load PyTorch event sequences and extract per-kernel statistics.
@@ -83,18 +77,18 @@ def load_baremetal_results(baremetal_file):
     with open(baremetal_file, 'r') as f:
         data = json.load(f)
     
-    runs = data.get("runs", [])
+    kernels = data.get("kernels", [])
     results = {}
     
-    for run in runs:
-        job_id = run["id"]
+    for kernel_entry in kernels:
+        job_id = kernel_entry["id"]
         # Skip null kernel job (0000) from comparison results
-        if run.get("target_kernel") == "__null__":
+        if kernel_entry.get("target_kernel") == "__null__":
             continue
         results[job_id] = {
-            "kernel": run["kernel"],
-            "stats": run["stats"],
-            "target_kernel": run.get("target_kernel", ""),
+            "kernel": kernel_entry["kernel"],
+            "stats": kernel_entry["stats"],
+            "target_kernel": kernel_entry.get("target_kernel", ""),
         }
     
     return results
@@ -255,27 +249,32 @@ def print_summary(matches):
     print(f"\tConfig matches:                {config_matches}/{len(matches)}")
 
 
-def compare(pytorch_file, baremetal_file, output_file):
+def compare():
     """
     Main comparison function.
     """
-    rel_pytorch = os.path.relpath(pytorch_file, microbench_dir) if microbench_dir else pytorch_file
-    print(f"Loading PyTorch results from {rel_pytorch}...", end=" ")
+    pytorch_file = utils.get_path("PYTORCH_GEMM_SEQUENCES")
+    baremetal_file = utils.get_path("BAREMETAL_GEMM_KERNELS")
+    output_file = utils.get_path("FINAL_REPORT")
+    
+    utils.ensure_file(pytorch_file)
+    utils.ensure_file(baremetal_file)
+    
+    print(f"Loading PyTorch results from {pytorch_file}...")
     pytorch_results = load_pytorch_results(pytorch_file)
     print(f"Loaded {len(pytorch_results)} PyTorch event sequences")
     
-    rel_baremetal = os.path.relpath(baremetal_file, microbench_dir) if microbench_dir else baremetal_file
-    print(f"Loading baremetal results from {rel_baremetal}...", end=" ")
+    print(f"Loading baremetal results from {baremetal_file}...")
     baremetal_results = load_baremetal_results(baremetal_file)
-    print(f"Loaded {len(baremetal_results)} baremetal runs")
+    print(f"Loaded {len(baremetal_results)} baremetal kernels")
     
     # Extract null kernel tax (baseline launch tax)
     null_kernel_tax = None
     with open(baremetal_file, 'r') as f:
         data = json.load(f)
-    for run in data.get("runs", []):
-        if run.get("target_kernel") == "__null__":
-            null_kernel_tax = run["stats"]["avg_kernel_tax"]
+    for kernel_entry in data.get("kernels", []):
+        if kernel_entry.get("target_kernel") == "__null__":
+            null_kernel_tax = kernel_entry["stats"]["avg_kernel_tax"]
             break
     
     # Compare
@@ -300,27 +299,5 @@ def compare(pytorch_file, baremetal_file, output_file):
     
     utils.save_json(output_file, output_data)
     
-    rel_output = os.path.relpath(output_file, microbench_dir) if microbench_dir else output_file
-    print(f"\nComparison results written to {rel_output}")
-
-
-def entry_point(experiment_dir: Path) -> None:
-    # Check if env.sh has been sourced
-    if not os.environ.get("SODA_ENV_LOADED"):
-        print("Error: SODA environment not loaded.", file=sys.stderr)
-        print("Please run: source env.sh", file=sys.stderr)
-        sys.exit(1)
-    
-    # Get paths from environment
-    pytorch_file = utils.get_path("UNIQUE_GEMM_SEQUENCES", base_path=experiment_dir)
-    baremetal_file = utils.get_path("BAREMETAL_RUNS", base_path=experiment_dir)
-    output_file = utils.get_path("BAREMETAL_REPORT", base_path=experiment_dir)
-    global microbench_dir
-    microbench_dir = os.environ.get("MICROBENCH_DIR")
-    
-    # Check if input files exist
-    utils.ensure_file(pytorch_file)
-    utils.ensure_file(baremetal_file)
-    
-    compare(pytorch_file, baremetal_file, output_file)
+    print(f"\nComparison results written to {output_file}")
 

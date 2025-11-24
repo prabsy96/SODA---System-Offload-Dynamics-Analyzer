@@ -39,22 +39,25 @@ export PYTHON_VENV="$SODA_ROOT/.venv"
 # Environment metadata file
 export ENV_METADATA="env_metadata.json"
 
+# Experiment directory (set by tracer, do not set manually)
+export EXPERIMENT_DIR=""
+
 # Common data files referenced across scripts (relative to experiment directory)
 export ALL_SEQUENCES="sequences/all_sequences.json"
 export ALL_GEMM_SEQUENCES="sequences/all_gemm_sequences.json"
 export UNIQUE_GEMM_SEQUENCES="sequences/unique_gemm_sequences.json"
 
 # Framework/pytorch
-export PYTORCH_REPLAYED_GEMM_SEQUENCES="$PYTORCH_OUTPUT_DIR/replayed_gemm_sequences.json"
+export PYTORCH_GEMM_SEQUENCES="$PYTORCH_OUTPUT_DIR/pytorch_gemm_sequences.json"
 export PYTORCH_TRACES="$PYTORCH_OUTPUT_DIR/traces"
 export PYTORCH_KERNEL_TAX_GRAPHS="$PYTORCH_OUTPUT_DIR/graphs/kernel_tax"
 
 # Baremetal
 export BAREMETAL_JOBS="$BAREMETAL_OUTPUT_DIR/jobs.json"
-export BAREMETAL_RUNS="$BAREMETAL_OUTPUT_DIR/baremetal_gemm_runs.json"
-export BAREMETAL_REPORT="$BAREMETAL_OUTPUT_DIR/bm_vs_framework_report.json"
+export BAREMETAL_GEMM_KERNELS="$BAREMETAL_OUTPUT_DIR/baremetal_gemm_kernels.json"
 export BAREMETAL_TRACES="$BAREMETAL_OUTPUT_DIR/traces"
 
+export FINAL_REPORT="microbench/bm_vs_pytorch_report.json"
 # Graphs output (relative to experiment directory)
 
 # Log files (relative to experiment directory)
@@ -98,8 +101,8 @@ print_soda_env() {
     echo "=== Key Files ==="
     echo "UNIQUE_GEMM_SEQUENCES: $UNIQUE_GEMM_SEQUENCES"
     echo "BAREMETAL_JOBS: $BAREMETAL_JOBS"
-    echo "BAREMETAL_RUNS: $BAREMETAL_RUNS"
-    echo "BAREMETAL_REPORT: $BAREMETAL_REPORT"
+    echo "BAREMETAL_GEMM_KERNELS: $BAREMETAL_GEMM_KERNELS"
+    echo "FINAL_REPORT: $FINAL_REPORT"
     echo "=================================="
 }
 

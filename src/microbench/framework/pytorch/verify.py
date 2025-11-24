@@ -3,6 +3,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Dict, Any
 from soda import utils
 
 def _to_tuple_int(x):
@@ -48,7 +49,7 @@ def print_input_details(cpu_op):
 
 def print_launch_config_table(original_config, matched_kernel):
     """Print side-by-side comparison table of launch configurations."""
-    print(f"\t* Launch configuration verification:")
+    print(f"\t* Launch configuration comparison:")
     print(f"\t\t{'Field':<20} {'Original':<25} {'Replayed':<25}")
     print(f"\t\t{'-'*20} {'-'*25} {'-'*25}")
     
@@ -77,7 +78,7 @@ def print_launch_config_table(original_config, matched_kernel):
     print(f"\t\t{'dur (μs)':<20} {orig_dur:<25} {replayed_dur:<25}")
 
 def print_summary(matches, partial_matches, mismatches):
-    """Print verification summary."""
+    """Print comparison summary."""
     print("\n" + "=" * 80)
     print("Summary:")
     print(f"\tExact matches:\t{matches}")
@@ -134,8 +135,8 @@ def find_matching_replayed_sequences(original_sequence, replayed_sequences):
     
     return matching_sequences
 
-def verify_kernel_match(original_kernel, original_config, replayed_sequences):
-    """Check if any replayed kernel matches the original kernel."""
+def compare_kernels(original_kernel, original_config, replayed_sequences):
+    """Compare original kernel against replayed sequences and return match status."""
     original_kernel_name = original_kernel["name"]
     original_kernel_name_clean = utils.clean_kernel_name(original_kernel_name)
     exact_match = False
@@ -171,8 +172,8 @@ def verify_kernel_match(original_kernel, original_config, replayed_sequences):
     
     return exact_match, name_match, matched_kernel, matched_sequence
 
-def verify_event_sequences(original_sequences, replayed_sequences):
-    """Verify each event sequence and return match statistics."""
+def compare_event_sequences(original_sequences, replayed_sequences):
+    """Compare each event sequence and return match statistics."""
     matches = 0
     partial_matches = 0
     mismatches = 0
@@ -180,7 +181,7 @@ def verify_event_sequences(original_sequences, replayed_sequences):
     # Track which replayed sequences have been matched 
     used_replayed_indices = set()
     
-    # Verify each original event sequence against replayed sequences
+    # Compare each original event sequence against replayed sequences
     for i, original_sequence in enumerate(original_sequences["sequences"]):
         cpu_op = original_sequence.get("cpu_op")
         original_kernel = original_sequence.get("kernel")
@@ -216,8 +217,8 @@ def verify_event_sequences(original_sequences, replayed_sequences):
             "dur": original_kernel.get("avg_dur", original_kernel.get("dur"))
         }
         
-        # Check if any replayed kernel matches
-        exact_match, name_match, matched_kernel, matched_sequence = verify_kernel_match(
+        # Compare original kernel against replayed sequences
+        exact_match, name_match, matched_kernel, matched_sequence = compare_kernels(
             original_kernel, original_config, matching_sequences
         )
         
@@ -251,3 +252,54 @@ def verify_event_sequences(original_sequences, replayed_sequences):
             mismatches += 1
     
     return matches, partial_matches, mismatches
+
+
+def verify_pytorch_gemm_sequences(target_gemm_sequences: Dict[str, Any], pytorch_gemm_sequences: Dict[str, Any]) -> None:
+    """
+    Verify profiled PyTorch GEMM sequences against target sequences.
+    
+    Args:
+        target_gemm_sequences: Dictionary with target GEMM sequences data.
+        pytorch_gemm_sequences: Dictionary with profiled PyTorch GEMM sequences data.
+    """
+    # Setup logging
+    # Redirect print to both stdout and log file
+    log_path = utils.get_path("PYTORCH_VERIFY_LOG")
+    utils.ensure_dir(log_path.parent)
+    output_file = open(log_path, "w")
+    
+    import builtins
+    original_print = builtins.print
+    
+    def print_and_write(*args, **kwargs):
+        """Print to stdout and write to file."""
+        original_print(*args, **kwargs)
+        line = ' '.join(str(arg) for arg in args)
+        output_file.write(line + '\n')
+        output_file.flush()
+    
+    builtins.print = print_and_write
+    
+    # Step 3: Verify event sequences
+    print("=" * 80)
+    print("Event sequence verification: target vs profiled PyTorch GEMM sequences")
+    print("=" * 80)
+    
+    print("\n1. Metadata verification:")
+    print(f"\tTarget event sequences:\t{len(target_gemm_sequences['sequences'])} sequences")
+    print(f"\tProfiled event sequences:\t{len(pytorch_gemm_sequences['sequences'])} sequences")
+    
+    print("\n2. Event sequence-by-sequence verification:")
+    print("-" * 80)
+    
+    matches, partial_matches, mismatches = compare_event_sequences(
+        target_gemm_sequences, pytorch_gemm_sequences
+    )
+    
+    # Step 4: Print summary
+    print_summary(matches, partial_matches, mismatches)
+    
+    # Restore original print and close file
+    builtins.print = original_print
+    output_file.close()
+    print(f"\nVerification output saved to {log_path}")

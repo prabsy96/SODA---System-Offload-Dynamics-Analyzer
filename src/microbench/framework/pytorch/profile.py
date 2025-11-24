@@ -117,7 +117,6 @@ def profile_operation(
 
 def replay_sequences_from_cpu_ops(
     event_sequences: List[Dict[str, Any]], 
-    experiment_dir: Path,
     warmup: int,
     runs: int
 ) -> List[Dict[str, Any]]:
@@ -125,7 +124,7 @@ def replay_sequences_from_cpu_ops(
     Replay all event sequences
     """
     # Save trace file in kernel_traces folder
-    kernel_traces_dir = utils.get_path("PYTORCH_TRACES", base_path=experiment_dir)
+    kernel_traces_dir = utils.get_path("PYTORCH_TRACES")
     utils.ensure_dir(kernel_traces_dir)
 
     # Store sequences per replay index
@@ -183,3 +182,43 @@ def replay_sequences_from_cpu_ops(
 
     utils.validate_sequences(all_replayed_sequences)
     return all_replayed_sequences
+
+def profile_pytorch_gemm_sequences(
+    target_gemm_sequences: Dict[str, Any],
+    warmup: int,
+    runs: int
+) -> Dict[str, Any]:
+    """
+    Profile PyTorch GEMM sequences to measure kernel tax.
+    
+    Args:
+        target_gemm_sequences: Dictionary with target GEMM sequences data.
+        warmup: Number of warmup runs.
+        runs: Number of measurement runs.
+    
+    Returns:
+        Dictionary with profiled PyTorch GEMM sequences data (same format as saved JSON).
+    """
+    # Clean previous kernel traces 
+    kernel_traces_dir = utils.get_path("PYTORCH_TRACES")
+    utils.ensure_dir(kernel_traces_dir, cleanup=True)
+    
+    # Replay all event sequences from cpu ops
+    replayed_sequences = replay_sequences_from_cpu_ops(
+        target_gemm_sequences["sequences"],
+        warmup=warmup, 
+        runs=runs
+    )
+    
+    # Some cpu ops can produce non GEMM kernels as side effects, filter them out
+    pytorch_gemm_sequences = utils.filter_gemm_sequences(replayed_sequences)
+
+    pytorch_gemm_sequences_file = utils.get_path("PYTORCH_GEMM_SEQUENCES")
+    pytorch_gemm_sequences_data = {
+        "summary": {"count": len(pytorch_gemm_sequences)},
+        "sequences": pytorch_gemm_sequences
+    }
+    utils.save_json(pytorch_gemm_sequences_file, pytorch_gemm_sequences_data)
+    print(f"Saved {pytorch_gemm_sequences_data['summary']['count']} PyTorch GEMM sequences to {pytorch_gemm_sequences_file}")
+    
+    return pytorch_gemm_sequences_data

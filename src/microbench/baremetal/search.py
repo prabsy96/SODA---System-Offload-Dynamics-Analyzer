@@ -20,7 +20,7 @@ from soda import utils
 
 def build_binary():
     """Build the C++ binary using cmake."""
-    baremetal_dir = os.environ["BAREMETAL_MICROBENCH_DIR"]
+    baremetal_dir = utils.get_path("BAREMETAL_MICROBENCH_DIR")
     print("Building C++ binary...")
     build_dir = os.path.join(baremetal_dir, "build")
     
@@ -385,10 +385,12 @@ def search_algorithm_index(job, binary_path, output_dir, max_algorithms=200):
     return None
 
 
-def search_algorithm_indices(jobs_file):
+def search_algorithm_indices():
     """
     Search for algorithm indices for all jobs and update jobs.json.
     """
+    jobs_file = utils.get_path("BAREMETAL_JOBS")
+    
     # Check if jobs file exists
     utils.ensure_file(jobs_file)
     
@@ -402,8 +404,8 @@ def search_algorithm_indices(jobs_file):
     # Build binary
     build_binary()
     
-    baremetal_dir = os.environ["BAREMETAL_MICROBENCH_DIR"]
-    binary_path = os.path.join(baremetal_dir, "build", "main_gemm_bm")
+    baremetal_dir = utils.get_path("BAREMETAL_MICROBENCH_DIR")
+    binary_path = baremetal_dir / "build" / "main_gemm_bm"
     if not os.path.exists(binary_path):
         raise RuntimeError(f"Binary not found: {binary_path}")
     
