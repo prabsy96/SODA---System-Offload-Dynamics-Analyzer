@@ -16,6 +16,8 @@ import subprocess
 import re
 from pathlib import Path
 from soda import utils
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+from common import print_utils
 
 
 def build_binary():
@@ -90,7 +92,11 @@ def get_available_algorithm_count(job, binary_path):
                         max_idx = int(match.group(1))
                         total = max_idx + 1
                         return max_idx, total
-    except:
+        else:
+            # Query failed - binary might not support --query_algo_count or other error
+            pass
+    except Exception as e:
+        # Query failed due to exception
         pass
     
     return None, None
@@ -147,12 +153,14 @@ def _extract_target_config(job):
 
 
 def _print_target_config(target_kernel, target_grid, target_block, target_shared_mem):
-    """Print target kernel configuration."""
-    print(f"\t* Target kernel and config")
-    print(f"\t\t** name: {target_kernel}")
-    print(f"\t\t** grid: {target_grid}")
-    print(f"\t\t** block: {target_block}")
-    print(f"\t\t** shared_mem: {target_shared_mem}")
+    """Print target kernel configuration as a table."""
+    data = [
+        ["name", target_kernel],
+        ["grid", str(target_grid)],
+        ["block", str(target_block)],
+        ["shared_mem", str(target_shared_mem)],
+    ]
+    print_utils.comp_table("Target kernel", ["Field", "Value"], data)
     
 
 def _build_base_args(job, binary_path):
@@ -199,30 +207,30 @@ def _run_nsys_for_algorithm(job, binary_path, algo_idx, base_args, trace_dir):
             # Check if we've hit the end of available algorithms
             if result.stderr:
                 if "Invalid algorithm index" in result.stderr:
-                    # Extract max available index from error message
+                    # Extract max available index from error message (actual runtime count)
                     match = re.search(r'available: 0-(\d+)', result.stderr)
                     if match:
                         max_available = int(match.group(1))
-                        print(f"\t\t** Algorithm index {algo_idx}: Invalid (available: 0-{max_available})")
+                        print(f"Index {algo_idx} is invalid. Only {max_available + 1} algos found at runtime. Fallback: index 0")
                         return (False, None, None, "exhausted")  # Signal to stop searching
                 # Show error message for other failures
                 error_msg = result.stderr.strip().split('\n')[-1]
                 if error_msg:
-                    print(f"\t\t** Algorithm index {algo_idx}: {error_msg}")
+                    print(f"Algorithm index {algo_idx}: {error_msg}")
                 else:
-                    print(f"\t\t** Algorithm index {algo_idx}: nsys failed (code {result.returncode})")
+                    print(f"Algorithm index {algo_idx}: nsys failed (code {result.returncode})")
             else:
-                print(f"\t\t** Algorithm index {algo_idx}: nsys failed (code {result.returncode})")
+                print(f"Algorithm index {algo_idx}: nsys failed (code {result.returncode})")
             return (False, None, None, None)
     except subprocess.TimeoutExpired:
-        print(f"\t\t** Algorithm index {algo_idx}: nsys timeout")
+        print(f"Algorithm index {algo_idx}: nsys timeout")
         return (False, None, None, None)
     except Exception as e:
-        print(f"\t\t** Algorithm index {algo_idx}: Exception: {e}")
+        print(f"Algorithm index {algo_idx}: Exception: {e}")
         return (False, None, None, None)
     
     if not os.path.exists(test_trace_path):
-        print(f"\t\t** Algorithm index {algo_idx}: Trace file not created")
+        print(f"Algorithm index {algo_idx}: Trace file not created")
         return (False, None, None, None)
     
     # Export to sqlite
@@ -232,75 +240,16 @@ def _run_nsys_for_algorithm(job, binary_path, algo_idx, base_args, trace_dir):
     export_cmd = ["nsys", "export", "--type=sqlite", "--output", sqlite_path, test_trace_path]
     export_result = subprocess.run(export_cmd, capture_output=True, text=True)
     if export_result.returncode != 0 or not os.path.exists(sqlite_path):
-        print(f"\t\t** Algorithm index {algo_idx}: Trace export failed")
+        print(f"Algorithm index {algo_idx}: Trace export failed")
         return (False, None, None, None)
     
     return (True, test_trace_path, sqlite_path, None)
 
 
-def _compare_kernel_config(kernel_config, target_kernel, target_grid, target_block, target_shared_mem):
-    """
-    Compare kernel config with target config.
-    
-    Returns: (name_match, grid_match, block_match, shared_match, matches_dict)
-    """
-    kernel_name = kernel_config.get("name", "")
-    grid = kernel_config.get("grid", [0, 0, 0])
-    block = kernel_config.get("block", [256, 1, 1])
-    shared_mem = kernel_config.get("shared_memory", 0)
-    
-    target_kernel_clean = utils.clean_kernel_name(target_kernel or "")
-    kernel_name_clean = utils.clean_kernel_name(kernel_name or "")
-    name_match = target_kernel_clean == kernel_name_clean
-    grid_match = (grid == target_grid)
-    block_match = (block == target_block)
-    shared_match = (shared_mem == target_shared_mem)
-    
-    # Per-dimension matches for display
-    grid_x_match = len(grid) > 0 and len(target_grid) > 0 and grid[0] == target_grid[0]
-    grid_y_match = len(grid) > 1 and len(target_grid) > 1 and grid[1] == target_grid[1]
-    grid_z_match = len(grid) > 2 and len(target_grid) > 2 and grid[2] == target_grid[2]
-    block_x_match = len(block) > 0 and len(target_block) > 0 and block[0] == target_block[0]
-    block_y_match = len(block) > 1 and len(target_block) > 1 and block[1] == target_block[1]
-    block_z_match = len(block) > 2 and len(target_block) > 2 and block[2] == target_block[2]
-    
-    matches = {
-        "name": name_match,
-        "grid_match": grid_match,
-        "grid_x": grid_x_match,
-        "grid_y": grid_y_match,
-        "grid_z": grid_z_match,
-        "block_match": block_match,
-        "block_x": block_x_match,
-        "block_y": block_y_match,
-        "block_z": block_z_match,
-        "shared": shared_match,
-        "kernel_name": kernel_name,
-        "grid": grid,
-        "block": block,
-        "shared_mem": shared_mem,
-    }
-    
-    return name_match, grid_match, block_match, shared_match, matches
 
 
-def _print_algorithm_result(algo_idx, matches):
-    """Print the comparison result for an algorithm."""
-    kernel_name = matches["kernel_name"]
-    grid = matches["grid"]
-    block = matches["block"]
-    shared_mem = matches["shared_mem"]
-    
-    clean_kernel_name = utils.clean_kernel_name(kernel_name)
-    
-    grid_ticks = f"[{'✓' if matches['grid_x'] else '✗'} {'✓' if matches['grid_y'] else '✗'} {'✓' if matches['grid_z'] else '✗'}]"
-    block_ticks = f"[{'✓' if matches['block_x'] else '✗'} {'✓' if matches['block_y'] else '✗'} {'✓' if matches['block_z'] else '✗'}]"
-    
-    print(f"\t\t** Algorithm index {algo_idx}")
-    print(f"\t\t\t*** kernel_name={clean_kernel_name}\t[{'✓' if matches['name'] else '✗'}]")
-    print(f"\t\t\t*** grid={grid}\t{grid_ticks}")
-    print(f"\t\t\t*** block={block}\t{block_ticks}")
-    print(f"\t\t\t*** shared_mem={shared_mem}\t[{'✓' if matches['shared'] else '✗'}]")
+
+
 
 
 def _cleanup_test_trace(test_trace_path, sqlite_path):
@@ -329,13 +278,18 @@ def search_algorithm_index(job, binary_path, output_dir, max_algorithms=200):
     target_kernel, target_grid, target_block, target_shared_mem = _extract_target_config(job)
     _print_target_config(target_kernel, target_grid, target_block, target_shared_mem)
     
+    # Build target kernel dict
+    target_kernel_dict = {
+        "name": target_kernel or "",
+        "grid": target_grid,
+        "block": target_block,
+        "shared_memory": target_shared_mem,
+    }
+    
     # Query available algorithm count upfront
     max_available_idx, total_available = get_available_algorithm_count(job, binary_path)
     if max_available_idx is not None:
-        print(f"\t* Available algorithms: 0-{max_available_idx}")
         max_algorithms = min(max_algorithms, max_available_idx + 1)
-    
-    print(f"\t* Starting search...")
     
     base_args = _build_base_args(job, binary_path)
     trace_dir = os.path.join(output_dir, "traces")
@@ -362,26 +316,21 @@ def search_algorithm_index(job, binary_path, output_dir, max_algorithms=200):
         kernel_config = get_kernel_config_from_trace(sqlite_path)
         
         if not kernel_config:
-            print(f"\t\t** Algorithm index {algo_idx}: No kernel config found in trace")
+            print(f"Algorithm index {algo_idx}: No kernel config found in trace")
             _cleanup_test_trace(test_trace_path, sqlite_path)
             continue
         
-        # Compare with target
-        name_match, grid_match, block_match, shared_match, matches = _compare_kernel_config(
-            kernel_config, target_kernel, target_grid, target_block, target_shared_mem
-        )
+        # Compare with target using utils.compare_kernels (prints table automatically)
+        match_result = utils.compare_kernels(kernel_config, target_kernel_dict, show_table=True, title=f"Algorithm #{algo_idx}")
         
-        _print_algorithm_result(algo_idx, matches)
-        
-        if name_match and grid_match and block_match and shared_match:
-            print(f"\t* ✓ Found algorithm index {algo_idx}")
+        if match_result["match"]:
+            print(f"Search completed @ algo index {algo_idx}")
             _cleanup_test_trace(test_trace_path, sqlite_path)
             return algo_idx
         
         # Clean up after checking (no match)
         _cleanup_test_trace(test_trace_path, sqlite_path)
     
-    print(f"\t* ✗ No algorithm index found (tried {algorithms_tried} algorithm{'s' if algorithms_tried != 1 else ''})")
     return None
 
 
@@ -427,18 +376,28 @@ def search_algorithm_indices():
     
     for job in jobs:
         job_id = job["id"]
-        print(f"\nSearching algorithm for job {job_id}")
         
         # Skip if no target kernel
         if not job.get("target_kernel") or job["target_kernel"] == "unknown":
-            print(f"\t* Skipping (no target kernel)")
             continue
 
         # Skip null kernel jobs (no GEMM arguments to search)
         if job.get("null_kernel"):
-            print(f"\t* Skipping (null kernel)")
             job["matched_algo_index"] = None
             continue
+        
+        # Query available algorithm count for iter_start message
+        max_available_idx, total_available = get_available_algorithm_count(job, binary_path)
+        if max_available_idx is not None:
+            num_algos = max_available_idx + 1
+            if num_algos == 0:
+                algo_info = f" (Brute forcing 0-200)"
+            else:
+                algo_info = f" ({num_algos} algorithm{'s' if num_algos != 1 else ''})"
+        else:
+            algo_info = f" (Brute forcing 0-200)"
+        
+        print_utils.iter_start(f"Job {job_id}{algo_info}")
         
         # Search for algorithm index
         matched_algo_idx = search_algorithm_index(job, binary_path, output_dir, max_algorithms=200)

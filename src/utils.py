@@ -282,7 +282,7 @@ def extract_cpu_op_signature(cpu_op: Dict[str, Any]) -> Dict[str, Any]:
     defaults = {"name": "", "concrete_inputs": []}
     return {field: cpu_op.get(field, defaults.get(field)) for field in sig_fields}
 
-def compare_cpu_ops(actual: Dict[str, Any], target: Dict[str, Any], show_table=False) -> bool:
+def compare_cpu_ops(actual: Dict[str, Any], target: Dict[str, Any], show_table=False, title="CPU op comparison") -> bool:
     """
     Compare two cpu_op objects and return True if all fields match.
     
@@ -308,7 +308,9 @@ def compare_cpu_ops(actual: Dict[str, Any], target: Dict[str, Any], show_table=F
     table_data = []
     skip_fields = {"concrete_inputs"}
     all_fields = set(actual_sig.keys()) | set(target_sig.keys())
-    for field in sorted(all_fields):
+    # Sort fields with "name" first, then others alphabetically
+    sorted_fields = sorted(all_fields, key=lambda x: (x != "name", x))
+    for field in sorted_fields:
         if field not in skip_fields:
             actual_value = actual_sig.get(field) or "N/A"
             target_value = target_sig.get(field) or "N/A"
@@ -352,32 +354,58 @@ def compare_cpu_ops(actual: Dict[str, Any], target: Dict[str, Any], show_table=F
         table_data.append(["concrete_inputs", actual_value, target_value, field_match])
     
     if show_table:
-        print_utils.comp_table("CPU op comparison", ["Field", "Actual", "Target", "Match"], table_data)
+        outcome = "[green]SUCCESS[/green]" if match else "[red]FAILURE[/red]"
+        print_utils.comp_table(f"{title} {outcome}", ["Field", "Actual", "Target", "Match"], table_data)
     
     return match
 
-def compare_kernels(actual, target, show_table=False):
-    """Compare two kernels and return True if all fields match.
+def _compare_dimensions(actual, target):
+    """Compare dimensions at each index. Returns list of bools [x, y, z]."""
+    return [
+        len(actual) > 0 and len(target) > 0 and actual[0] == target[0],
+        len(actual) > 1 and len(target) > 1 and actual[1] == target[1],
+        len(actual) > 2 and len(target) > 2 and actual[2] == target[2],
+    ]
+
+
+def compare_kernels(actual, target, show_table=False, title="Kernel comparison"):
+    """Compare two kernels and return hierarchical match results.
     
     Args:
         actual: Actual kernel dictionary (first parameter)
         target: Target kernel dictionary (second parameter)
         show_table: If True, print comparison table with match indicators
+        title: Optional custom title for the comparison table. Defaults to "Kernel comparison"
     
     Returns:
-        True if all fields match, False otherwise.
+        Dictionary with match results:
+        - "match": overall boolean match
+        - "name": boolean match
+        - "grid": [x_match, y_match, z_match] list of booleans
+        - "block": [x_match, y_match, z_match] list of booleans
+        - other fields: boolean matches
     """
     if actual is None or target is None:
-        return False
+        return {"match": False}
     
     # Compare all fields
     actual_sig = extract_kernel_signature(actual, full=True)
     target_sig = extract_kernel_signature(target, full=True)
     
+    # Get grid/block lists for per-dimension comparison (before tuple conversion)
+    actual_grid = actual.get("grid", [])
+    actual_block = actual.get("block", [])
+    target_grid = target.get("grid", [])
+    target_block = target.get("block", [])
+    
+    # Build hierarchical match results
+    results = {}
     match = True
     table_data = []
     all_fields = set(actual_sig.keys()) | set(target_sig.keys())
-    for field in sorted(all_fields):
+    # Sort fields with "name" first, then others alphabetically
+    sorted_fields = sorted(all_fields, key=lambda x: (x != "name", x))
+    for field in sorted_fields:
         actual_value = actual_sig.get(field) or "N/A"
         target_value = target_sig.get(field) or "N/A"
         
@@ -385,12 +413,26 @@ def compare_kernels(actual, target, show_table=False):
         if not field_match:
             match = False
         
-        table_data.append([field, actual_value, target_value, field_match])
-        
-    if show_table:
-        print_utils.comp_table("Kernel comparison", ["Field", "Actual", "Target", "Match"], table_data)
+        # For grid/block, add per-dimension matches
+        if field == "grid" and isinstance(actual_value, tuple) and isinstance(target_value, tuple):
+            dims_match = _compare_dimensions(actual_grid, target_grid)
+            results["grid"] = dims_match
+            table_data.append([field, actual_value, target_value, dims_match])
+        elif field == "block" and isinstance(actual_value, tuple) and isinstance(target_value, tuple):
+            dims_match = _compare_dimensions(actual_block, target_block)
+            results["block"] = dims_match
+            table_data.append([field, actual_value, target_value, dims_match])
+        else:
+            results[field] = field_match
+            table_data.append([field, actual_value, target_value, field_match])
     
-    return match
+    results["match"] = match
+    
+    if show_table:
+        outcome = "[green]SUCCESS[/green]" if match else "[red]FAILURE[/red]"
+        print_utils.comp_table(f"{title} {outcome}", ["Field", "Actual", "Target", "Match"], table_data)
+    
+    return results
 
 def validate_sequences(event_sequences: List[Dict[str, Any]]) -> None:
     """Validate that all sequences have required fields (kernel, cpu_op, cuda_launch).

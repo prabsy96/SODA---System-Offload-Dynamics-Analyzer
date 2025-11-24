@@ -28,12 +28,13 @@ def compare_sequences(target_sequences, actual_sequences):
         print_utils.iter_start(f"Sequence: {sequence}")
         
         # Compare cpu_op input conditions
-        cpu_op_match = utils.compare_cpu_ops(actual_cpu_op, target_cpu_op, show_table=True)
+        cpu_op_match = utils.compare_cpu_ops(actual_cpu_op, target_cpu_op, show_table=True, title="Pytorch vs Target CPU op")
         assert cpu_op_match, f"CPU op mismatch: target={target_cpu_op.get('name')}, actual={actual_cpu_op.get('name')}"
         
         # Compare kernels
         assert actual_kernel is not None, f"Missing kernel in actual sequence"
-        kernel_match = utils.compare_kernels(actual=actual_kernel, target=target_kernel, show_table=True)
+        results = utils.compare_kernels(actual=actual_kernel, target=target_kernel, show_table=True, title="Pytorch vs Target kernel")
+        kernel_match = results.get("match", False)
         assert kernel_match, f"Kernel mismatch: target={utils.clean_kernel_name(target_kernel['name'])}, actual={utils.clean_kernel_name(actual_kernel['name'])}"
         
         summary.append([sequence, cpu_op_match, kernel_match])

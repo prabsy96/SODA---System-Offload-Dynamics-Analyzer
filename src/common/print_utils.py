@@ -17,15 +17,17 @@ def iter_start(title: str, style: str = "cyan") -> None:
     """Print a title using rich Rule with dot for iteration start.
     
     Args:
-        title: Title text to display
-        style: Style/color for the rule (default: "cyan")
+        title: Title text to display (will be colored with style)
+        style: Style/color for the rule and title (default: "cyan")
     """
     console = Console()
-    console.print(Rule(f"\n{title}", style=style, align="left", characters="·"))
+    # Color the title text with the style
+    colored_title = f"[{style}]{title}[/{style}]"
+    console.print(Rule(f"\n{colored_title}", style=style, align="right", characters="·"))
 
 def iter_end(style: str = "cyan") -> None:
     """Print a separator using rich Rule with dot for iteration end.
-    
+
     Args:
         style: Style/color for the rule (default: "cyan", matches iter_start)
     """
@@ -73,6 +75,9 @@ def comp_table(title: str, headers: List[str], data: List[List[Any]]):
         for value in row:
             if isinstance(value, bool):
                 formatted_row.append(bool_to_match(value))
+            elif isinstance(value, (list, tuple)) and all(isinstance(x, bool) for x in value):
+                # Format list of bools as space-separated checkmarks
+                formatted_row.append(" ".join(bool_to_match(x) for x in value))
             else:
                 formatted_row.append(str(value))
         table.add_row(*formatted_row)
