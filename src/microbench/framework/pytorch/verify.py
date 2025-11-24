@@ -112,8 +112,12 @@ def find_matching_replayed_sequences(original_sequence, replayed_sequences):
     
     return matching_sequences
 
-def compare_kernels(original_kernel, original_config, replayed_sequences):
+def compare_kernels(original_sequence, replayed_sequences):
     """Compare original kernel against replayed sequences and return match status."""
+    original_kernel = original_sequence.get("kernel")
+    if original_kernel is None:
+        return False, False, None, None
+    
     original_kernel_name = original_kernel["name"]
     original_kernel_name_clean = utils.clean_kernel_name(original_kernel_name)
     exact_match = False
@@ -136,11 +140,7 @@ def compare_kernels(original_kernel, original_config, replayed_sequences):
             
             # Extract normalized configs for exact match comparison
             replayed_config = utils.extract_config(replayed_kernel)
-            original_config_norm = utils.extract_config({
-                "grid": original_config["grid"],
-                "block": original_config["block"],
-                "shared_memory": original_config.get("shared_memory", 0)
-            })
+            original_config_norm = utils.extract_config(original_kernel)
             
             # Check exact config match
             if (replayed_config == original_config_norm):
@@ -183,24 +183,25 @@ def compare_event_sequences(original_sequences, replayed_sequences):
             mismatches += 1
             continue
         
-        # Extract original kernel configuration
-        original_config = {
-            "grid": original_kernel["grid"],
-            "block": original_kernel["block"],
-            "shared_memory": original_kernel.get("shared_memory", 0),
-            "registers_per_thread": original_kernel.get("registers_per_thread"),
-            "occupancy": original_kernel.get("occupancy"),
-            "stream": original_kernel.get("stream"),
-            "dur": original_kernel.get("avg_dur", original_kernel.get("dur"))
-        }
         
         # Compare original kernel against replayed sequences
         exact_match, name_match, matched_kernel, matched_sequence = compare_kernels(
-            original_kernel, original_config, matching_sequences
+            original_sequence, matching_sequences
         )
         
         # Mark matched replayed sequence as used 
         if matched_sequence is not None:
+            # Extract original kernel configuration for display
+            original_config = {
+                "grid": original_kernel["grid"],
+                "block": original_kernel["block"],
+                "shared_memory": original_kernel.get("shared_memory", 0),
+                "registers_per_thread": original_kernel.get("registers_per_thread"),
+                "occupancy": original_kernel.get("occupancy"),
+                "stream": original_kernel.get("stream"),
+                "dur": original_kernel.get("avg_dur", original_kernel.get("dur"))
+            }
+            
             for idx, sequence in enumerate(replayed_sequences["sequences"]):
                 if (sequence.get("cpu_op") == matched_sequence.get("cpu_op") and
                     sequence.get("kernel", {}).get("name") == matched_sequence.get("kernel", {}).get("name")):
@@ -263,8 +264,10 @@ def verify_pytorch_gemm_sequences(target_gemm_sequences: Dict[str, Any], pytorch
     print("=" * 80)
     
     print("\n1. Metadata verification:")
-    print(f"\tTarget event sequences:\t{len(target_gemm_sequences['sequences'])} sequences")
-    print(f"\tProfiled event sequences:\t{len(pytorch_gemm_sequences['sequences'])} sequences")
+    target_count = len(target_gemm_sequences['sequences'])
+    replayed_count = len(pytorch_gemm_sequences['sequences'])
+    print(f"\tTarget event sequences:\t{target_count} sequences")
+    print(f"\tProfiled event sequences:\t{replayed_count} sequences")
     
     print("\n2. Event sequence-by-sequence verification:")
     print("-" * 80)
