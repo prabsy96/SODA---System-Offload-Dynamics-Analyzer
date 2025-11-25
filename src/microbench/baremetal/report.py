@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from soda import utils
+from common import print_utils
 # Add src to path for direct imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 from data import CPUOp, Kernel
@@ -90,31 +91,25 @@ def load_baremetal_results(baremetal_file):
 def verify_kernel_match(pytorch_kernel, baremetal_kernel):
     """
     Verify that kernels match by name and optionally by config.
-    Uses same normalization as PyTorch verify_replayed_kernels.py.
+    Uses Kernel.compare() for normalized comparison.
     
     Returns: (name_match, config_match)
     """
-    # Name match
-    pytorch_name = pytorch_kernel["name"]
-    baremetal_name = baremetal_kernel["name"]
-    
-    # Exact match or normalized match
-    name_match = (pytorch_name == baremetal_name or 
-                  utils.clean_kernel_name(pytorch_name) == utils.clean_kernel_name(baremetal_name))
-    
-    # Config match (grid, block, shared_memory) - use normalized comparison
     pytorch_kernel_obj = Kernel.from_dict(pytorch_kernel) if pytorch_kernel else None
     baremetal_kernel_obj = Kernel.from_dict(baremetal_kernel) if baremetal_kernel else None
-    pytorch_config = pytorch_kernel_obj.get_signature() if pytorch_kernel_obj else {}
-    baremetal_config = baremetal_kernel_obj.get_signature() if baremetal_kernel_obj else {}
-    
-    # Require exact match 
-    config_match = (
-        pytorch_config["grid"] == baremetal_config["grid"] and
-        pytorch_config["block"] == baremetal_config["block"] and
-        pytorch_config["shared_memory"] == baremetal_config["shared_memory"]
+    if not pytorch_kernel_obj or not baremetal_kernel_obj:
+        return False, False
+
+    compare_result = pytorch_kernel_obj.compare(
+        baremetal_kernel_obj, show_table=False, full=False
     )
-    
+
+    name_match = compare_result.get("name", False)
+    grid_match = compare_result.get("grid", [])
+    block_match = compare_result.get("block", [])
+    shared_match = compare_result.get("shared_memory", False)
+    config_match = bool(grid_match and all(grid_match) and block_match and all(block_match) and shared_match)
+
     return name_match, config_match
 
 
@@ -183,39 +178,42 @@ def compare_results(pytorch_results, baremetal_results):
 
 
 def print_summary(matches):
-    """Print comparison summary to stdout."""
-    print("\n" + "="*80)
-    print("PyTorch vs Baremetal GEMM Launch Tax Comparison")
-    print("="*80)
-    
-    # Per-kernel summary
-    print(f"\nPer-Kernel Results ({len(matches)} kernels):")
-    print(f"{'ID':<6} {'Kernel':<35} {'FW(μs)':<9} {'BM(μs)':<9} {'Δ(%)':<8} {'Match':<6}")
-    print("-"*80)
-    
+    """Print comparison summary as compact tables."""
+    per_kernel_rows = []
     for match in matches:
-        kernel_short = match["kernel"]["name"][:38]
-        fw_avg = match["framework"]["avg_kernel_tax"]
-        bm_avg = match["baremetal"]["avg_kernel_tax"]
-        delta = match["delta"]
-        delta_pct = match["delta_pct"]
-        
         name_match = "✓" if match["match_status"]["name_match"] else "✗"
         config_match = "✓" if match["match_status"]["config_match"] else "✗"
-        match_str = f"{name_match}{config_match}"
-        
-        print(f"{match['id']:<6} {kernel_short:<35} {fw_avg:<9.2f} {bm_avg:<9.2f} {delta_pct:<8.1f} {match_str:<6}")
-    print("="*80)
-    
-    # Match statistics
+        per_kernel_rows.append([
+            match["id"],
+            match["kernel"]["name"],
+            f"{match['framework']['avg_kernel_tax']:.2f}",
+            f"{match['baremetal']['avg_kernel_tax']:.2f}",
+            f"{match['delta_pct']:.1f}",
+            f"{name_match}{config_match}",
+        ])
+
+    if per_kernel_rows:
+        print_utils.comp_table(
+            title=f"Per-Kernel Results ({len(per_kernel_rows)} kernels)",
+            headers=["ID", "Kernel", "FW(μs)", "BM(μs)", "Δ(%)", "Match"],
+            data=per_kernel_rows,
+        )
+
     name_matches = sum(1 for m in matches if m["match_status"]["name_match"])
     config_matches = sum(1 for m in matches if m["match_status"]["config_match"])
-    exact_matches = sum(1 for m in matches if m["match_status"]["name_match"] and m["match_status"]["config_match"])
-    
-    print(f"\nMatch Statistics:")
-    print(f"\tExact matches (name + config): {exact_matches}/{len(matches)}")
-    print(f"\tName matches:                  {name_matches}/{len(matches)}")
-    print(f"\tConfig matches:                {config_matches}/{len(matches)}")
+    exact_matches = sum(
+        1 for m in matches if m["match_status"]["name_match"] and m["match_status"]["config_match"]
+    )
+    stats_rows = [
+        ["Exact matches (name+config)", f"{exact_matches}/{len(matches)}"],
+        ["Name matches", f"{name_matches}/{len(matches)}"],
+        ["Config matches", f"{config_matches}/{len(matches)}"],
+    ]
+    print_utils.comp_table(
+        title="Match Statistics",
+        headers=["Metric", "Count"],
+        data=stats_rows,
+    )
 
 
 def compare():
@@ -247,7 +245,6 @@ def compare():
             break
     
     # Compare
-    print("Comparing results...")
     matches = compare_results(pytorch_results, baremetal_results)
     
     # Print summary
@@ -267,6 +264,4 @@ def compare():
     }
     
     utils.save_json(output_file, output_data)
-    
-    print(f"\nComparison results written to {output_file}")
-
+    print("\nDone.")

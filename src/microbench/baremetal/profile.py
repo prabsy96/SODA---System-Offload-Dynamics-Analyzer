@@ -10,13 +10,13 @@ This phase assumes search_algorithm_indices.py has already been run.
 """
 
 import json
-import os
 import sys
 import subprocess
 import re
-from pathlib import Path
 from microbench.baremetal.search import build_binary, build_base_args
+from microbench.baremetal import nsys_utils
 from soda import utils
+from common import print_utils
 
 
 def run_job_under_nsys(job):
@@ -27,17 +27,14 @@ def run_job_under_nsys(job):
     
     # Skip batched GEMMs for now (non-contiguous layout issue)
     if job.get("batch", 1) > 1:
-        print(f"\nSkipping job {job_id} (batched GEMM with non-standard layout)")
-        return None, None
+        print(f"Skipping job {job_id} (batched GEMM with non-standard layout)")
+        return None
     
-    print(f"\nRunning job {job_id}...")
+    print(f"Running job {job_id}...")
     
-    # Get paths from env vars
     binary_path = utils.get_path("BAREMETAL_BINARY")
-    jobs_file = utils.get_path("BAREMETAL_JOBS")
-    trace_dir = jobs_file.parent / "traces"
-    utils.ensure_dir(trace_dir)
-    
+    trace_dir = nsys_utils.get_trace_dir()
+
     # Handle null kernel job
     if job.get("null_kernel"):
         args = [
@@ -47,14 +44,7 @@ def run_job_under_nsys(job):
             "--runs", str(job["runs"]),
         ]
     else:
-        # Use matched algorithm index if available
         matched_algo_idx = job.get("matched_algo_index")
-        if matched_algo_idx is not None:
-            print(f"\t* Using matched algorithm index: {matched_algo_idx}")
-        elif "target_kernel" in job and job["target_kernel"] != "unknown":
-            print(f"\t* Warning: No matched_algo_index found, using default algorithm")
-        else:
-            print(f"\t* No target kernel, using default algorithm")
         
         # Build command line args 
         args = build_base_args(job) + [
@@ -68,40 +58,16 @@ def run_job_under_nsys(job):
         if matched_algo_idx is not None:
             args = args + ["--algo_index", str(matched_algo_idx)]
     
-    qdrep_path = trace_dir / f"trace_{job_id}"
-    
-    nsys_cmd = [
-        "nsys", "profile",
-        "--trace=cuda,osrt",
-        "--output", str(qdrep_path),
-        "--force-overwrite=true",
-    ] + args
-    
-    # Run under nsys
-    result = subprocess.run(nsys_cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"nsys profiling failed for job {job_id}:\n{result.stderr}", file=sys.stderr)
-        return None, None
-    
-    # Export to sqlite (more reliable than JSON for programmatic parsing)
-    sqlite_path = qdrep_path.with_suffix(".sqlite")
-    export_cmd = [
-        "nsys", "export",
-        "--type=sqlite",
-        "--output", str(sqlite_path),
-        "--force-overwrite=true",
-        str(qdrep_path.with_suffix(".nsys-rep"))
-    ]
-    
-    result = subprocess.run(export_cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"nsys export failed for job {job_id}:\n{result.stderr}", file=sys.stderr)
-        return None, None
-    
-    if not job.get("null_kernel"):
-        print(f"\t** Job {job_id} completed, trace exported to {sqlite_path}")
-    return str(sqlite_path)
-    return str(sqlite_path)
+    trace_output = trace_dir / f"trace_{job_id}"
+    success, sqlite_path, message = nsys_utils.nsys_profile_to_sqlite(
+        trace_output, args
+    )
+
+    if not success:
+        print(f"nsys profiling failed for job {job_id}:\n{message}", file=sys.stderr)
+        return None
+
+    return sqlite_path
 
 
 def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
@@ -325,13 +291,6 @@ def profile_baremetal_gemm_kernels():
         }
         
         kernels.append(kernel_entry)
-        
-        if job.get("null_kernel"):
-            print(f"\t** Kernel: __null__")
-            print(f"\t** Avg kernel tax: {result['stats']['avg_kernel_tax']:.2f} μs")
-        else:
-            print(f"\t** Kernel: {result['kernel']['name'][:60]}...")
-            print(f"\t** Avg kernel tax: {result['stats']['avg_kernel_tax']:.2f} μs")
     
     # Collect environment info
     env = collect_gpu_info()
@@ -348,5 +307,21 @@ def profile_baremetal_gemm_kernels():
     
     utils.save_json(output_file, output_data)
     
-    print(f"\nCompleted {len(kernels)} jobs -> {output_file}")
+    # Print a compact table summary
+    table_rows = []
+    for entry in kernels:
+        table_rows.append([
+            entry["id"],
+            next((job["cpu_op"] for job in jobs if job["id"] == entry["id"]), "unknown"),
+            entry["kernel"]["name"],
+            f"{entry['stats']['avg_kernel_tax']:.2f} μs",
+        ])
 
+    if table_rows:
+        print_utils.comp_table(
+            title="Profile Summary",
+            headers=["Job", "CPU Op", "Kernel", "Avg Kernel Tax"],
+            data=table_rows,
+        )
+    
+    print(f"\nCompleted {len(kernels)} jobs -> {output_file}")

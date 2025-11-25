@@ -20,6 +20,7 @@ from soda import utils
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 from common import print_utils
 from data import Kernel
+from microbench.baremetal import nsys_utils
 
 
 def build_binary():
@@ -158,88 +159,48 @@ def build_base_args(job):
     
 def _run_nsys_for_algorithm(job, algo_idx, base_args):
     """
-    Run nsys profiling for a specific algorithm index.
+    Run nsys profiling for a specific algorithm index and export to sqlite.
+    Cleans up trace file after export (only sqlite is needed).
     
-    Returns: (success, test_trace_path, sqlite_path) or (False, None, None) on failure
+    Args:
+        job: Job dictionary with 'id' field
+        algo_idx: Algorithm index to test
+        base_args: Base command line arguments (from build_base_args)
+    
+    Returns:
+        (success: bool, sqlite_path: str|None, message: str)
+        
+        Two cases:
+        1. Success: (True, sqlite_path, "success")
+        2. Invalid index: (False, None, "Invalid algorithm index X (available: 0-Y)")
     """
-    # Get trace directory from env var
-    jobs_file = utils.get_path("BAREMETAL_JOBS")
-    trace_dir = jobs_file.parent / "traces"
-    utils.ensure_dir(trace_dir)
+    job_id = job["id"]
     
-    test_trace_path = trace_dir / f"match_test_{job['id']}_algo{algo_idx}.nsys-rep"
-    test_args = base_args 
-    test_args = test_args + ["--warmup", "0"]
-    test_args = test_args + ["--runs", "3"]
-    test_args = test_args + ["--algo_index", str(algo_idx)]
+    trace_dir = nsys_utils.get_trace_dir()
+    trace_path = trace_dir / f"match_test_{job_id}_algo{algo_idx}.nsys-rep"
     
-    nsys_cmd = [
-        "nsys", "profile",
-        "--trace=cuda,osrt",
-        "--output", str(test_trace_path),
-        "--force-overwrite=true",
-    ] + test_args
+    args = base_args + ["--warmup", "0", "--runs", "3", "--algo_index", str(algo_idx)]
+    success, sqlite_path, message = nsys_utils.nsys_profile_to_sqlite(
+        trace_path, args, timeout=100, clean_trace=True
+    )
     
+    if not success:
+        if message and "Invalid algorithm index" in message:
+            match = re.search(r'available: 0-(\d+)', message)
+            if match:
+                max_available = int(match.group(1))
+                return (False, None, f"Invalid algorithm index {algo_idx} (available: 0-{max_available})")
+        return (False, None, message or "nsys profiling failed")
+    
+    return (True, sqlite_path, "success")
+
+def _cleanup_test_trace(sqlite_path):
+    """Clean up temporary sqlite trace file."""
     try:
-        result = subprocess.run(nsys_cmd, capture_output=True, text=True, timeout=100)
-        if result.returncode != 0:
-            # Check if we've hit the end of available algorithms
-            if result.stderr:
-                if "Invalid algorithm index" in result.stderr:
-                    # Extract max available index from error message (actual runtime count)
-                    match = re.search(r'available: 0-(\d+)', result.stderr)
-                    if match:
-                        max_available = int(match.group(1))
-                        print(f"Index {algo_idx} is invalid. Only {max_available + 1} algos found at runtime. Fallback: index 0")
-                        return (False, None, None, "exhausted")  # Signal to stop searching
-                # Show error message for other failures
-                error_msg = result.stderr.strip().split('\n')[-1]
-                if error_msg:
-                    print(f"Algorithm index {algo_idx}: {error_msg}")
-                else:
-                    print(f"Algorithm index {algo_idx}: nsys failed (code {result.returncode})")
-            else:
-                print(f"Algorithm index {algo_idx}: nsys failed (code {result.returncode})")
-            return (False, None, None, None)
-    except subprocess.TimeoutExpired:
-        print(f"Algorithm index {algo_idx}: nsys timeout")
-        return (False, None, None, None)
-    except Exception as e:
-        print(f"Algorithm index {algo_idx}: Exception: {e}")
-        return (False, None, None, None)
-    
-    if not test_trace_path.exists():
-        print(f"Algorithm index {algo_idx}: Trace file not created")
-        return (False, None, None, None)
-    
-    # Export to sqlite
-    sqlite_path = test_trace_path.with_suffix(".sqlite")
-    if sqlite_path.exists():
-        sqlite_path.unlink()
-    export_cmd = ["nsys", "export", "--type=sqlite", "--output", str(sqlite_path), str(test_trace_path)]
-    export_result = subprocess.run(export_cmd, capture_output=True, text=True)
-    if export_result.returncode != 0 or not sqlite_path.exists():
-        print(f"Algorithm index {algo_idx}: Trace export failed")
-        return (False, None, None, None)
-    
-    return (True, str(test_trace_path), str(sqlite_path), None)
-
-
-
-
-
-
-
-
-def _cleanup_test_trace(test_trace_path, sqlite_path):
-    """Clean up temporary trace files."""
-    try:
-        test_path = Path(test_trace_path)
-        sqlite_path_obj = Path(sqlite_path)
-        if test_path.exists():
-            test_path.unlink()
-        if sqlite_path_obj.exists():
-            sqlite_path_obj.unlink()
+        if sqlite_path:
+            sqlite_path_obj = Path(sqlite_path)
+            if sqlite_path_obj.exists():
+                sqlite_path_obj.unlink()
     except:
         pass
 
@@ -276,22 +237,26 @@ def search_algorithm_index(job, max_algorithms=200):
     # Search through algorithm indices
     for algo_idx in range(max_algorithms):
         # Run nsys profiling for this algorithm
-        success, test_trace_path, sqlite_path, status = _run_nsys_for_algorithm(
-            job, algo_idx, base_args
-        )
-        
-        if status == "exhausted":
-            break
+        success, sqlite_path, message = _run_nsys_for_algorithm(job, algo_idx, base_args)
         
         if not success:
+            # Check if we've exhausted available algorithms
+            if "Invalid algorithm index" in message:
+                print(f"Algorithm index {algo_idx}: {message}")
+                print(f"No matching algorithm found after exhausting available indices")
+                print_utils.iter_end()
+                return None
+            print(f"Algorithm index {algo_idx}: {message}")
             continue
         
         # Extract actual kernel from trace
         actual_kernel = extract_kernel_from_trace(sqlite_path)
         
+        # Clean up sqlite file immediately after extraction (we only need the kernel object)
+        _cleanup_test_trace(sqlite_path)
+        
         if not actual_kernel:
             print(f"Algorithm index {algo_idx}: No kernel found in trace")
-            _cleanup_test_trace(test_trace_path, sqlite_path)
             continue
         
         # Compare actual kernel with target kernel
@@ -305,14 +270,15 @@ def search_algorithm_index(job, max_algorithms=200):
         if match_result["match"]:
             print(f"Search completed @ algo index {algo_idx}")
             print_utils.iter_end()
-            algo_idx = algo_idx
-            _cleanup_test_trace(test_trace_path, sqlite_path)
-            break
-        
-        # Clean up after checking (no match)
-        _cleanup_test_trace(test_trace_path, sqlite_path)
+            return algo_idx
     
-    return algo_idx
+    # No match found after searching all algorithms
+    if algo_idx is not None:
+        print(f"No matching algorithm found after trying {algo_idx + 1} algorithm(s)")
+    else:
+        print(f"No matching algorithm found")
+    print_utils.iter_end()
+    return None
 
 
 def search_algorithm_indices():
@@ -337,19 +303,11 @@ def search_algorithm_indices():
     if not binary_path.exists():
         raise RuntimeError(f"Binary not found: {binary_path}")
     
-    # Only count jobs that actually require a search (exclude null/unknown targets)
-    searchable_jobs = [
-        job for job in jobs
-        if job.get("target_kernel") and job["target_kernel"] != "unknown" and not job.get("null_kernel")
-    ]
-    total_searchable = len(searchable_jobs)
-    
     # Search for algorithm indices for each job
     algorithms_found = 0
+    searchable_jobs = []
     
     for job in jobs:
-        job_id = job["id"]
-        
         # Skip if no target kernel
         if not job.get("target_kernel") or job["target_kernel"] == "unknown":
             continue
@@ -358,6 +316,11 @@ def search_algorithm_indices():
         if job.get("null_kernel"):
             job["matched_algo_index"] = None
             continue
+        
+        searchable_jobs.append(job)
+    
+    for job in searchable_jobs:
+        job_id = job["id"]
         
         # Query available algorithm count for iter_start message
         max_algo_idx, total_algo_count = get_algo_count(job)
@@ -385,9 +348,10 @@ def search_algorithm_indices():
     jobs_data["jobs"] = jobs
     if "matching_summary" not in jobs_data:
         jobs_data["matching_summary"] = {}
+    total_searched = len(searchable_jobs)
     jobs_data["matching_summary"]["matches_found"] = algorithms_found
-    jobs_data["matching_summary"]["no_matches"] = total_searchable - algorithms_found
-    jobs_data["matching_summary"]["total_jobs"] = total_searchable
+    jobs_data["matching_summary"]["no_matches"] = total_searched - algorithms_found
+    jobs_data["matching_summary"]["total_jobs"] = total_searched
     
     utils.save_json(jobs_file, jobs_data)
     
@@ -396,8 +360,8 @@ def search_algorithm_indices():
         title="Summary",
         headers=["Metric", "Count"],
         data=[
-            ["Total jobs", f"{total_searchable}"],
+            ["Total jobs", f"{total_searched}"],
             ["Algorithms found", f"{algorithms_found}"],
-            ["No algorithm found", f"{total_searchable - algorithms_found}"],
+            ["No algorithm found", f"{total_searched - algorithms_found}"],
         ]
     )
