@@ -12,18 +12,6 @@ from pathlib import Path
 from soda import utils
 
 
-def parse_dtype(dtype_str):
-    """Map PyTorch dtype strings to cuBLASLt dtype codes."""
-    dtype_map = {
-        "float": "f32",
-        "float32": "f32",
-        "half": "f16",
-        "float16": "f16",
-        "bfloat16": "bf16",
-        "double": "f64",
-        "float64": "f64",
-    }
-    return dtype_map.get(dtype_str.lower(), "f32")
 
 
 def infer_layout_and_ld(dims, strides):
@@ -70,7 +58,7 @@ def extract_dtype_from_input_types(input_types):
         if t and t != "Scalar":
             dtype_str = t
             break
-    return parse_dtype(dtype_str)
+    return utils.parse_dtype_to_cublaslt(dtype_str)
 
 
 def extract_addmm_params(input_dims, input_strides, concrete_inputs):
@@ -245,9 +233,9 @@ def generate_jobs(target_sequences: dict, warmup: int, runs: int):
     jobs.append({
         "id": "0000",
         "target_kernel": "__null__",
-        "target_grid": [1, 1, 1],
-        "target_block": [1, 1, 1],
-        "target_shared_mem": 0,
+        "target_grid": [1, 1, 1],  # Explicit value for null kernel, not a default
+        "target_block": [1, 1, 1],  # Explicit value for null kernel, not a default
+        "target_shared_mem": 0,  # Explicit value for null kernel, not a default
         "cpu_op": "null_kernel",
         "null_kernel": True,
         "warmup": warmup,
@@ -271,9 +259,10 @@ def generate_jobs(target_sequences: dict, warmup: int, runs: int):
         job = {
             "id": job_id,
             "target_kernel": kernel.get("name", "unknown"),
-            "target_grid": kernel.get("grid", [1, 1, 1]),
-            "target_block": kernel.get("block", [256, 1, 1]),
-            "target_shared_mem": kernel.get("shared_memory", 0),
+            "target_grid": kernel.get("grid"),
+            "target_block": kernel.get("block"),
+            "target_shared_mem": kernel.get("shared_memory"),
+            "target_registers_per_thread": kernel.get("registers_per_thread"),
             "cpu_op": cpu_op.get("name", ""),
             "m": params["m"],
             "n": params["n"],

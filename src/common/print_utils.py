@@ -73,7 +73,9 @@ def comp_table(title: str, headers: List[str], data: List[List[Any]]):
     for row in data:
         formatted_row = []
         for value in row:
-            if isinstance(value, bool):
+            if value is None:
+                formatted_row.append("-")
+            elif isinstance(value, bool):
                 formatted_row.append(bool_to_match(value))
             elif isinstance(value, (list, tuple)) and all(isinstance(x, bool) for x in value):
                 # Format list of bools as space-separated checkmarks

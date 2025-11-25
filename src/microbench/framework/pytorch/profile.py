@@ -41,19 +41,7 @@ def create_tensor(
         return None
     
     # Map dtype strings to torch dtypes
-    dtype_map = {
-        "float": torch.float32,
-        "float32": torch.float32,
-        "half": torch.float16,
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-        "float64": torch.float64,
-        "double": torch.float64,
-        "int32": torch.int32,
-        "int64": torch.int64,
-        "long": torch.int64,
-    }
-    dtype = dtype_map.get(dtype_str.lower(), torch.float32)
+    dtype = utils.parse_dtype_to_torch(dtype_str)
     tensor = torch.randn(*dims, dtype=dtype, device=device)
     
     if strides and len(strides) == len(dims):

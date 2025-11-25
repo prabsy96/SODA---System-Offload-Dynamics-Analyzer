@@ -14,6 +14,9 @@ import sys
 from pathlib import Path
 
 from soda import utils
+# Add src to path for direct imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+from data import CPUOp, Kernel
 
 def load_pytorch_results(pytorch_file):
     """
@@ -30,13 +33,16 @@ def load_pytorch_results(pytorch_file):
     for idx, sequence in enumerate(sequences):
         job_id = f"{idx+1:04d}"
         
-        kernel = sequence.get("kernel", {})
-        cpu_op = sequence.get("cpu_op", {})
+        kernel_dict = sequence.get("kernel", {})
+        cpu_op_dict = sequence.get("cpu_op", {})
         meta = sequence.get("meta", {})
         
-        op_signature = utils.extract_cpu_op_signature(cpu_op)  
+        # Convert dicts to objects
+        cpu_op = CPUOp.from_dict(cpu_op_dict) if cpu_op_dict else None
+        kernel = Kernel.from_dict(kernel_dict) if kernel_dict else None
         
-        kernel_info = utils.extract_kernel_signature(kernel)
+        op_signature = cpu_op.get_signature() if cpu_op else {}  
+        kernel_info = kernel.get_signature() if kernel else {}
         
         # Extract stats
         stats = {
@@ -97,8 +103,10 @@ def verify_kernel_match(pytorch_kernel, baremetal_kernel):
                   utils.clean_kernel_name(pytorch_name) == utils.clean_kernel_name(baremetal_name))
     
     # Config match (grid, block, shared_memory) - use normalized comparison
-    pytorch_config = utils.extract_kernel_signature(pytorch_kernel)
-    baremetal_config = utils.extract_kernel_signature(baremetal_kernel)
+    pytorch_kernel_obj = Kernel.from_dict(pytorch_kernel) if pytorch_kernel else None
+    baremetal_kernel_obj = Kernel.from_dict(baremetal_kernel) if baremetal_kernel else None
+    pytorch_config = pytorch_kernel_obj.get_signature() if pytorch_kernel_obj else {}
+    baremetal_config = baremetal_kernel_obj.get_signature() if baremetal_kernel_obj else {}
     
     # Require exact match 
     config_match = (

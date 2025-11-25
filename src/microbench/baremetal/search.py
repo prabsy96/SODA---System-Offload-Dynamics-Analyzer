@@ -14,10 +14,12 @@ import os
 import sys
 import subprocess
 import re
+import sqlite3
 from pathlib import Path
 from soda import utils
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 from common import print_utils
+from data import Kernel
 
 
 def build_binary():
@@ -102,19 +104,23 @@ def get_available_algorithm_count(job, binary_path):
     return None, None
 
 
-def get_kernel_config_from_trace(sqlite_path):
-    """Extract kernel config from nsys sqlite trace."""
-    import sqlite3
+def extract_kernel_from_trace(sqlite_path):
+    """Extract kernel from nsys sqlite trace.
+    
+    Returns: Kernel object or None if no kernel found
+    """
     try:
         conn = sqlite3.connect(sqlite_path)
         cursor = conn.cursor()
         
-        # Query for kernel events (GEMM kernels only)
+        # Query for kernel events (GEMM kernels only) with all available fields
         cursor.execute("""
             SELECT k.start, k.end, k.correlationId, s.value, 
                    k.gridX, k.gridY, k.gridZ,
                    k.blockX, k.blockY, k.blockZ,
-                   k.staticSharedMemory, k.dynamicSharedMemory
+                   k.staticSharedMemory, k.dynamicSharedMemory,
+                   k.deviceId, k.contextId, k.streamId,
+                   k.registersPerThread
             FROM CUPTI_ACTIVITY_KIND_KERNEL as k
             JOIN StringIds as s ON k.demangledName = s.id
             WHERE LOWER(s.value) LIKE '%gemm%'
@@ -125,43 +131,27 @@ def get_kernel_config_from_trace(sqlite_path):
         conn.close()
         
         if row:
-            start_ns, end_ns, corr_id, name, gx, gy, gz, bx, by, bz, static_smem, dyn_smem = row
-            return {
-                "name": name,
-                "grid": [gx, gy, gz],
-                "block": [bx, by, bz],
-                "shared_memory": static_smem + dyn_smem,
-            }
+            start_ns, end_ns, corr_id, name, gx, gy, gz, bx, by, bz, static_smem, dyn_smem, device_id, context_id, stream_id, regs = row
+            return Kernel(
+                name=name,
+                grid=[gx, gy, gz],
+                block=[bx, by, bz],
+                shared_memory=static_smem + dyn_smem,
+                correlation=corr_id,
+                ts=start_ns / 1000.0,  # Convert nanoseconds to microseconds
+                dur=(end_ns - start_ns) / 1000.0,  # Convert nanoseconds to microseconds
+                device=device_id,
+                context=context_id,
+                stream=stream_id,
+                registers_per_thread=regs
+            )
     except Exception:
         pass
     
     return None
 
 
-def _extract_target_config(job):
-    """Extract target kernel configuration from job."""
-    target_kernel = job["target_kernel"]
-    target_grid = job.get("target_grid", [0, 0, 0])
-    target_block = job.get("target_block", [256, 1, 1])
-    target_shared_mem = job.get("target_shared_mem", 0)
-    
-    # For testing: set FORCE_NO_MATCH=1 to test no-match scenario
-    if os.getenv("FORCE_NO_MATCH") == "1":
-        target_grid = [999, 999, 999]  # Impossible grid to force no match
-    
-    return target_kernel, target_grid, target_block, target_shared_mem
 
-
-def _print_target_config(target_kernel, target_grid, target_block, target_shared_mem):
-    """Print target kernel configuration as a table."""
-    data = [
-        ["name", target_kernel],
-        ["grid", str(target_grid)],
-        ["block", str(target_block)],
-        ["shared_mem", str(target_shared_mem)],
-    ]
-    print_utils.comp_table("Target kernel", ["Field", "Value"], data)
-    
 
 def _build_base_args(job, binary_path):
     """Build base command line arguments for the C++ binary."""
@@ -272,66 +262,68 @@ def search_algorithm_index(job, binary_path, output_dir, max_algorithms=200):
     
     Returns: algorithm index or None if no match found
     """
-    if not job.get("target_kernel") or job["target_kernel"] == "unknown":
-        return None
+    algo_idx = None
+
+    # Build target kernel configuration
+    target_kernel = Kernel(
+        name=job.get("target_kernel"),
+        grid=[999, 999, 999] if os.getenv("FORCE_NO_MATCH") == "1" else job.get("target_grid"),
+        block=job.get("target_block"),
+        shared_memory=job.get("target_shared_mem"),
+        registers_per_thread=job.get("target_registers_per_thread")
+    )
+    target_kernel.print()
     
-    target_kernel, target_grid, target_block, target_shared_mem = _extract_target_config(job)
-    _print_target_config(target_kernel, target_grid, target_block, target_shared_mem)
-    
-    # Build target kernel dict
-    target_kernel_dict = {
-        "name": target_kernel or "",
-        "grid": target_grid,
-        "block": target_block,
-        "shared_memory": target_shared_mem,
-    }
-    
-    # Query available algorithm count upfront
+    # Determine max algorithms to try
     max_available_idx, total_available = get_available_algorithm_count(job, binary_path)
     if max_available_idx is not None:
         max_algorithms = min(max_algorithms, max_available_idx + 1)
     
+    # Setup trace directory and base arguments
     base_args = _build_base_args(job, binary_path)
     trace_dir = os.path.join(output_dir, "traces")
     os.makedirs(trace_dir, exist_ok=True)
     
-    algorithms_tried = 0
-    
-    # Try algorithm 0 first (PyTorch's default - should match)
+    # Search through algorithm indices
     for algo_idx in range(max_algorithms):
-        algorithms_tried += 1
-        
+        # Run nsys profiling for this algorithm
         success, test_trace_path, sqlite_path, status = _run_nsys_for_algorithm(
             job, binary_path, algo_idx, base_args, trace_dir
         )
         
         if status == "exhausted":
-            # All algorithms exhausted
             break
         
         if not success:
             continue
         
-        # Parse trace to get kernel config
-        kernel_config = get_kernel_config_from_trace(sqlite_path)
+        # Extract actual kernel from trace
+        actual_kernel = extract_kernel_from_trace(sqlite_path)
         
-        if not kernel_config:
-            print(f"Algorithm index {algo_idx}: No kernel config found in trace")
+        if not actual_kernel:
+            print(f"Algorithm index {algo_idx}: No kernel found in trace")
             _cleanup_test_trace(test_trace_path, sqlite_path)
             continue
         
-        # Compare with target using utils.compare_kernels (prints table automatically)
-        match_result = utils.compare_kernels(kernel_config, target_kernel_dict, show_table=True, title=f"Algorithm #{algo_idx}")
+        # Compare actual kernel with target kernel
+        match_result = actual_kernel.compare(
+            target_kernel, 
+            show_table=True, 
+            title=f"Algorithm #{algo_idx}", 
+            full=False
+        )
         
         if match_result["match"]:
             print(f"Search completed @ algo index {algo_idx}")
+            print_utils.iter_end()
+            algo_idx = algo_idx
             _cleanup_test_trace(test_trace_path, sqlite_path)
-            return algo_idx
+            break
         
         # Clean up after checking (no match)
         _cleanup_test_trace(test_trace_path, sqlite_path)
     
-    return None
+    return algo_idx
 
 
 def search_algorithm_indices():
@@ -372,7 +364,6 @@ def search_algorithm_indices():
     
     # Search for algorithm indices for each job
     algorithms_found = 0
-    no_algorithm = []
     
     for job in jobs:
         job_id = job["id"]
@@ -400,44 +391,31 @@ def search_algorithm_indices():
         print_utils.iter_start(f"Job {job_id}{algo_info}")
         
         # Search for algorithm index
-        matched_algo_idx = search_algorithm_index(job, binary_path, output_dir, max_algorithms=200)
+        algo_idx = search_algorithm_index(job, binary_path, output_dir, max_algorithms=200)
         
-        if matched_algo_idx is not None:
-            job["matched_algo_index"] = matched_algo_idx
+        if algo_idx is not None:
+            job["matched_algo_index"] = algo_idx
             algorithms_found += 1
         else:
             job["matched_algo_index"] = None  # Explicitly set to None when no match found
-            no_algorithm.append(job_id)
     
-    # Update jobs.json with matched_algo_index
+    # Update jobs.json with matched_algo_index 
     jobs_data["jobs"] = jobs
     if "matching_summary" not in jobs_data:
         jobs_data["matching_summary"] = {}
     jobs_data["matching_summary"]["matches_found"] = algorithms_found
-    jobs_data["matching_summary"]["no_matches"] = no_algorithm
+    jobs_data["matching_summary"]["no_matches"] = total_searchable - algorithms_found
     jobs_data["matching_summary"]["total_jobs"] = total_searchable
     
     utils.save_json(jobs_file, jobs_data)
     
-    print(f"\n==============================================")
-    print(f"Summary")
-
-    
-    denominator = total_searchable if total_searchable > 0 else len(jobs)
-    print(f"- Algorithms found: {algorithms_found}/{denominator}")
-    if no_algorithm:
-        # Format job IDs: remove one leading zero (0002 -> 002) and limit to 5
-        no_algo_ids = []
-        for job_id in no_algorithm[:5]:
-            # Remove one leading zero if present (0002 -> 002, 0001 -> 001)
-            if job_id.startswith('0') and len(job_id) > 1:
-                no_algo_ids.append(job_id[1:])
-            else:
-                no_algo_ids.append(job_id)
-        no_algo_str = ', '.join(no_algo_ids)
-        if len(no_algorithm) > 5:
-            no_algo_str += f" ({len(no_algorithm) - 5} more)"
-        print(f"- No algorithm found: {no_algo_str}")
-    print(f"- Updated {jobs_file}")
-    print(f"==============================================")
-
+    # Print summary table
+    print_utils.comp_table(
+        title="Summary",
+        headers=["Metric", "Count"],
+        data=[
+            ["Total jobs", f"{total_searchable}"],
+            ["Algorithms found", f"{algorithms_found}"],
+            ["No algorithm found", f"{total_searchable - algorithms_found}"],
+        ]
+    )

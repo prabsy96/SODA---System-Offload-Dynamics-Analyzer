@@ -9,6 +9,7 @@ from common import print_utils
 from microbench.framework.pytorch.profile import profile_pytorch_gemm_sequences
 from microbench.framework.pytorch.plot import plot_pytorch_gemm_sequences
 from microbench.framework.pytorch.verify import compare_sequences
+from data import Sequence
 
 from microbench.baremetal.generate import generate_jobs
 from microbench.baremetal.search import search_algorithm_indices
@@ -83,7 +84,10 @@ class SodaMicrobench:
         )
         
         print_utils.subsection("Verifying pytorch gemm sequences", level=0)
-        compare_sequences(target_gemm_sequences, pytorch_gemm_sequences)
+        # Convert dict sequences to Sequence objects
+        target_seq_objects = [Sequence.from_dict(seq_dict) for seq_dict in target_gemm_sequences["sequences"]]
+        pytorch_seq_objects = [Sequence.from_dict(seq_dict) for seq_dict in pytorch_gemm_sequences["sequences"]]
+        compare_sequences(target_seq_objects, pytorch_seq_objects)
         plot_pytorch_gemm_sequences(pytorch_gemm_sequences)
 
         # Benchmark baremetal performance

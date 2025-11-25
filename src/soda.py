@@ -347,12 +347,7 @@ class ModelTracer:
         self.model_name = args.model
         self.device = torch.device(args.device)
         self.compile_type = args.compile_type
-        self.precision_map = {
-            "float32": torch.float32,
-            "float16": torch.float16,
-            "bfloat16": torch.bfloat16,
-        }
-        self.precision = self.precision_map[args.precision]
+        self.precision = utils.parse_dtype_to_torch(args.precision)
 
         # Set random seeds
         torch.manual_seed(args.seed)

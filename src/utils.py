@@ -15,6 +15,7 @@ from collections import defaultdict, deque
 import numpy as np
 import shutil
 from common import print_utils
+from data import Kernel, CPUOp, Sequence, clean_kernel_name
 
 def calculate_avg_min_max(values, base_name=None):
     """
@@ -56,44 +57,50 @@ def format_sequence_filename(index: int, op_name: str, kernel_name: str, extensi
     kernel_short = clean_kernel_name(kernel_name).strip()
     return f"{index:02d}_{op_short}_{kernel_short}.{extension}"
 
-def clean_kernel_name(kernel_name: str) -> str:
-    """
-    Extract a clean kernel name from the full signature.
+
+def parse_dtype_to_cublaslt(dtype_str: str) -> str:
+    """Map PyTorch dtype strings to cuBLASLt dtype codes.
     
     Args:
-        kernel_name: Full kernel name (may be a C++ function signature).
+        dtype_str: PyTorch dtype string (e.g., "float32", "float16", "half")
     
     Returns:
-        Clean kernel name (just the kernel name, no namespace or template parameters).
-    
-    Examples:
-        "void at::native::vectorized_elementwise_kernel<4, ...>" 
-        -> "vectorized_elementwise_kernel"
-        
-        "void at::native::(anonymous namespace)::elementwise_kernel<...>"
-        -> "elementwise_kernel"
-        
-        "turing_fp16_s1688gemm_fp16_128x128_ldg8_f2f_stages_32x1_nn"
-        -> "turing_fp16_s1688gemm_fp16_128x128_ldg8_f2f_stages_32x1_nn"
+        cuBLASLt dtype code (e.g., "f32", "f16", "bf16", "f64")
     """
-    # Extract everything before '<' (removes template parameters)
-    # This handles cases where '(' appears in template params like "(anonymous namespace)"
-    if '<' in kernel_name:
-        clean_kernel_name = kernel_name.split('<')[0].strip()
-    elif '(' in kernel_name:
-        # If no '<' but has '(', extract before '(' (function parameters)
-        clean_kernel_name = kernel_name.split('(')[0].strip()
-    else:
-        clean_kernel_name = kernel_name
+    dtype_map = {
+        "float": "f32",
+        "float32": "f32",
+        "half": "f16",
+        "float16": "f16",
+        "bfloat16": "bf16",
+        "double": "f64",
+        "float64": "f64",
+    }
+    return dtype_map.get(dtype_str.lower(), "f32")
+
+def parse_dtype_to_torch(dtype_str: str):
+    """Map dtype strings to torch.dtype objects.
     
-    # Remove 'void' prefix if present
-    clean_kernel_name = clean_kernel_name.replace('void', '').strip()
+    Args:
+        dtype_str: Dtype string (e.g., "float32", "float16", "half", "int32")
     
-    # Extract just the kernel name (last part after '::')
-    if '::' in clean_kernel_name:
-        clean_kernel_name = clean_kernel_name.split('::')[-1]
-    
-    return clean_kernel_name.strip()
+    Returns:
+        torch.dtype object
+    """
+    import torch
+    dtype_map = {
+        "float": torch.float32,
+        "float32": torch.float32,
+        "half": torch.float16,
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "float64": torch.float64,
+        "double": torch.float64,
+        "int32": torch.int32,
+        "int64": torch.int64,
+        "long": torch.int64,
+    }
+    return dtype_map.get(dtype_str.lower(), torch.float32)
 
 def get_sequence_str(sequence: Dict[str, Any]) -> str:
     """
@@ -248,191 +255,6 @@ def extract_alpha_beta(concrete_inputs: List[Any], default_alpha: float = 1.0, d
     return alpha, beta
 
 
-def extract_cpu_op_signature(cpu_op: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Extract canonical operation signature (input conditions) from cpu_op.
-    
-    This signature uniquely identifies an operation's inputs and determines
-    which kernel should be dispatched. Used consistently across:
-    - Matching operations (verify.py)
-    - Op signature extraction (report.py)  
-    - Job generation (generate.py)
-    
-    Args:
-        cpu_op: Dictionary containing cpu_op data with fields:
-            - name: operation name (e.g., "aten::addmm")
-            - input_dims: list of input dimension lists
-            - input_strides: list of input stride lists
-            - input_type: list of input type strings
-            - concrete_inputs: list of concrete input values (scalars, etc.)
-    
-    Returns:
-        Dictionary with canonical signature fields:
-            - name: operation name
-            - input_dims: input dimensions 
-            - input_strides: input strides 
-            - input_type: input types 
-            - concrete_inputs: concrete input values 
-        Returns empty dict if cpu_op is None or empty.
-    """
-    if not cpu_op:
-        return {}
-    
-    sig_fields = ["name", "input_dims", "input_strides", "input_type", "concrete_inputs"]
-    defaults = {"name": "", "concrete_inputs": []}
-    return {field: cpu_op.get(field, defaults.get(field)) for field in sig_fields}
-
-def compare_cpu_ops(actual: Dict[str, Any], target: Dict[str, Any], show_table=False, title="CPU op comparison") -> bool:
-    """
-    Compare two cpu_op objects and return True if all fields match.
-    
-    Compares: name, input_dims, input_strides, input_type, and concrete_inputs
-    (alpha/beta scalars for addmm operations).
-    
-    Args:
-        actual: Actual cpu_op dictionary to compare
-        target: Target cpu_op dictionary to compare
-        show_table: If True, print comparison table with match indicators
-    
-    Returns:
-        True if all fields match, False otherwise.
-    """
-    actual_sig = extract_cpu_op_signature(actual)
-    target_sig = extract_cpu_op_signature(target)
-    
-    if not actual_sig or not target_sig:
-        return False
-    
-    # Compare all fields including name
-    match = True
-    table_data = []
-    skip_fields = {"concrete_inputs"}
-    all_fields = set(actual_sig.keys()) | set(target_sig.keys())
-    # Sort fields with "name" first, then others alphabetically
-    sorted_fields = sorted(all_fields, key=lambda x: (x != "name", x))
-    for field in sorted_fields:
-        if field not in skip_fields:
-            actual_value = actual_sig.get(field) or "N/A"
-            target_value = target_sig.get(field) or "N/A"
-            field_match = (actual_value == target_value)
-            if not field_match:
-                match = False
-            
-            table_data.append([field, actual_value, target_value, field_match])
-    
-    # Handle concrete_inputs separately
-    actual_a = target_a = actual_b = target_b = None
-    a_match = b_match = False
-    has_a_b = False
-    
-    if actual_sig["name"] == "aten::addmm":
-        # For addmm, compare alpha/beta separately
-        actual_concrete = actual_sig.get("concrete_inputs", [])
-        target_concrete = target_sig.get("concrete_inputs", [])
-        if len(actual_concrete) >= 5 and len(target_concrete) >= 5:
-            has_a_b = True
-
-            # Parse alpha/beta scalars 
-            actual_a, actual_b = extract_alpha_beta(actual_concrete)
-            target_a, target_b = extract_alpha_beta(target_concrete)
-
-            # Check alpha/beta scalars for addmm (affects epilogue fusion)
-            a_match = (actual_a == target_a)
-            b_match = (actual_b == target_b)
-            match = match and a_match and b_match
-    
-            table_data.append(["alpha (concrete_inputs[3])", actual_a or "N/A", target_a or "N/A", a_match])
-            table_data.append(["beta (concrete_inputs[4])", actual_b or "N/A", target_b or "N/A", b_match])
-        else:
-        # For non-addmm ops, compare concrete_inputs as-is
-            actual_value = actual_sig.get("concrete_inputs") or "N/A"
-            target_value = target_sig.get("concrete_inputs") or "N/A"
-        field_match = (actual_value == target_value)
-        if not field_match:
-            match = False
-        
-        table_data.append(["concrete_inputs", actual_value, target_value, field_match])
-    
-    if show_table:
-        outcome = "[green]SUCCESS[/green]" if match else "[red]FAILURE[/red]"
-        print_utils.comp_table(f"{title} {outcome}", ["Field", "Actual", "Target", "Match"], table_data)
-    
-    return match
-
-def _compare_dimensions(actual, target):
-    """Compare dimensions at each index. Returns list of bools [x, y, z]."""
-    return [
-        len(actual) > 0 and len(target) > 0 and actual[0] == target[0],
-        len(actual) > 1 and len(target) > 1 and actual[1] == target[1],
-        len(actual) > 2 and len(target) > 2 and actual[2] == target[2],
-    ]
-
-
-def compare_kernels(actual, target, show_table=False, title="Kernel comparison"):
-    """Compare two kernels and return hierarchical match results.
-    
-    Args:
-        actual: Actual kernel dictionary (first parameter)
-        target: Target kernel dictionary (second parameter)
-        show_table: If True, print comparison table with match indicators
-        title: Optional custom title for the comparison table. Defaults to "Kernel comparison"
-    
-    Returns:
-        Dictionary with match results:
-        - "match": overall boolean match
-        - "name": boolean match
-        - "grid": [x_match, y_match, z_match] list of booleans
-        - "block": [x_match, y_match, z_match] list of booleans
-        - other fields: boolean matches
-    """
-    if actual is None or target is None:
-        return {"match": False}
-    
-    # Compare all fields
-    actual_sig = extract_kernel_signature(actual, full=True)
-    target_sig = extract_kernel_signature(target, full=True)
-    
-    # Get grid/block lists for per-dimension comparison (before tuple conversion)
-    actual_grid = actual.get("grid", [])
-    actual_block = actual.get("block", [])
-    target_grid = target.get("grid", [])
-    target_block = target.get("block", [])
-    
-    # Build hierarchical match results
-    results = {}
-    match = True
-    table_data = []
-    all_fields = set(actual_sig.keys()) | set(target_sig.keys())
-    # Sort fields with "name" first, then others alphabetically
-    sorted_fields = sorted(all_fields, key=lambda x: (x != "name", x))
-    for field in sorted_fields:
-        actual_value = actual_sig.get(field) or "N/A"
-        target_value = target_sig.get(field) or "N/A"
-        
-        field_match = (actual_value == target_value)
-        if not field_match:
-            match = False
-        
-        # For grid/block, add per-dimension matches
-        if field == "grid" and isinstance(actual_value, tuple) and isinstance(target_value, tuple):
-            dims_match = _compare_dimensions(actual_grid, target_grid)
-            results["grid"] = dims_match
-            table_data.append([field, actual_value, target_value, dims_match])
-        elif field == "block" and isinstance(actual_value, tuple) and isinstance(target_value, tuple):
-            dims_match = _compare_dimensions(actual_block, target_block)
-            results["block"] = dims_match
-            table_data.append([field, actual_value, target_value, dims_match])
-        else:
-            results[field] = field_match
-            table_data.append([field, actual_value, target_value, field_match])
-    
-    results["match"] = match
-    
-    if show_table:
-        outcome = "[green]SUCCESS[/green]" if match else "[red]FAILURE[/red]"
-        print_utils.comp_table(f"{title} {outcome}", ["Field", "Actual", "Target", "Match"], table_data)
-    
-    return results
 
 def validate_sequences(event_sequences: List[Dict[str, Any]]) -> None:
     """Validate that all sequences have required fields (kernel, cpu_op, cuda_launch).
@@ -461,7 +283,7 @@ def filter_gemm_sequences(event_sequences: List[Dict[str, Any]]) -> List[Dict[st
     validate_sequences(gemm_sequences)
     return gemm_sequences
 
-def make_kernel_identity_key(kernel, input_dims):
+def make_kernel_identity_key(kernel, cpu_op):
     """
     Build a stable identity key for a kernel + its originating CPU op.
     Components:
@@ -470,26 +292,38 @@ def make_kernel_identity_key(kernel, input_dims):
       - block dims
       - shared memory
       - input dims (tuplized to make hashable)
+    
+    Args:
+        kernel: Kernel object
+        cpu_op: CPUOp object
     """
-    kernel_name = kernel.get("name")
-    grid_tuple = tuple(kernel.get("grid", []))
-    block_tuple = tuple(kernel.get("block", []))
-    shared_mem = kernel.get("shared_memory", 0)
-    input_dims_tuple = tuple(tuple(d) if isinstance(d, list) else d for d in input_dims)
-    return (kernel_name, grid_tuple, block_tuple, shared_mem, input_dims_tuple)
+    return (
+        kernel.name, 
+        tuple(kernel.grid), 
+        tuple(kernel.block), 
+        kernel.shared_memory, 
+        tuple(tuple(d) if isinstance(d, list) else d for d in cpu_op.input_dims)
+    )
 
 def group_by_identity(sequences):
     """
     Group event sequences by kernel identity key.
-    Returns a dict: key -> list[sequence]
+    
+    Args:
+        sequences: List of sequence dictionaries
+    
+    Returns: dict: key -> list[dict]
     """
     grouped = defaultdict(list)
-    for e in sequences:
-        if e.get("kernel") and e.get("cpu_op"):
-            kernel = e["kernel"]
-            input_dims = e["cpu_op"]["input_dims"]
-            key = make_kernel_identity_key(kernel, input_dims)
-            grouped[key].append(e)
+    for seq in sequences:
+        kernel = seq.get('kernel')
+        cpu_op = seq.get('cpu_op')
+        if kernel and cpu_op:
+            kernel_obj = Kernel.from_dict(kernel)
+            cpu_op_obj = CPUOp.from_dict(cpu_op)
+            if kernel_obj and cpu_op_obj:
+                key = make_kernel_identity_key(kernel_obj, cpu_op_obj)
+                grouped[key].append(seq)
     return grouped
 
 def aggregate_execution_metrics(instances):
@@ -1456,49 +1290,3 @@ def generate_synthetic_inputs(tokenizer, device: torch.device, batch_size: int, 
         ),
     }
 
-def _to_tuple_int(x):
-    """Convert list/tuple to tuple of ints for normalized comparison."""
-    if isinstance(x, (list, tuple)):
-        try:
-            return tuple(int(v) for v in x)
-        except Exception:
-            return tuple()
-    return tuple()
-
-def _norm_shared_mem(v):
-    """Normalize shared memory value to int."""
-    if v in (None, '0'):
-        return 0
-    try:
-        return int(v)
-    except Exception:
-        return 0
-
-def extract_kernel_signature(kernel, full=False):
-    """
-    Extract kernel signature for comparison.
-    
-    Args:
-        kernel: Kernel dictionary
-        full: If True, include additional signature fields
-    
-    Returns:
-        Dictionary with kernel signature fields:
-        - name, grid, block, shared_memory (always included)
-        - registers_per_thread, occupancy, stream, dur (if full=True)
-    """
-    signature = {
-        "name": clean_kernel_name(kernel.get("name", "")),
-        "grid": _to_tuple_int(kernel.get("grid") or ()),
-        "block": _to_tuple_int(kernel.get("block") or ()),
-        "shared_memory": _norm_shared_mem(kernel.get("shared_memory")),
-    }
-    
-    if full:
-        # Include all remaining fields except metadata/runtime fields
-        exclude_fields = {"external_id", "correlation", "type", "ts", "dur", "name"}
-        for key, value in kernel.items():
-            if key not in signature and key not in exclude_fields and "dur" not in key.lower():
-                signature[key] = value
-    
-    return signature
