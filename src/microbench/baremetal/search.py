@@ -26,12 +26,12 @@ def build_binary():
     """Build the C++ binary using cmake."""
     baremetal_dir = utils.get_path("BAREMETAL_MICROBENCH_DIR")
     print("Building C++ binary...")
-    build_dir = os.path.join(baremetal_dir, "build")
+    build_dir = baremetal_dir / "build"
     
     # Configure
     result = subprocess.run(
-        ["cmake", "-B", build_dir, "-DCMAKE_BUILD_TYPE=Release"],
-        cwd=baremetal_dir,
+        ["cmake", "-B", str(build_dir), "-DCMAKE_BUILD_TYPE=Release"],
+        cwd=str(baremetal_dir),
         capture_output=True,
         text=True
     )
@@ -40,8 +40,8 @@ def build_binary():
     
     # Build
     result = subprocess.run(
-        ["cmake", "--build", build_dir],
-        cwd=baremetal_dir,
+        ["cmake", "--build", str(build_dir)],
+        cwd=str(baremetal_dir),
         capture_output=True,
         text=True
     )
@@ -51,54 +51,31 @@ def build_binary():
     print("Build successful")
 
 
-def get_available_algorithm_count(job, binary_path):
+def get_algo_count(job):
     """
     Query how many algorithms are available for this problem using --query_algo_count flag.
     
+    Args:
+        job: Job dictionary with GEMM parameters
+    
     Returns: (max_index, total_count) or (None, None) if query fails
     """
-    base_args = [
-        binary_path,
-        "--m", str(job["m"]),
-        "--n", str(job["n"]),
-        "--k", str(job["k"]),
-        "--lda", str(job["lda"]),
-        "--ldb", str(job["ldb"]),
-        "--ldc", str(job["ldc"]),
-        "--order_a", job.get("order_a", "row"),
-        "--order_b", job.get("order_b", "row"),
-        "--trans_a", job.get("trans_a", "N"),
-        "--trans_b", job.get("trans_b", "N"),
-        "--dtype", job["dtype"],
-        "--alpha", str(job["alpha"]),
-        "--beta", str(job["beta"]),
-        "--query_algo_count",  # Query count without running benchmark
-    ]
+    base_args = build_base_args(job) + ["--query_algo_count"]
     
     try:
-        # Run without nsys (faster) - just to get the algorithm count
         result = subprocess.run(base_args, capture_output=True, text=True, timeout=10)
-        if result.returncode == 0:
-            # Parse "Available algorithms: 0-X (total: Y)" or "Available algorithms: 0-X" from stdout
-            for line in result.stdout.split('\n'):
-                if "Available algorithms:" in line:
-                    # Try to match with (total: Y) first
-                    match = re.search(r'Available algorithms: 0-(\d+) \(total: (\d+)\)', line)
-                    if match:
-                        max_idx = int(match.group(1))
-                        total = int(match.group(2))
-                        return max_idx, total
-                    # Fallback: match without (total: Y)
-                    match = re.search(r'Available algorithms: 0-(\d+)', line)
-                    if match:
-                        max_idx = int(match.group(1))
-                        total = max_idx + 1
-                        return max_idx, total
-        else:
-            # Query failed - binary might not support --query_algo_count or other error
-            pass
-    except Exception as e:
-        # Query failed due to exception
+        if result.returncode != 0:
+            return None, None
+        
+        # Parse "Available algorithms: 0-X (total: Y)" format
+        for line in result.stdout.split('\n'):
+            if "Available algorithms:" in line:
+                match = re.search(r'Available algorithms: 0-(\d+)(?: \(total: (\d+)\))?', line)
+                if match:
+                    max_idx = int(match.group(1))
+                    total = int(match.group(2)) if match.group(2) else max_idx + 1
+                    return max_idx, total
+    except Exception:
         pass
     
     return None, None
@@ -150,13 +127,19 @@ def extract_kernel_from_trace(sqlite_path):
     
     return None
 
-
-
-
-def _build_base_args(job, binary_path):
-    """Build base command line arguments for the C++ binary."""
+def build_base_args(job):
+    """Build base command line arguments for the C++ binary.
+    
+    Args:
+        job: Job dictionary with GEMM parameters
+    
+    Returns:
+        List of command line arguments 
+    """
+    binary_path = utils.get_path("BAREMETAL_BINARY")
+    
     return [
-        binary_path,
+        str(binary_path),
         "--m", str(job["m"]),
         "--n", str(job["n"]),
         "--k", str(job["k"]),
@@ -170,24 +153,30 @@ def _build_base_args(job, binary_path):
         "--dtype", job["dtype"],
         "--alpha", str(job["alpha"]),
         "--beta", str(job["beta"]),
-        "--warmup", "0",
-        "--runs", "3",
     ]
     
     
-def _run_nsys_for_algorithm(job, binary_path, algo_idx, base_args, trace_dir):
+def _run_nsys_for_algorithm(job, algo_idx, base_args):
     """
     Run nsys profiling for a specific algorithm index.
     
     Returns: (success, test_trace_path, sqlite_path) or (False, None, None) on failure
     """
-    test_trace_path = os.path.join(trace_dir, f"match_test_{job['id']}_algo{algo_idx}.nsys-rep")
-    test_args = base_args + ["--algo_index", str(algo_idx)]
+    # Get trace directory from env var
+    jobs_file = utils.get_path("BAREMETAL_JOBS")
+    trace_dir = jobs_file.parent / "traces"
+    utils.ensure_dir(trace_dir)
+    
+    test_trace_path = trace_dir / f"match_test_{job['id']}_algo{algo_idx}.nsys-rep"
+    test_args = base_args 
+    test_args = test_args + ["--warmup", "0"]
+    test_args = test_args + ["--runs", "3"]
+    test_args = test_args + ["--algo_index", str(algo_idx)]
     
     nsys_cmd = [
         "nsys", "profile",
         "--trace=cuda,osrt",
-        "--output", test_trace_path,
+        "--output", str(test_trace_path),
         "--force-overwrite=true",
     ] + test_args
     
@@ -219,21 +208,21 @@ def _run_nsys_for_algorithm(job, binary_path, algo_idx, base_args, trace_dir):
         print(f"Algorithm index {algo_idx}: Exception: {e}")
         return (False, None, None, None)
     
-    if not os.path.exists(test_trace_path):
+    if not test_trace_path.exists():
         print(f"Algorithm index {algo_idx}: Trace file not created")
         return (False, None, None, None)
     
     # Export to sqlite
-    sqlite_path = test_trace_path.replace(".nsys-rep", ".sqlite")
-    if os.path.exists(sqlite_path):
-        os.remove(sqlite_path)
-    export_cmd = ["nsys", "export", "--type=sqlite", "--output", sqlite_path, test_trace_path]
+    sqlite_path = test_trace_path.with_suffix(".sqlite")
+    if sqlite_path.exists():
+        sqlite_path.unlink()
+    export_cmd = ["nsys", "export", "--type=sqlite", "--output", str(sqlite_path), str(test_trace_path)]
     export_result = subprocess.run(export_cmd, capture_output=True, text=True)
-    if export_result.returncode != 0 or not os.path.exists(sqlite_path):
+    if export_result.returncode != 0 or not sqlite_path.exists():
         print(f"Algorithm index {algo_idx}: Trace export failed")
         return (False, None, None, None)
     
-    return (True, test_trace_path, sqlite_path, None)
+    return (True, str(test_trace_path), str(sqlite_path), None)
 
 
 
@@ -245,15 +234,17 @@ def _run_nsys_for_algorithm(job, binary_path, algo_idx, base_args, trace_dir):
 def _cleanup_test_trace(test_trace_path, sqlite_path):
     """Clean up temporary trace files."""
     try:
-        if os.path.exists(test_trace_path):
-            os.remove(test_trace_path)
-        if os.path.exists(sqlite_path):
-            os.remove(sqlite_path)
+        test_path = Path(test_trace_path)
+        sqlite_path_obj = Path(sqlite_path)
+        if test_path.exists():
+            test_path.unlink()
+        if sqlite_path_obj.exists():
+            sqlite_path_obj.unlink()
     except:
         pass
 
 
-def search_algorithm_index(job, binary_path, output_dir, max_algorithms=200):
+def search_algorithm_index(job, max_algorithms=200):
     """
     Search for cuBLASLt algorithm index that produces target kernel config.
     
@@ -275,20 +266,18 @@ def search_algorithm_index(job, binary_path, output_dir, max_algorithms=200):
     target_kernel.print()
     
     # Determine max algorithms to try
-    max_available_idx, total_available = get_available_algorithm_count(job, binary_path)
-    if max_available_idx is not None:
-        max_algorithms = min(max_algorithms, max_available_idx + 1)
+    max_algo_idx, total_algo_count = get_algo_count(job)
+    if max_algo_idx is not None:
+        max_algorithms = min(max_algorithms, max_algo_idx + 1)
     
-    # Setup trace directory and base arguments
-    base_args = _build_base_args(job, binary_path)
-    trace_dir = os.path.join(output_dir, "traces")
-    os.makedirs(trace_dir, exist_ok=True)
+    # Setup base arguments
+    base_args = build_base_args(job)
     
     # Search through algorithm indices
     for algo_idx in range(max_algorithms):
         # Run nsys profiling for this algorithm
         success, test_trace_path, sqlite_path, status = _run_nsys_for_algorithm(
-            job, binary_path, algo_idx, base_args, trace_dir
+            job, algo_idx, base_args
         )
         
         if status == "exhausted":
@@ -344,16 +333,9 @@ def search_algorithm_indices():
     
     # Build binary
     build_binary()
-    
-    baremetal_dir = utils.get_path("BAREMETAL_MICROBENCH_DIR")
-    binary_path = baremetal_dir / "build" / "main_gemm_bm"
-    if not os.path.exists(binary_path):
+    binary_path = utils.get_path("BAREMETAL_BINARY")
+    if not binary_path.exists():
         raise RuntimeError(f"Binary not found: {binary_path}")
-    
-    # Create temporary output dir for test traces
-    output_dir = os.path.dirname(jobs_file)
-    trace_dir = os.path.join(output_dir, "traces")
-    os.makedirs(trace_dir, exist_ok=True)
     
     # Only count jobs that actually require a search (exclude null/unknown targets)
     searchable_jobs = [
@@ -378,9 +360,9 @@ def search_algorithm_indices():
             continue
         
         # Query available algorithm count for iter_start message
-        max_available_idx, total_available = get_available_algorithm_count(job, binary_path)
-        if max_available_idx is not None:
-            num_algos = max_available_idx + 1
+        max_algo_idx, total_algo_count = get_algo_count(job)
+        if max_algo_idx is not None:
+            num_algos = max_algo_idx + 1
             if num_algos == 0:
                 algo_info = f" (Brute forcing 0-200)"
             else:
@@ -391,7 +373,7 @@ def search_algorithm_indices():
         print_utils.iter_start(f"Job {job_id}{algo_info}")
         
         # Search for algorithm index
-        algo_idx = search_algorithm_index(job, binary_path, output_dir, max_algorithms=200)
+        algo_idx = search_algorithm_index(job, max_algorithms=200)
         
         if algo_idx is not None:
             job["matched_algo_index"] = algo_idx

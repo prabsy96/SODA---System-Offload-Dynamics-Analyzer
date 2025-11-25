@@ -15,15 +15,13 @@ import sys
 import subprocess
 import re
 from pathlib import Path
-from microbench.baremetal.search import build_binary
+from microbench.baremetal.search import build_binary, build_base_args
 from soda import utils
 
 
-def run_job_under_nsys(job, binary_path, output_dir):
+def run_job_under_nsys(job):
     """
     Run a single job under nsys profiling using matched algorithm index.
-    
-    Returns: (qdrep_path, sqlite_path)
     """
     job_id = job["id"]
     
@@ -34,10 +32,16 @@ def run_job_under_nsys(job, binary_path, output_dir):
     
     print(f"\nRunning job {job_id}...")
     
+    # Get paths from env vars
+    binary_path = utils.get_path("BAREMETAL_BINARY")
+    jobs_file = utils.get_path("BAREMETAL_JOBS")
+    trace_dir = jobs_file.parent / "traces"
+    utils.ensure_dir(trace_dir)
+    
     # Handle null kernel job
     if job.get("null_kernel"):
         args = [
-            binary_path,
+            str(binary_path),
             "--null_kernel",
             "--warmup", str(job["warmup"]),
             "--runs", str(job["runs"]),
@@ -52,44 +56,24 @@ def run_job_under_nsys(job, binary_path, output_dir):
         else:
             print(f"\t* No target kernel, using default algorithm")
         
-        # Build command line args
-        args = [
-            binary_path,
-            "--m", str(job["m"]),
-            "--n", str(job["n"]),
-            "--k", str(job["k"]),
-            "--lda", str(job["lda"]),
-            "--ldb", str(job["ldb"]),
-            "--ldc", str(job["ldc"]),
-            "--order_a", job.get("order_a", "row"),
-            "--order_b", job.get("order_b", "row"),
-            "--trans_a", job.get("trans_a", "N"),
-            "--trans_b", job.get("trans_b", "N"),
-            "--dtype", job["dtype"],
-            "--alpha", str(job["alpha"]),
-            "--beta", str(job["beta"]),
+        # Build command line args 
+        args = build_base_args(job) + [
             "--warmup", str(job["warmup"]),
             "--runs", str(job["runs"]),
         ]
         
-        # Add batch if present
         if "batch" in job:
-            args.extend(["--batch", str(job["batch"])])
+            args = args + ["--batch", str(job["batch"])]
         
-        # Add algorithm index if we have a match
         if matched_algo_idx is not None:
-            args.extend(["--algo_index", str(matched_algo_idx)])
+            args = args + ["--algo_index", str(matched_algo_idx)]
     
-    # nsys command
-    trace_dir = os.path.join(output_dir, "traces")
-    os.makedirs(trace_dir, exist_ok=True)
-    
-    qdrep_path = os.path.join(trace_dir, f"trace_{job_id}")
+    qdrep_path = trace_dir / f"trace_{job_id}"
     
     nsys_cmd = [
         "nsys", "profile",
         "--trace=cuda,osrt",
-        f"--output={qdrep_path}",
+        "--output", str(qdrep_path),
         "--force-overwrite=true",
     ] + args
     
@@ -100,13 +84,13 @@ def run_job_under_nsys(job, binary_path, output_dir):
         return None, None
     
     # Export to sqlite (more reliable than JSON for programmatic parsing)
-    sqlite_path = qdrep_path + ".sqlite"
+    sqlite_path = qdrep_path.with_suffix(".sqlite")
     export_cmd = [
         "nsys", "export",
         "--type=sqlite",
-        f"--output={sqlite_path}",
+        "--output", str(sqlite_path),
         "--force-overwrite=true",
-        qdrep_path + ".nsys-rep"
+        str(qdrep_path.with_suffix(".nsys-rep"))
     ]
     
     result = subprocess.run(export_cmd, capture_output=True, text=True)
@@ -116,7 +100,8 @@ def run_job_under_nsys(job, binary_path, output_dir):
     
     if not job.get("null_kernel"):
         print(f"\t** Job {job_id} completed, trace exported to {sqlite_path}")
-    return qdrep_path, sqlite_path
+    return str(sqlite_path)
+    return str(sqlite_path)
 
 
 def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
@@ -311,18 +296,15 @@ def profile_baremetal_gemm_kernels():
     
     # Build binary
     build_binary()
-    
-    baremetal_dir = utils.get_path("BAREMETAL_MICROBENCH_DIR")
-    binary_path = baremetal_dir / "build" / "main_gemm_bm"
-    if not os.path.exists(binary_path):
+    binary_path = utils.get_path("BAREMETAL_BINARY")
+    if not binary_path.exists():
         raise RuntimeError(f"Binary not found: {binary_path}")
     
     # Run each job
-    output_dir = os.path.dirname(output_file)
     kernels = []
     
     for job in jobs:
-        qdrep_path, sqlite_path = run_job_under_nsys(job, binary_path, output_dir)
+        sqlite_path = run_job_under_nsys(job)
         
         if sqlite_path is None:
             continue
