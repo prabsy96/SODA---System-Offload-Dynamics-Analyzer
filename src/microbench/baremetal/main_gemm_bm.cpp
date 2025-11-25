@@ -253,6 +253,20 @@ void query_heuristic_algorithm_count(const GemmParams& params) {
         CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(C_desc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count, sizeof(batch_count)));
     }
     
+    // Set ORDER attributes if using row-major (matching run_gemm logic)
+    if (params.order_a == "row" || params.order_b == "row") {
+        cublasLtOrder_t order_a = (params.order_a == "col") ? CUBLASLT_ORDER_COL : CUBLASLT_ORDER_ROW;
+        cublasLtOrder_t order_b = (params.order_b == "col") ? CUBLASLT_ORDER_COL : CUBLASLT_ORDER_ROW;
+        cublasLtOrder_t order_c = CUBLASLT_ORDER_ROW;  // Output is always row-major
+        
+        CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(A_desc, CUBLASLT_MATRIX_LAYOUT_ORDER,
+                                                         &order_a, sizeof(order_a)));
+        CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(B_desc, CUBLASLT_MATRIX_LAYOUT_ORDER,
+                                                         &order_b, sizeof(order_b)));
+        CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(C_desc, CUBLASLT_MATRIX_LAYOUT_ORDER,
+                                                         &order_c, sizeof(order_c)));
+    }
+    
     // Create preference (minimal - just for query)
     cublasLtMatmulPreference_t preference;
     CHECK_CUBLASLT(cublasLtMatmulPreferenceCreate(&preference));
@@ -742,4 +756,3 @@ int main(int argc, char** argv) {
     run_gemm(params);
     return 0;
 }
-
