@@ -32,6 +32,7 @@ export PYTORCH_SCRIPTS="$PYTORCH_MICROBENCH_DIR/scripts"
 
 # Build directories
 export BAREMETAL_BUILD="$BAREMETAL_MICROBENCH_DIR/build"
+export BAREMETAL_BINARY="$BAREMETAL_BUILD/main_gemm_bm"
 
 # Virtual environment
 export PYTHON_VENV="$SODA_ROOT/.venv"

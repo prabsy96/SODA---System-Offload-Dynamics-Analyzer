@@ -177,15 +177,16 @@ def compare_results(pytorch_results, baremetal_results):
     return matches
 
 
-def print_summary(matches):
+def print_summary(matches, baseline_tax=None):
     """Print comparison summary as compact tables."""
     per_kernel_rows = []
     for match in matches:
         name_match = "✓" if match["match_status"]["name_match"] else "✗"
         config_match = "✓" if match["match_status"]["config_match"] else "✗"
+        kernel_name = match["kernel"].get("name") or "__null_kernel__"
         per_kernel_rows.append([
             match["id"],
-            match["kernel"]["name"],
+            kernel_name,
             f"{match['framework']['avg_kernel_tax']:.2f}",
             f"{match['baremetal']['avg_kernel_tax']:.2f}",
             f"{match['delta_pct']:.1f}",
@@ -193,8 +194,9 @@ def print_summary(matches):
         ])
 
     if per_kernel_rows:
+        title_suffix = f" | Baseline (null kernel): {baseline_tax:.2f} μs" if baseline_tax is not None else ""
         print_utils.comp_table(
-            title=f"Per-Kernel Results ({len(per_kernel_rows)} kernels)",
+            title=f"Per-Kernel Results ({len(per_kernel_rows)} kernels){title_suffix}",
             headers=["ID", "Kernel", "FW(μs)", "BM(μs)", "Δ(%)", "Match"],
             data=per_kernel_rows,
         )
@@ -248,10 +250,7 @@ def compare():
     matches = compare_results(pytorch_results, baremetal_results)
     
     # Print summary
-    if null_kernel_tax is not None:
-        print(f"\nBaseline launch tax (null kernel): {null_kernel_tax:.2f} μs")
-    
-    print_summary(matches)
+    print_summary(matches, baseline_tax=null_kernel_tax)
     
     # Write output
     output_data = {
