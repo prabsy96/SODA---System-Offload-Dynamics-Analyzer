@@ -59,27 +59,31 @@ def get_algo_count(job):
     Args:
         job: Job dictionary with GEMM parameters
     
-    Returns: (max_index, total_count) or (None, None) if query fails
+    Returns: total_count
+    Raises: RuntimeError if query fails
     """
     base_args = build_base_args(job) + ["--query_algo_count"]
     
     try:
         result = subprocess.run(base_args, capture_output=True, text=True, timeout=10)
-        if result.returncode != 0:
-            return None, None
-        
-        # Parse "Available algorithms: 0-X (total: Y)" format
-        for line in result.stdout.split('\n'):
-            if "Available algorithms:" in line:
-                match = re.search(r'Available algorithms: 0-(\d+)(?: \(total: (\d+)\))?', line)
-                if match:
-                    max_idx = int(match.group(1))
-                    total = int(match.group(2)) if match.group(2) else max_idx + 1
-                    return max_idx, total
-    except Exception:
-        pass
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Timeout querying algorithm count for job {job.get('id')}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to query algorithm count for job {job.get('id')}: {e}")
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Query failed for job {job.get('id')} with return code {result.returncode}:\n{result.stderr}")
     
-    return None, None
+    # Parse "Available algorithms: 0-X (total: Y)" format
+    for line in result.stdout.split('\n'):
+        if "Available algorithms:" in line:
+            match = re.search(r'Available algorithms: 0-(\d+)(?: \(total: (\d+)\))?', line)
+            if match:
+                max_idx = int(match.group(1))
+                total = int(match.group(2)) if match.group(2) else max_idx + 1
+                return total
+    
+    raise RuntimeError(f"Could not parse algorithm count from output for job {job.get('id')}:\n{result.stdout}")
 
 
 def extract_kernel_from_trace(sqlite_path):
@@ -87,6 +91,8 @@ def extract_kernel_from_trace(sqlite_path):
     
     Returns: Kernel object or None if no kernel found
     """
+
+    kernel = None
     try:
         conn = sqlite3.connect(sqlite_path)
         cursor = conn.cursor()
@@ -110,7 +116,7 @@ def extract_kernel_from_trace(sqlite_path):
         
         if row:
             start_ns, end_ns, corr_id, name, gx, gy, gz, bx, by, bz, static_smem, dyn_smem, device_id, context_id, stream_id, regs = row
-            return Kernel(
+            kernel = Kernel(
                 name=name,
                 grid=[gx, gy, gz],
                 block=[bx, by, bz],
@@ -123,10 +129,12 @@ def extract_kernel_from_trace(sqlite_path):
                 stream=stream_id,
                 registers_per_thread=regs
             )
-    except Exception:
-        pass
-    
-    return None
+    except Exception as e:
+        print(f"Error extracting kernel from trace: {e}")
+        return None
+
+    _cleanup_test_trace(sqlite_path)
+    return kernel
 
 def build_base_args(job):
     """Build base command line arguments for the C++ binary.
@@ -157,28 +165,26 @@ def build_base_args(job):
     ]
     
     
-def _run_nsys_for_algorithm(job, algo_idx, base_args):
+def _run_nsys_for_algorithm(job, algo_idx):
     """
-    Run nsys profiling for a specific algorithm index and export to sqlite.
-    Cleans up trace file after export (only sqlite is needed).
+    Run nsys profiling for a specific algorithm index, extract kernel, and clean up.
     
     Args:
         job: Job dictionary with 'id' field
         algo_idx: Algorithm index to test
-        base_args: Base command line arguments (from build_base_args)
     
     Returns:
-        (success: bool, sqlite_path: str|None, message: str)
+        (success: bool, kernel: Kernel|None, message: str)
         
         Two cases:
-        1. Success: (True, sqlite_path, "success")
-        2. Invalid index: (False, None, "Invalid algorithm index X (available: 0-Y)")
+        1. Success: (True, kernel, "success")
+        2. Failure: (False, None, error_message)
     """
-    job_id = job["id"]
     
     trace_dir = nsys_utils.get_trace_dir()
-    trace_path = trace_dir / f"match_test_{job_id}_algo{algo_idx}.nsys-rep"
+    trace_path = trace_dir / f"match_{job['id']}_algo{algo_idx}.nsys-rep"
     
+    base_args = build_base_args(job)
     args = base_args + ["--warmup", "0", "--runs", "3", "--algo_index", str(algo_idx)]
     success, sqlite_path, message = nsys_utils.nsys_profile_to_sqlite(
         trace_path, args, timeout=100, clean_trace=True
@@ -192,20 +198,19 @@ def _run_nsys_for_algorithm(job, algo_idx, base_args):
                 return (False, None, f"Invalid algorithm index {algo_idx} (available: 0-{max_available})")
         return (False, None, message or "nsys profiling failed")
     
-    return (True, sqlite_path, "success")
+    # Extract kernel from trace
+    kernel = extract_kernel_from_trace(sqlite_path)
+    
+    # Clean up sqlite file
+    utils.remove_file(sqlite_path)
+    
+    if kernel is None:
+        return (False, None, "Failed to extract kernel from trace")
+    
+    return (True, kernel, "success")
 
-def _cleanup_test_trace(sqlite_path):
-    """Clean up temporary sqlite trace file."""
-    try:
-        if sqlite_path:
-            sqlite_path_obj = Path(sqlite_path)
-            if sqlite_path_obj.exists():
-                sqlite_path_obj.unlink()
-    except:
-        pass
 
-
-def search_algorithm_index(job, max_algorithms=200):
+def find_matching_algo_idx(job, max_idx=200):
     """
     Search for cuBLASLt algorithm index that produces target kernel config.
     
@@ -226,18 +231,11 @@ def search_algorithm_index(job, max_algorithms=200):
     )
     target_kernel.print()
     
-    # Determine max algorithms to try
-    max_algo_idx, total_algo_count = get_algo_count(job)
-    if max_algo_idx is not None:
-        max_algorithms = min(max_algorithms, max_algo_idx + 1)
-    
-    # Setup base arguments
-    base_args = build_base_args(job)
     
     # Search through algorithm indices
-    for algo_idx in range(max_algorithms):
-        # Run nsys profiling for this algorithm
-        success, sqlite_path, message = _run_nsys_for_algorithm(job, algo_idx, base_args)
+    for algo_idx in range(max_idx):
+        # Run nsys profiling for this algorithm and extract kernel
+        success, actual_kernel, message = _run_nsys_for_algorithm(job, algo_idx)
         
         if not success:
             # Check if we've exhausted available algorithms
@@ -247,16 +245,6 @@ def search_algorithm_index(job, max_algorithms=200):
                 print_utils.iter_end()
                 return None
             print(f"Algorithm index {algo_idx}: {message}")
-            continue
-        
-        # Extract actual kernel from trace
-        actual_kernel = extract_kernel_from_trace(sqlite_path)
-        
-        # Clean up sqlite file immediately after extraction (we only need the kernel object)
-        _cleanup_test_trace(sqlite_path)
-        
-        if not actual_kernel:
-            print(f"Algorithm index {algo_idx}: No kernel found in trace")
             continue
         
         # Compare actual kernel with target kernel
@@ -281,18 +269,14 @@ def search_algorithm_index(job, max_algorithms=200):
     return None
 
 
-def search_algorithm_indices():
+def search_algorithms_offline():
     """
     Search for algorithm indices for all jobs and update jobs.json.
     """
     jobs_file = utils.get_path("BAREMETAL_JOBS")
     
-    # Check if jobs file exists
-    utils.ensure_file(jobs_file)
-    
     # Load jobs
-    with open(jobs_file, 'r') as f:
-        jobs_data = json.load(f)
+    jobs_data = utils.load_json(jobs_file)
     
     jobs = jobs_data.get("jobs", [])
     print(f"Loaded {len(jobs)} jobs from {jobs_file}")
@@ -300,43 +284,28 @@ def search_algorithm_indices():
     # Build binary
     build_binary()
     binary_path = utils.get_path("BAREMETAL_BINARY")
-    if not binary_path.exists():
-        raise RuntimeError(f"Binary not found: {binary_path}")
+    utils.ensure_file(binary_path)
     
     # Search for algorithm indices for each job
     algorithms_found = 0
-    searchable_jobs = []
+    total_searched = 0
     
     for job in jobs:
-        # Skip if no target kernel
-        if not job.get("target_kernel") or job["target_kernel"] == "unknown":
-            continue
 
-        # Skip null kernel jobs (no GEMM arguments to search)
+        # Skip null kernel jobs 
         if job.get("null_kernel"):
             job["matched_algo_index"] = None
             continue
         
-        searchable_jobs.append(job)
-    
-    for job in searchable_jobs:
-        job_id = job["id"]
+        total_searched += 1
         
-        # Query available algorithm count for iter_start message
-        max_algo_idx, total_algo_count = get_algo_count(job)
-        if max_algo_idx is not None:
-            num_algos = max_algo_idx + 1
-            if num_algos == 0:
-                algo_info = f" (Brute forcing 0-200)"
-            else:
-                algo_info = f" ({num_algos} algorithm{'s' if num_algos != 1 else ''})"
-        else:
-            algo_info = f" (Brute forcing 0-200)"
-        
-        print_utils.iter_start(f"Job {job_id}{algo_info}")
+        # Get algorithm count
+        total_algos = get_algo_count(job)
+        algo_info = f" ({total_algos} algorithm{'s' if total_algos != 1 else ''})"
+        print_utils.iter_start(f"Job {job['id']}{algo_info}")
         
         # Search for algorithm index
-        algo_idx = search_algorithm_index(job, max_algorithms=200)
+        algo_idx = find_matching_algo_idx(job, max_idx=total_algos)
         
         if algo_idx is not None:
             job["matched_algo_index"] = algo_idx
@@ -348,7 +317,6 @@ def search_algorithm_indices():
     jobs_data["jobs"] = jobs
     if "matching_summary" not in jobs_data:
         jobs_data["matching_summary"] = {}
-    total_searched = len(searchable_jobs)
     jobs_data["matching_summary"]["matches_found"] = algorithms_found
     jobs_data["matching_summary"]["no_matches"] = total_searched - algorithms_found
     jobs_data["matching_summary"]["total_jobs"] = total_searched

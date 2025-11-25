@@ -6,7 +6,7 @@ Reads jobs from baremetal/output/jobs.json, uses matched_algo_index from
 algorithm matching phase, runs full nsys profiling, computes kernel launch
 tax statistics, and emits baremetal/output/baremetal_gemm_runs.json.
 
-This phase assumes search_algorithm_indices.py has already been run.
+This phase assumes search_algorithms_offline.py has already been run.
 """
 
 import json
@@ -256,7 +256,7 @@ def profile_baremetal_gemm_kernels():
     matches_found = matching_summary.get("matches_found", 0)
     if matches_found == 0:
         print("Warning: No algorithm matches found in jobs.json", file=sys.stderr)
-        print("Run search_algorithm_indices.py first to search for algorithm indices", file=sys.stderr)
+        print("Run search_algorithms_offline.py first to search for algorithm indices", file=sys.stderr)
     else:
         print(f"Using {matches_found} matched algorithms")
     

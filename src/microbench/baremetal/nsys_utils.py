@@ -62,8 +62,7 @@ def nsys_profile_to_sqlite(
     if not rep_path.exists():
         return False, None, f"Trace file not created: {rep_path}"
 
-    if sqlite_path.exists():
-        sqlite_path.unlink()
+    utils.remove_file(sqlite_path)
 
     export_cmd = [
         "nsys",
@@ -84,7 +83,7 @@ def nsys_profile_to_sqlite(
     if not sqlite_path.exists():
         return False, None, f"SQLite file not created: {sqlite_path}"
 
-    if clean_trace and rep_path.exists():
-        rep_path.unlink()
+    if clean_trace:
+        utils.remove_file(rep_path)
 
     return True, str(sqlite_path), ""

@@ -12,7 +12,7 @@ from microbench.framework.pytorch.verify import compare_sequences
 from data import Sequence
 
 from microbench.baremetal.generate import generate_jobs
-from microbench.baremetal.search import search_algorithm_indices
+from microbench.baremetal.search import search_algorithms_offline
 from microbench.baremetal.profile import profile_baremetal_gemm_kernels
 from microbench.baremetal.report import compare
 
@@ -96,7 +96,7 @@ class SodaMicrobench:
         
         print_utils.subsection("Offline Search for Algorithm Indices", level=0)
         print("Searching for cuBLASLt algorithm indices for each job...")
-        search_algorithm_indices()
+        search_algorithms_offline()
         
         print_utils.subsection("Profile Baremetal (under nsys profiling)", level=0)
         print("This will run nsys profiling for multiple jobs, may take several minutes...")

@@ -157,14 +157,17 @@ def get_path(env_var: str) -> Path:
 
 def ensure_file(file_path: Path) -> None:
     """
-    Check if a file exists at the given path, print error if not found.
+    Check if a file exists at the given path, raise error if not found.
     
     Args:
         file_path: Path to file.
+    
+    Raises:
+        FileNotFoundError: If file does not exist.
     """
     file_path = Path(file_path)
     if not file_path.exists():
-        print(f"{file_path.name} not found at {file_path}")
+        raise FileNotFoundError(f"{file_path.name} not found at {file_path}")
 
 def print_subsection(title: str) -> None:
     """
@@ -187,6 +190,15 @@ def ensure_dir(path, cleanup: bool = False) -> None:
     if cleanup and path.is_dir():
         shutil.rmtree(path)
     path.mkdir(parents=True, exist_ok=True)
+
+def remove_file(file_path: str | Path) -> None:
+    """
+    Remove a file if it exists. Does nothing if file doesn't exist.
+    
+    Args:
+        file_path: Path to file to remove (str or Path object).
+    """
+    Path(file_path).unlink(missing_ok=True)
 
 def load_json(file_path: str | Path) -> Dict[str, Any]:
     """
