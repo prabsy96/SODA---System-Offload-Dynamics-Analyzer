@@ -53,9 +53,6 @@ def build_binary():
 
 
 def get_kernel_from_job(job):
-
-    if os.getenv("FORCE_NO_MATCH") == "1": 
-        target_kernel.grid = [999, 999, 999] # Force search to fail 
     """Construct a Kernel object from a job dict."""
     return Kernel(
         name=job.get("target_kernel"),
@@ -67,7 +64,8 @@ def get_kernel_from_job(job):
 
 def get_max_algo_idx(job):
     """
-    Query how many algorithms are available for this problem using --query_algo_count flag.
+    Query how many algorithms are available for this problem.
+    Uses run_gemm with warmup=0 runs=0 to query without executing.
     
     Args:
         job: Job dictionary with GEMM parameters
@@ -75,7 +73,7 @@ def get_max_algo_idx(job):
     Returns: total_count
     Raises: RuntimeError if query fails
     """
-    base_args = build_base_args(job) + ["--query_algo_count"]
+    base_args = build_base_args(job) + ["--warmup", "0", "--runs", "0", "--algo_index", "0"]
     
     try:
         result = subprocess.run(base_args, capture_output=True, text=True, timeout=10)
@@ -110,7 +108,7 @@ def extract_kernel_from_trace(sqlite_path):
         conn = sqlite3.connect(sqlite_path)
         cursor = conn.cursor()
         
-        # Query for kernel events (GEMM kernels only) with all available fields
+        # Query for all kernel events with all available fields
         cursor.execute("""
             SELECT k.start, k.end, k.correlationId, s.value, 
                    k.gridX, k.gridY, k.gridZ,
@@ -120,28 +118,32 @@ def extract_kernel_from_trace(sqlite_path):
                    k.registersPerThread
             FROM CUPTI_ACTIVITY_KIND_KERNEL as k
             JOIN StringIds as s ON k.demangledName = s.id
-            WHERE LOWER(s.value) LIKE '%gemm%'
-            LIMIT 1
         """)
         
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row:
+        kernel = None
+        # Fetch all rows and filter in Python
+        for row in cursor.fetchall():
             start_ns, end_ns, corr_id, name, gx, gy, gz, bx, by, bz, static_smem, dyn_smem, device_id, context_id, stream_id, regs = row
-            kernel = Kernel(
-                name=name,
-                grid=[gx, gy, gz],
-                block=[bx, by, bz],
-                shared_memory=static_smem + dyn_smem,
-                correlation=corr_id,
-                ts=start_ns / 1000.0,  # Convert nanoseconds to microseconds
-                dur=(end_ns - start_ns) / 1000.0,  # Convert nanoseconds to microseconds
-                device=device_id,
-                context=context_id,
-                stream=stream_id,
-                registers_per_thread=regs
-            )
+
+            if kernel is not None and "gemm" in name.lower(): 
+                raise RuntimeError(f"Multiple kernels found in trace: {kernel.name} and {name}")
+            
+            if "gemm" in name.lower() or "null" in name.lower(): 
+                kernel = Kernel(
+                    name=name,
+                    grid=[gx, gy, gz],
+                    block=[bx, by, bz],
+                    shared_memory=static_smem + dyn_smem,
+                    correlation=corr_id,
+                    ts=start_ns / 1000.0,  # Convert nanoseconds to microseconds
+                    dur=(end_ns - start_ns) / 1000.0,  # Convert nanoseconds to microseconds
+                    device=device_id,
+                    context=context_id,
+                    stream=stream_id,
+                    registers_per_thread=regs
+                )
+            
+        conn.close()
     except Exception as e:
         print(f"Error extracting kernel from trace: {e}")
         return None
@@ -189,30 +191,19 @@ def test_cublas_algo(job, algo_idx):
     
     Returns:
         (success: bool, kernel: Kernel|None, message: str)
-        
-        Cases:
-        1. Success: (True, kernel, "success")
-        2. Exhausted algorithms: (False, None, "Exhausted algorithms: <msg>")
-        3. Other failure: (False, None, "<error message>")
     """
     
     trace_dir = nsys_utils.get_trace_dir()
     trace_path = trace_dir / f"match_{job['id']}_algo{algo_idx}.nsys-rep"
     
     base_args = build_base_args(job)
-    args = base_args + ["--warmup", "0", "--runs", "3", "--algo_index", str(algo_idx)]
+    args = base_args + ["--warmup", "0", "--runs", "1", "--algo_index", str(algo_idx)]
     success, sqlite_path, message = nsys_utils.nsys_profile_to_sqlite(
         trace_path, args, timeout=100, clean_trace=True
     )
     
     if not success:
-        if message and "Invalid algorithm index" in message:
-            match = re.search(r'available: 0-(\d+)', message)
-            if match:
-                max_algo_idx = int(match.group(1))
-                return (False, None, f"Invalid algorithm index {algo_idx} (available: 0-{max_algo_idx})")
-        # Other errors
-        return (False, None, message or "nsys profiling failed")
+        return (False, None, message)
     
     # Extract kernel from trace
     kernel = extract_kernel_from_trace(sqlite_path)
@@ -221,7 +212,6 @@ def test_cublas_algo(job, algo_idx):
     utils.remove_file(sqlite_path)
     
     if kernel is None:
-        print(f"Algorithm index {algo_idx}: Failed to extract kernel from trace")
         return (False, None, "Failed to extract kernel from trace")
     
     # Successful profiling and kernel extraction
@@ -243,7 +233,7 @@ def sweep_cublas_algos(job, max_idx=200):
     target_kernel = get_kernel_from_job(job)
 
     # Force cublas algo search to fail (used for testing)
-    if os.getenv("FORCE_NO_MATCH") == "1":
+    if os.getenv("FORCE_NO_MATCH") == "1" or True:
         target_kernel.grid = [999, 999, 999]
     target_kernel.print()
 
@@ -254,10 +244,6 @@ def sweep_cublas_algos(job, max_idx=200):
 
         if not success:
             print(message)
-            # Detect exhausted algorithms condition
-            if "Invalid algorithm index" in message:
-                break
-            # Otherwise continue to next algorithm
             continue
 
         # Compare actual kernel with target kernel

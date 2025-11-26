@@ -49,7 +49,6 @@ struct GemmParams {
     int algo_id;  // Algorithm ID to use directly (from cublasLtMatmulAlgoGetIds)
     bool has_algo_id;
     bool list_algo_ids;  // If true, just list all algorithm IDs and exit
-    bool query_algo_count;  // If true, query heuristic algorithm count and exit
     bool null_kernel;  // If true, launch empty kernel to measure baseline launch tax
 };
     
@@ -76,7 +75,6 @@ void parse_args(int argc, char** argv, GemmParams& params) {
     params.has_algo_id = false;
     params.algo_id = 0;
     params.list_algo_ids = false;
-    params.query_algo_count = false;
     params.null_kernel = false;
     
     for (int i = 1; i < argc; i++) {
@@ -125,9 +123,6 @@ void parse_args(int argc, char** argv, GemmParams& params) {
         } else if (arg == "--list_algo_ids") {
             // List all available algorithm IDs and exit
             params.list_algo_ids = true;
-        } else if (arg == "--query_algo_count") {
-            // Query heuristic algorithm count and exit
-            params.query_algo_count = true;
         } else if (arg == "--null_kernel") {
             // Launch empty kernel to measure baseline launch tax
             params.null_kernel = true;
@@ -208,99 +203,6 @@ void list_all_algorithm_ids(const GemmParams& params) {
     }
     std::cout << std::endl;
     
-    CHECK_CUBLASLT(cublasLtDestroy(handle));
-}
-
-void query_heuristic_algorithm_count(const GemmParams& params) {
-    // Get CUDA types
-    cudaDataType_t cuda_dtype = get_cuda_dtype(params.dtype);
-    cublasComputeType_t compute_type = get_compute_type(params.dtype);
-    
-    // Create cuBLASLt handle
-    cublasLtHandle_t handle;
-    CHECK_CUBLASLT(cublasLtCreate(&handle));
-    
-    // Matrix dimensions
-    int M = params.m;
-    int N = params.n;
-    int K = params.k;
-    int lda = params.lda;
-    int ldb = params.ldb;
-    int ldc = params.ldc;
-    int batch = params.batch;
-    
-    // Create matrix layouts (simplified - just for query)
-    cublasLtMatrixLayout_t A_desc, B_desc, C_desc;
-    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&A_desc, cuda_dtype, M, K, lda));
-    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&B_desc, cuda_dtype, K, N, ldb));
-    CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&C_desc, cuda_dtype, M, N, ldc));
-    
-    // Set transpose
-    cublasOperation_t trans_a = get_transpose_op(params.trans_a);
-    cublasOperation_t trans_b = get_transpose_op(params.trans_b);
-    
-    // Create matmul descriptor
-    cublasLtMatmulDesc_t matmul_desc;
-    CHECK_CUBLASLT(cublasLtMatmulDescCreate(&matmul_desc, compute_type, cuda_dtype));
-    CHECK_CUBLASLT(cublasLtMatmulDescSetAttribute(matmul_desc, CUBLASLT_MATMUL_DESC_TRANSA, &trans_a, sizeof(trans_a)));
-    CHECK_CUBLASLT(cublasLtMatmulDescSetAttribute(matmul_desc, CUBLASLT_MATMUL_DESC_TRANSB, &trans_b, sizeof(trans_b)));
-    
-    // Set batch if needed
-    if (batch > 1) {
-        int64_t batch_count = batch;
-        CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(A_desc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count, sizeof(batch_count)));
-        CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(B_desc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count, sizeof(batch_count)));
-        CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(C_desc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count, sizeof(batch_count)));
-    }
-    
-    // Set ORDER attributes if using row-major (matching run_gemm logic)
-    if (params.order_a == "row" || params.order_b == "row") {
-        cublasLtOrder_t order_a = (params.order_a == "col") ? CUBLASLT_ORDER_COL : CUBLASLT_ORDER_ROW;
-        cublasLtOrder_t order_b = (params.order_b == "col") ? CUBLASLT_ORDER_COL : CUBLASLT_ORDER_ROW;
-        cublasLtOrder_t order_c = CUBLASLT_ORDER_ROW;  // Output is always row-major
-        
-        CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(A_desc, CUBLASLT_MATRIX_LAYOUT_ORDER,
-                                                         &order_a, sizeof(order_a)));
-        CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(B_desc, CUBLASLT_MATRIX_LAYOUT_ORDER,
-                                                         &order_b, sizeof(order_b)));
-        CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(C_desc, CUBLASLT_MATRIX_LAYOUT_ORDER,
-                                                         &order_c, sizeof(order_c)));
-    }
-    
-    // Create preference (minimal - just for query)
-    cublasLtMatmulPreference_t preference;
-    CHECK_CUBLASLT(cublasLtMatmulPreferenceCreate(&preference));
-    
-    // Query heuristic with large count to get all available
-    const int MAX_ALGO_COUNT = 200;
-    std::vector<cublasLtMatmulHeuristicResult_t> heuristic_results(MAX_ALGO_COUNT);
-    int returned_results = 0;
-    
-    CHECK_CUBLASLT(cublasLtMatmulAlgoGetHeuristic(handle, matmul_desc,
-                                                   A_desc, B_desc, C_desc, C_desc,
-                                                   preference, MAX_ALGO_COUNT,
-                                                   heuristic_results.data(), &returned_results));
-    
-    if (returned_results == 0) {
-        std::cerr << "Error: No cuBLASLt algorithm found" << std::endl;
-        CHECK_CUBLASLT(cublasLtMatmulPreferenceDestroy(preference));
-        CHECK_CUBLASLT(cublasLtMatmulDescDestroy(matmul_desc));
-        CHECK_CUBLASLT(cublasLtMatrixLayoutDestroy(A_desc));
-        CHECK_CUBLASLT(cublasLtMatrixLayoutDestroy(B_desc));
-        CHECK_CUBLASLT(cublasLtMatrixLayoutDestroy(C_desc));
-        CHECK_CUBLASLT(cublasLtDestroy(handle));
-        exit(EXIT_FAILURE);
-    }
-    
-    // Print count and exit
-    std::cout << "Available algorithms: 0-" << (returned_results - 1) << " (total: " << returned_results << ")" << std::endl;
-    
-    // Cleanup
-    CHECK_CUBLASLT(cublasLtMatmulPreferenceDestroy(preference));
-    CHECK_CUBLASLT(cublasLtMatmulDescDestroy(matmul_desc));
-    CHECK_CUBLASLT(cublasLtMatrixLayoutDestroy(A_desc));
-    CHECK_CUBLASLT(cublasLtMatrixLayoutDestroy(B_desc));
-    CHECK_CUBLASLT(cublasLtMatrixLayoutDestroy(C_desc));
     CHECK_CUBLASLT(cublasLtDestroy(handle));
 }
 
@@ -745,11 +647,6 @@ int main(int argc, char** argv) {
     
     if (params.list_algo_ids) {
         list_all_algorithm_ids(params);
-        return 0;
-    }
-    
-    if (params.query_algo_count) {
-        query_heuristic_algorithm_count(params);
         return 0;
     }
     
