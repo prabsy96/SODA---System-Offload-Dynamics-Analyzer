@@ -2,11 +2,11 @@
 """
 Profile baremetal GEMM kernels using matched algorithms (profiling phase).
 
-Reads jobs from baremetal/output/jobs.json, uses matched_algo_index from
+Reads jobs from baremetal/output/jobs.json, uses cublas_index from
 algorithm matching phase, runs full nsys profiling, computes kernel launch
 tax statistics, and emits baremetal/output/baremetal_gemm_runs.json.
 
-This phase assumes search_algorithms_offline.py has already been run.
+This phase assumes search_cublas_algos_offline.py has already been run.
 """
 
 import json
@@ -30,7 +30,7 @@ def run_job_under_nsys(job):
         print(f"Skipping job {job_id} (batched GEMM with non-standard layout)")
         return None
     
-    print(f"Running job {job_id}...")
+    print(f"Running job {job_id}")
     
     binary_path = utils.get_path("BAREMETAL_BINARY")
     trace_dir = nsys_utils.get_trace_dir()
@@ -44,7 +44,7 @@ def run_job_under_nsys(job):
             "--runs", str(job["runs"]),
         ]
     else:
-        matched_algo_idx = job.get("matched_algo_index")
+        matched_algo_idx = job.get("cublas_index")
         
         # Build command line args 
         args = build_base_args(job) + [
@@ -116,7 +116,7 @@ def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
     except Exception as e:
         print(f"Warning: Could not query CUDA runtime events: {e}", file=sys.stderr)
     
-    # Query for kernel events
+    # Query for kernel events (with all available fields)
     # For null kernel, get any kernel; for GEMM, filter by name
     kernels = []
     try:
@@ -125,12 +125,14 @@ def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
             SELECT k.start, k.end, k.correlationId, s.value, 
                    k.gridX, k.gridY, k.gridZ,
                    k.blockX, k.blockY, k.blockZ,
-                   k.staticSharedMemory, k.dynamicSharedMemory
+                   k.staticSharedMemory, k.dynamicSharedMemory,
+                   k.deviceId, k.contextId, k.streamId,
+                   k.registersPerThread
             FROM CUPTI_ACTIVITY_KIND_KERNEL as k
             JOIN StringIds as s ON k.demangledName = s.id
         """)
         for row in cursor.fetchall():
-            start_ns, end_ns, corr_id, name, gx, gy, gz, bx, by, bz, static_smem, dyn_smem = row
+            start_ns, end_ns, corr_id, name, gx, gy, gz, bx, by, bz, static_smem, dyn_smem, device_id, context_id, stream_id, regs = row
             # For GEMM jobs, only include kernels with 'gemm' in name
             # For null kernel, include all kernels
             if "gemm" not in name.lower() and "null" not in name.lower():
@@ -143,6 +145,10 @@ def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
                 "grid": [gx, gy, gz],
                 "block": [bx, by, bz],
                 "shared_memory": static_smem + dyn_smem,
+                "device": device_id,
+                "context": context_id,
+                "stream": stream_id,
+                "registers_per_thread": regs,
             })
     except Exception as e:
         print(f"Warning: Could not query kernel events: {e}", file=sys.stderr)
@@ -249,16 +255,16 @@ def profile_baremetal_gemm_kernels():
         jobs_data = json.load(f)
     
     jobs = jobs_data.get("jobs", [])
-    print(f"Loaded {len(jobs)} jobs from {jobs_file}")
+    print(f"Loaded {len(jobs)} jobs.")
     
     # Check if matching has been done
     matching_summary = jobs_data.get("matching_summary", {})
-    matches_found = matching_summary.get("matches_found", 0)
-    if matches_found == 0:
+    algos_found = matching_summary.get("algos_found", 0)
+    if algos_found == 0:
         print("Warning: No algorithm matches found in jobs.json", file=sys.stderr)
-        print("Run search_algorithms_offline.py first to search for algorithm indices", file=sys.stderr)
+        print("Run search_cublas_algos_offline.py first to search for algorithm indices", file=sys.stderr)
     else:
-        print(f"Using {matches_found} matched algorithms")
+        print(f"Using {algos_found} matched algorithms")
     
     # Build binary
     build_binary()

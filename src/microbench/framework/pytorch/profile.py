@@ -130,7 +130,7 @@ def replay_sequences_from_cpu_ops(
         expected_kernel = utils.clean_kernel_name(event_sequence['kernel']['name'])
         seq_idx = i+1 
         
-        print(f"* [{seq_idx}/{len(event_sequences)}] {cpu_op['name']} -> {expected_kernel}")
+        print(f"[{seq_idx}/{len(event_sequences)}] {cpu_op['name']} -> {expected_kernel}")
         
         # Generate trace filename based on operation name and expected kernel name
         trace_file_name = utils.format_sequence_filename(

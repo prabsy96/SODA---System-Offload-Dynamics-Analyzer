@@ -4,7 +4,7 @@ Search for cuBLASLt algorithm indices that produce PyTorch kernel configurations
 
 Reads jobs from baremetal/output/jobs.json, searches for cuBLASLt algorithm
 indices that produce the same kernel configurations as PyTorch, and updates
-jobs.json with matched_algo_index field.
+jobs.json with cublas_index field.
 
 This is an offline process that can be run separately from profiling.
 """
@@ -26,7 +26,7 @@ from microbench.baremetal import nsys_utils
 def build_binary():
     """Build the C++ binary using cmake."""
     baremetal_dir = utils.get_path("BAREMETAL_MICROBENCH_DIR")
-    print("Building C++ binary...")
+    print("Building C++ binary")
     build_dir = baremetal_dir / "build"
     
     # Configure
@@ -52,7 +52,20 @@ def build_binary():
     print("Build successful")
 
 
-def get_algo_count(job):
+def get_kernel_from_job(job):
+
+    if os.getenv("FORCE_NO_MATCH") == "1": 
+        target_kernel.grid = [999, 999, 999] # Force search to fail 
+    """Construct a Kernel object from a job dict."""
+    return Kernel(
+        name=job.get("target_kernel"),
+        grid=job.get("target_grid"),
+        block=job.get("target_block"),
+        shared_memory=job.get("target_shared_mem"),
+        registers_per_thread=job.get("target_registers_per_thread")
+    )
+
+def get_max_algo_idx(job):
     """
     Query how many algorithms are available for this problem using --query_algo_count flag.
     
@@ -80,11 +93,11 @@ def get_algo_count(job):
             match = re.search(r'Available algorithms: 0-(\d+)(?: \(total: (\d+)\))?', line)
             if match:
                 max_idx = int(match.group(1))
-                total = int(match.group(2)) if match.group(2) else max_idx + 1
-                return total
+                total = int(match.group(2)) 
+                assert max_idx == total - 1
+                return max_idx
     
     raise RuntimeError(f"Could not parse algorithm count from output for job {job.get('id')}:\n{result.stdout}")
-
 
 def extract_kernel_from_trace(sqlite_path):
     """Extract kernel from nsys sqlite trace.
@@ -133,7 +146,7 @@ def extract_kernel_from_trace(sqlite_path):
         print(f"Error extracting kernel from trace: {e}")
         return None
 
-    _cleanup_test_trace(sqlite_path)
+    utils.remove_file(sqlite_path)
     return kernel
 
 def build_base_args(job):
@@ -165,9 +178,10 @@ def build_base_args(job):
     ]
     
     
-def _run_nsys_for_algorithm(job, algo_idx):
+def test_cublas_algo(job, algo_idx):
     """
     Run nsys profiling for a specific algorithm index, extract kernel, and clean up.
+    Handles errors internally and returns a simple context message.
     
     Args:
         job: Job dictionary with 'id' field
@@ -176,9 +190,10 @@ def _run_nsys_for_algorithm(job, algo_idx):
     Returns:
         (success: bool, kernel: Kernel|None, message: str)
         
-        Two cases:
+        Cases:
         1. Success: (True, kernel, "success")
-        2. Failure: (False, None, error_message)
+        2. Exhausted algorithms: (False, None, "Exhausted algorithms: <msg>")
+        3. Other failure: (False, None, "<error message>")
     """
     
     trace_dir = nsys_utils.get_trace_dir()
@@ -194,8 +209,9 @@ def _run_nsys_for_algorithm(job, algo_idx):
         if message and "Invalid algorithm index" in message:
             match = re.search(r'available: 0-(\d+)', message)
             if match:
-                max_available = int(match.group(1))
-                return (False, None, f"Invalid algorithm index {algo_idx} (available: 0-{max_available})")
+                max_algo_idx = int(match.group(1))
+                return (False, None, f"Invalid algorithm index {algo_idx} (available: 0-{max_algo_idx})")
+        # Other errors
         return (False, None, message or "nsys profiling failed")
     
     # Extract kernel from trace
@@ -205,71 +221,67 @@ def _run_nsys_for_algorithm(job, algo_idx):
     utils.remove_file(sqlite_path)
     
     if kernel is None:
+        print(f"Algorithm index {algo_idx}: Failed to extract kernel from trace")
         return (False, None, "Failed to extract kernel from trace")
     
+    # Successful profiling and kernel extraction
     return (True, kernel, "success")
 
 
-def find_matching_algo_idx(job, max_idx=200):
-    """
-    Search for cuBLASLt algorithm index that produces target kernel config.
-    
+def sweep_cublas_algos(job, max_idx=200):
+    """Search for cuBLASLt algorithm index that produces target kernel config.
+
     With PyTorch-matched settings, algorithm index 0 should produce the same kernel.
     Falls back to searching other algorithm indices if index 0 doesn't match.
-    
-    Returns: algorithm index or None if no match found
-    """
-    algo_idx = None
 
-    # Build target kernel configuration
-    target_kernel = Kernel(
-        name=job.get("target_kernel"),
-        grid=[999, 999, 999] if os.getenv("FORCE_NO_MATCH") == "1" else job.get("target_grid"),
-        block=job.get("target_block"),
-        shared_memory=job.get("target_shared_mem"),
-        registers_per_thread=job.get("target_registers_per_thread")
-    )
+    Returns: algorithm index or None if no match found.
+    """
+    # Initialize result variables
+    match_algo_idx = None
+
+    # Get target kernel from job
+    target_kernel = get_kernel_from_job(job)
+
+    # Force cublas algo search to fail (used for testing)
+    if os.getenv("FORCE_NO_MATCH") == "1":
+        target_kernel.grid = [999, 999, 999]
     target_kernel.print()
-    
-    
-    # Search through algorithm indices
-    for algo_idx in range(max_idx):
-        # Run nsys profiling for this algorithm and extract kernel
-        success, actual_kernel, message = _run_nsys_for_algorithm(job, algo_idx)
-        
+
+    # Sweep through algorithm indices
+    for algo_idx in range(max_idx +1):
+        # Test cuBLAS algo index and extract generated kernel
+        success, actual_kernel, message = test_cublas_algo(job, algo_idx)
+
         if not success:
-            # Check if we've exhausted available algorithms
+            print(message)
+            # Detect exhausted algorithms condition
             if "Invalid algorithm index" in message:
-                print(f"Algorithm index {algo_idx}: {message}")
-                print(f"No matching algorithm found after exhausting available indices")
-                print_utils.iter_end()
-                return None
-            print(f"Algorithm index {algo_idx}: {message}")
+                break
+            # Otherwise continue to next algorithm
             continue
-        
+
         # Compare actual kernel with target kernel
         match_result = actual_kernel.compare(
-            target_kernel, 
-            show_table=True, 
-            title=f"Algorithm #{algo_idx}", 
-            full=False
+            target_kernel,
+            show_table=True,
+            title=f"Algorithm #{algo_idx}",
+            full=False,
         )
-        
+
         if match_result["match"]:
-            print(f"Search completed @ algo index {algo_idx}")
-            print_utils.iter_end()
-            return algo_idx
-    
-    # No match found after searching all algorithms
-    if algo_idx is not None:
-        print(f"No matching algorithm found after trying {algo_idx + 1} algorithm(s)")
+            match_algo_idx = algo_idx
+            break
+
+    # Report outcome
+    if match_algo_idx is None:
+        print(f"No cuBLAS algorithm found.")
     else:
-        print(f"No matching algorithm found")
-    print_utils.iter_end()
-    return None
+        print(f"Found cuBLAS algorithm @ index {match_algo_idx}")
+
+    return match_algo_idx
 
 
-def search_algorithms_offline():
+def search_cublas_algos_offline():
     """
     Search for algorithm indices for all jobs and update jobs.json.
     """
@@ -277,7 +289,6 @@ def search_algorithms_offline():
     
     # Load jobs
     jobs_data = utils.load_json(jobs_file)
-    
     jobs = jobs_data.get("jobs", [])
     print(f"Loaded {len(jobs)} jobs from {jobs_file}")
     
@@ -286,40 +297,47 @@ def search_algorithms_offline():
     binary_path = utils.get_path("BAREMETAL_BINARY")
     utils.ensure_file(binary_path)
     
-    # Search for algorithm indices for each job
-    algorithms_found = 0
-    total_searched = 0
+    # Counters
+    num_algos_found = 0
+    num_algos_not_found = 0
+    num_jobs_searched = 0
     
     for job in jobs:
 
         # Skip null kernel jobs 
         if job.get("null_kernel"):
-            job["matched_algo_index"] = None
+            job["cublas_index"] = None
             continue
         
-        total_searched += 1
-        
         # Get algorithm count
-        total_algos = get_algo_count(job)
-        algo_info = f" ({total_algos} algorithm{'s' if total_algos != 1 else ''})"
-        print_utils.iter_start(f"Job {job['id']}{algo_info}")
+        max_algo_idx = get_max_algo_idx(job)
+        algo_info = f"(0-{max_algo_idx} algorithms)"
+        print_utils.iter_start(f"Job {job['id']} {algo_info}")
         
         # Search for algorithm index
-        algo_idx = find_matching_algo_idx(job, max_idx=total_algos)
-        
-        if algo_idx is not None:
-            job["matched_algo_index"] = algo_idx
-            algorithms_found += 1
+        algo_idx = sweep_cublas_algos(job, max_idx=max_algo_idx)
+
+        # Update cublas_index; algo_idx is None if no match found
+        job["cublas_index"] = algo_idx
+
+        # Update counters
+        if algo_idx is None:
+            num_algos_not_found += 1
         else:
-            job["matched_algo_index"] = None  # Explicitly set to None when no match found
+            num_algos_found += 1
+        num_jobs_searched += 1
+
+        print_utils.iter_end()
     
-    # Update jobs.json with matched_algo_index 
+    # Update jobs.json with cublas_index and matching summary
     jobs_data["jobs"] = jobs
     if "matching_summary" not in jobs_data:
         jobs_data["matching_summary"] = {}
-    jobs_data["matching_summary"]["matches_found"] = algorithms_found
-    jobs_data["matching_summary"]["no_matches"] = total_searched - algorithms_found
-    jobs_data["matching_summary"]["total_jobs"] = total_searched
+    jobs_data["matching_summary"]["algos_found"] = num_algos_found
+    jobs_data["matching_summary"]["algos_not_found"] = num_algos_not_found
+    jobs_data["matching_summary"]["total_jobs"] = num_jobs_searched
+
+    assert num_jobs_searched == num_algos_found + num_algos_not_found, "Total jobs != Algos found + Algos not found"
     
     utils.save_json(jobs_file, jobs_data)
     
@@ -328,8 +346,8 @@ def search_algorithms_offline():
         title="Summary",
         headers=["Metric", "Count"],
         data=[
-            ["Total jobs", f"{total_searched}"],
-            ["Algorithms found", f"{algorithms_found}"],
-            ["No algorithm found", f"{total_searched - algorithms_found}"],
+            ["Jobs searched", f"{num_jobs_searched}"],
+            ["Algorithms found", f"{num_algos_found}"],
+            ["No algorithm found", f"{num_algos_not_found}"],
         ]
     )

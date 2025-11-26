@@ -74,7 +74,7 @@ class SodaAnalyzer:
             - avg_kernel_dur: Average kernel duration results
         """
         LOGGER.info("=== Analyzing Trace Data ===")
-        LOGGER.info(f"* Analyzing {len(self.event_sequences)} event sequences...")
+        LOGGER.info(f"Analyzing {len(self.event_sequences)} event sequences")
         event_sequences = utils.calculate_per_seq_launch_tax(list(self.event_sequences))
         
         # Analyze per-stream metrics
@@ -267,7 +267,7 @@ class SodaAnalyzer:
         # Save to file
         utils.save_json(self.report_file, output)
         
-        LOGGER.info(f"* Metrics exported to: {self.report_file}")
+        LOGGER.info(f"Metrics exported to: {self.report_file}")
         return str(self.report_file)
     
     def run(self) -> str:
@@ -514,7 +514,7 @@ class ModelTracer:
         
         # Load trace data into memory immediately
         self.trace_data = utils.load_json(self.trace_file)
-        LOGGER.info(f"* Chrome trace file generated at: {self.trace_file}")
+        LOGGER.info(f"Chrome trace file generated at: {self.trace_file}")
 
     def process(self) -> None:
         """
@@ -522,7 +522,7 @@ class ModelTracer:
         """
         self.events = utils.collect_events(self.trace_data)
         self.event_sequences = utils.link_sequences(self.events)
-        LOGGER.info(f"* Collected {len(self.event_sequences)} event sequences.")
+        LOGGER.info(f"Collected {len(self.event_sequences)} event sequences.")
 
     def trace_forward_pass_for_decoder(self) -> None:
         """
@@ -593,7 +593,7 @@ def main() -> int:
         args = utils.parse_and_validate_args()
 
         # Create tracer (derives experiment/output paths internally)
-        print(f"Loading model: {args.model} with precision {args.precision}...")
+        print(f"Loading model: {args.model} with precision {args.precision}")
         tracer = ModelTracer(args=args)
         
         # Setup logger for tracer

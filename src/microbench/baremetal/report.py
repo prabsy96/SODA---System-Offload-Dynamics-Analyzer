@@ -229,11 +229,11 @@ def compare():
     utils.ensure_file(pytorch_file)
     utils.ensure_file(baremetal_file)
     
-    print(f"Loading PyTorch results from {pytorch_file}...")
+    print(f"Loading PyTorch results from {pytorch_file}")
     pytorch_results = load_pytorch_results(pytorch_file)
     print(f"Loaded {len(pytorch_results)} PyTorch event sequences")
     
-    print(f"Loading baremetal results from {baremetal_file}...")
+    print(f"Loading baremetal results from {baremetal_file}")
     baremetal_results = load_baremetal_results(baremetal_file)
     print(f"Loaded {len(baremetal_results)} baremetal kernels")
     
@@ -263,4 +263,3 @@ def compare():
     }
     
     utils.save_json(output_file, output_data)
-    print("\nDone.")

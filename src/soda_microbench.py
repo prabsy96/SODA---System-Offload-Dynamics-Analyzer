@@ -12,7 +12,7 @@ from microbench.framework.pytorch.verify import compare_sequences
 from data import Sequence
 
 from microbench.baremetal.generate import generate_jobs
-from microbench.baremetal.search import search_algorithms_offline
+from microbench.baremetal.search import search_cublas_algos_offline
 from microbench.baremetal.profile import profile_baremetal_gemm_kernels
 from microbench.baremetal.report import compare
 
@@ -94,12 +94,11 @@ class SodaMicrobench:
         print_utils.subsection("Generate Baremetal Jobs", level=0)
         generate_jobs(target_gemm_sequences, warmup=self.warmup, runs=self.runs)
         
-        print_utils.subsection("Offline Search for Algorithm Indices", level=0)
-        print("Searching for cuBLASLt algorithm indices for each job...")
-        search_algorithms_offline()
+        print_utils.subsection("Offline Search for cuBLASLt Algorithms", level=0)
+        search_cublas_algos_offline()
         
         print_utils.subsection("Profile Baremetal (under nsys profiling)", level=0)
-        print("This will run nsys profiling for multiple jobs, may take several minutes...")
+        print("This will run nsys profiling for multiple jobs, may take several minutes")
         profile_baremetal_gemm_kernels()
         
         print_utils.subsection("Compare PyTorch vs Baremetal", level=0)
@@ -108,11 +107,5 @@ class SodaMicrobench:
         # Print summary
         jobs_file = utils.get_path("BAREMETAL_JOBS")
         baremetal_gemm_kernels_file = utils.get_path("BAREMETAL_GEMM_KERNELS")
-        report_file = utils.get_path("FINAL_REPORT")
-        
-        print("==============================================")
-        print("Done! Check results in:")
-        print(f"  - {jobs_file}")
-        print(f"  - {baremetal_gemm_kernels_file}")
-        print(f"  - {report_file}")
-        print("==============================================")
+
+        print("Done!")
