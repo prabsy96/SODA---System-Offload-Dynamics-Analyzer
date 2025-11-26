@@ -31,12 +31,12 @@
 # --- Execution Block ---
 
 # Load necessary modules
- echo "Loading modules..."
+ echo "Loading modules"
  module load nvhpc/24.9 cuda12.2/nsight/12.2.2 cuda12.2/blas/12.2.2 cuda12.2/fft/12.2.2 cuda12.2/toolkit/12.2.2 cuda12.2/profiler/12.2.2 gcc11/11.3.0
  module list # Optional: lists loaded modules for debugging
 
 # Activate your environment
-echo "Activating environment..."
+echo "Activating environment"
 export PATH=~/miniconda3/bin:$PATH
 source ~/miniconda3/etc/profile.d/conda.sh
 conda init bash
@@ -49,13 +49,13 @@ echo "Python version: $(python --version)"
 
 # Install dependencies if not present
 if ! python -c "import torch, torchvision, transformers, accelerate, matplotlib, numpy"; then
-    echo "Installing dependencies..."
+    echo "Installing dependencies"
     conda install -c conda-forge accelerate matplotlib numpy transformers -y
     conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia -y
 fi
 
 # Run your script
-echo "Running script..."
+echo "Running script"
 
 # Check if SODA environment is loaded
 if [ -z "$SODA_ENV_LOADED" ]; then

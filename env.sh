@@ -120,7 +120,7 @@ cleanup() {
 
 # Helper function to reinstall the soda package
 reinstall() {
-    echo "Reinstalling soda package..."
+    echo "Reinstalling soda package"
     pip install --ignore-installed --force-reinstall --no-deps -e "$SODA_ROOT"
     echo "Soda package reinstalled"
 }

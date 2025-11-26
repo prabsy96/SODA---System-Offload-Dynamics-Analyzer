@@ -27,9 +27,11 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# SODA-specific output files
+# Output directories
 soda_results/
-graph.png
+*.png
+*output*
+*results*
 
 # Log and output files
 *.log
