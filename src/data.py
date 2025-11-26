@@ -306,8 +306,10 @@ class Kernel:
     @classmethod
     def from_dict(cls, kernel_dict: Optional[Dict[str, Any]]) -> Optional['Kernel']:
         """Create Kernel from dictionary."""
+        
         if not kernel_dict:
             return None
+
         return cls(
             name=kernel_dict.get("name"),
             grid=kernel_dict.get("grid"),
@@ -346,7 +348,7 @@ class CPUOp:
                  dur: Optional[float] = None,
                  external_id: Optional[int] = None):
         """Initialize CPU operation."""
-        self.name = name or ""
+        self.name = name or "unknown"
         self.input_dims = input_dims or []
         self.input_strides = input_strides or []
         self.input_type = input_type or []
@@ -512,6 +514,9 @@ class Sequence:
     @classmethod
     def from_dict(cls, sequence_dict: Dict[str, Any]) -> 'Sequence':
         """Create Sequence from dictionary."""
+        if not sequence_dict:
+            return None
+
         cpu_op = CPUOp.from_dict(sequence_dict.get("cpu_op"))
         kernel = Kernel.from_dict(sequence_dict.get("kernel"))
         return cls(cpu_op=cpu_op, kernel=kernel)

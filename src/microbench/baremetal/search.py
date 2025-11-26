@@ -247,7 +247,7 @@ def search_cublas_algos_offline():
     # Load jobs
     jobs_data = utils.load_json(jobs_file)
     jobs = jobs_data.get("jobs", [])
-    print(f"Loaded {len(jobs)} jobs from {jobs_file}")
+    print(f"Loaded {len(jobs)}")
     
     # Build binary
     build_binary()
@@ -286,11 +286,13 @@ def search_cublas_algos_offline():
 
     # Update jobs.json with cublas_index and matching summary
     jobs_data["jobs"] = jobs
-    if "cublas_algo_summary" not in jobs_data:
-        jobs_data["cublas_algo_summary"] = {}
-    jobs_data["cublas_algo_summary"]["algos_found"] = num_algos_found
-    jobs_data["cublas_algo_summary"]["algos_not_found"] = num_algos_not_found
-    jobs_data["cublas_algo_summary"]["total_jobs"] = num_jobs_searched
+
+    # Update summary
+    jobs_data["summary"]["offline_cublas_search"] = {
+        "algos_found": num_algos_found,
+        "algos_not_found": num_algos_not_found,
+        "total_jobs": num_jobs_searched
+    }
 
     assert num_jobs_searched == num_algos_found + num_algos_not_found, "Total jobs != Algos found + Algos not found"
     

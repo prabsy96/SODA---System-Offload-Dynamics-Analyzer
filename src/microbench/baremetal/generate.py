@@ -193,11 +193,11 @@ def extract_gemm_params(sequence):
     Returns dict with M, N, K, trans_a, trans_b, lda, ldb, ldc, alpha, beta, dtype
     """
     cpu_op = sequence.get("cpu_op", {})
-    op_name = cpu_op.get("name", "")
-    input_dims = cpu_op.get("input_dims", [])
-    input_strides = cpu_op.get("input_strides", [])
-    input_types = cpu_op.get("input_type", [])
-    concrete_inputs = cpu_op.get("concrete_inputs", [])
+    op_name = cpu_op.get("name")
+    input_dims = cpu_op.get("input_dims")
+    input_strides = cpu_op.get("input_strides")
+    input_types = cpu_op.get("input_type")
+    concrete_inputs = cpu_op.get("concrete_inputs")
     
     # Dispatch to operation-specific extractors
     if op_name == "aten::addmm":
@@ -230,8 +230,10 @@ def generate_jobs(target_sequences: dict, warmup: int, runs: int):
     jobs = []
     
     # Add null kernel job (job 0000) for baseline launch tax measurement
+    job_id = "0000"
+    print(f"Generating job {job_id} (__null__)")
     jobs.append({
-        "id": "0000",
+        "id": job_id,
         "name": "__null__",
         "grid": [1, 1, 1],  # Explicit value for null kernel, not a default
         "block": [1, 1, 1],  # Explicit value for null kernel, not a default
@@ -243,6 +245,7 @@ def generate_jobs(target_sequences: dict, warmup: int, runs: int):
     
     for idx, sequence in enumerate(sequences):
         job_id = f"{idx+1:04d}"
+        print(f"Generating job {job_id}")
         
         # Extract GEMM parameters
         params = extract_gemm_params(sequence)
@@ -257,12 +260,12 @@ def generate_jobs(target_sequences: dict, warmup: int, runs: int):
         cpu_op = sequence.get("cpu_op", {})
         job = {
             "id": job_id,
-            "name": kernel.get("name", "unknown"),
+            "name": kernel.get("name"),
             "grid": kernel.get("grid"),
             "block": kernel.get("block"),
             "shared_memory": kernel.get("shared_memory"),
             "registers_per_thread": kernel.get("registers_per_thread"),
-            "cpu_op": cpu_op.get("name", ""),
+            "cpu_op": cpu_op,  
             "m": params["m"],
             "n": params["n"],
             "k": params["k"],

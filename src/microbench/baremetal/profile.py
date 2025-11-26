@@ -9,6 +9,7 @@ tax statistics, and emits baremetal/output/baremetal_gemm_runs.json.
 This phase assumes search_cublas_algos_offline.py has already been run.
 """
 
+import sqlite3
 import json
 import sys
 import subprocess
@@ -25,18 +26,13 @@ def run_job_under_nsys(job):
     """
     job_id = job["id"]
     
-    # Skip batched GEMMs for now (non-contiguous layout issue)
-    if job.get("batch", 1) > 1:
-        print(f"Skipping job {job_id} (batched GEMM with non-standard layout)")
-        return None
-    
     print(f"Running job {job_id}")
     
     binary_path = utils.get_path("BAREMETAL_BINARY")
     trace_dir = nsys_utils.get_trace_dir()
 
     # Handle null kernel job
-    if job.get("null_kernel"):
+    if job.get("name") == "__null__":
         args = [
             str(binary_path),
             "--null_kernel",
@@ -88,8 +84,6 @@ def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
     
     Returns: dict with kernel info and stats
     """
-    import sqlite3
-    
     # Connect to sqlite database
     try:
         conn = sqlite3.connect(sqlite_path)
@@ -205,77 +199,40 @@ def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
         "stats": stats,
     }
 
-
-def collect_gpu_info():
-    """Collect GPU and CUDA environment information."""
-    env = {}
-    
-    # Get GPU name
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            env["gpu"] = result.stdout.strip()
-    except Exception:
-        env["gpu"] = "unknown"
-    
-    # Get CUDA version
-    try:
-        result = subprocess.run(
-            ["nvcc", "--version"],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            # Extract version from output
-            match = re.search(r"release (\d+\.\d+)", result.stdout)
-            if match:
-                env["cuda_version"] = match.group(1)
-    except Exception:
-        env["cuda_version"] = "unknown"
-    
-    return env
-
-
 def profile_baremetal_gemm_kernels():
     """
     Profile baremetal GEMM kernels for all jobs using matched algorithms.
-    """
-    jobs_file = utils.get_path("BAREMETAL_JOBS")
-    output_file = utils.get_path("BAREMETAL_GEMM_KERNELS")
-    
-    # Check if jobs file exists
-    utils.ensure_file(jobs_file)
-    
+    """ 
+
     # Load jobs
-    with open(jobs_file, 'r') as f:
-        jobs_data = json.load(f)
-    
+    jobs_file = utils.get_path("BAREMETAL_JOBS")
+    jobs_data = utils.load_json(jobs_file)
     jobs = jobs_data.get("jobs", [])
     print(f"Loaded {len(jobs)} jobs.")
     
-    # Check if matching has been done
-    matching_summary = jobs_data.get("matching_summary", {})
-    algos_found = matching_summary.get("algos_found", 0)
-    if algos_found == 0:
-        print("Warning: No algorithm matches found in jobs.json", file=sys.stderr)
-        print("Run search_cublas_algos_offline.py first to search for algorithm indices", file=sys.stderr)
+    # Check if offline cublas algorithm search has been completed
+    offline_cublas_search = jobs_data.get("summary", {}).get("offline_cublas_search", {})
+    algos_found = offline_cublas_search.get("algos_found", None)
+    if algos_found is None:
+        print("Warning: No cublas algorithm indices found in jobs.json", file=sys.stderr)
     else:
         print(f"Using {algos_found} matched algorithms")
     
     # Build binary
     build_binary()
     binary_path = utils.get_path("BAREMETAL_BINARY")
-    if not binary_path.exists():
-        raise RuntimeError(f"Binary not found: {binary_path}")
+    utils.ensure_file(binary_path)
     
     # Run each job
-    kernels = []
+    sequences = []
     
     for job in jobs:
+
+        # Skip batched GEMMs for now due to non-contiguous layout issue
+        if job.get("batch", 1) > 1:
+            print(f"Skipping job {job['id']} (FIXME batched GEMM)")
+            continue
+        
         sqlite_path = run_job_under_nsys(job)
         
         if sqlite_path is None:
@@ -288,46 +245,56 @@ def profile_baremetal_gemm_kernels():
             print(f"Warning: No kernel events found for job {job['id']}", file=sys.stderr)
             continue
         
-        # Add job ID and target kernel to result
-        kernel_entry = {
-            "id": job["id"],
-            "target_kernel": job.get("target_kernel", "unknown"),
+        # Build sequence entry matching PyTorch format
+        sequence_entry = {
+            "cpu_op": job.get("cpu_op") if job.get("name") != "__null__" else {},
             "kernel": result["kernel"],
-            "stats": result["stats"],
+            "meta": {
+                "job_id": job["id"],
+                **result["stats"]  # avg_kernel_tax, min_kernel_tax, max_kernel_tax, count
+            }
         }
         
-        kernels.append(kernel_entry)
+        # Capture null kernel baseline tax for delta calculations
+        if job["name"] == "__null__":
+            null_kernel_tax = result["stats"]["avg_kernel_tax"]
+        
+        sequences.append(sequence_entry)
     
-    # Collect environment info
-    env = collect_gpu_info()
-    
-    # Write output
+    # Write output in PyTorch format
     output_data = {
-        "summary": {
-            "count": len(kernels),
-            "source": str(jobs_file),
-        },
-        "kernels": kernels,
-        "env": env,
+        "summary": {"count": len(sequences)},
+        "sequences": sequences,
     }
-    
+
+    output_file = utils.get_path("BAREMETAL_GEMM_KERNELS")
     utils.save_json(output_file, output_data)
     
-    # Print a compact table summary
-    table_rows = []
-    for entry in kernels:
-        table_rows.append([
-            entry["id"],
-            next((job["cpu_op"] for job in jobs if job["id"] == entry["id"]), "unknown"),
-            entry["kernel"]["name"],
-            f"{entry['stats']['avg_kernel_tax']:.2f} μs",
+    print(f"\nCompleted {len(sequences)} jobs -> {output_file}")
+    
+    # Print a summary table with % delta over null kernel 
+    print_summary(sequences, null_kernel_tax)
+
+def print_summary(sequences, null_kernel_tax=None):
+    """Print a compact table summary of profiled sequences, with % delta over null kernel."""
+    table_data = []
+    for sequence in sequences:
+        avg = sequence["meta"]["avg_kernel_tax"]
+        delta_pct = (
+            (avg - null_kernel_tax) / null_kernel_tax * 100
+            if null_kernel_tax else 0.0
+        )
+        table_data.append([
+            sequence["meta"]["job_id"],
+            sequence.get("cpu_op", {}).get("name", "unknown"),
+            sequence["kernel"]["name"],
+            f"{avg:.2f} μs",
+            f"{delta_pct:.1f}%",
         ])
 
-    if table_rows:
+    if table_data:
         print_utils.comp_table(
             title="Profile Summary",
-            headers=["Job", "CPU Op", "Kernel", "Avg Kernel Tax"],
-            data=table_rows,
+            headers=["Job", "CPU Op", "Kernel", "Avg Kernel Tax", "Δ(%)"],
+            data=table_data,
         )
-    
-    print(f"\nCompleted {len(kernels)} jobs -> {output_file}")
