@@ -49,13 +49,13 @@ export ALL_GEMM_SEQUENCES="sequences/all_gemm_sequences.json"
 export UNIQUE_GEMM_SEQUENCES="sequences/unique_gemm_sequences.json"
 
 # Framework/pytorch
-export PYTORCH_GEMM_SEQUENCES="$PYTORCH_OUTPUT_DIR/pytorch_gemm_sequences.json"
+export PYTORCH_GEMM_SEQUENCES="$PYTORCH_OUTPUT_DIR/pytorch_gemm_profile.json"
 export PYTORCH_TRACES="$PYTORCH_OUTPUT_DIR/traces"
 export PYTORCH_KERNEL_TAX_GRAPHS="$PYTORCH_OUTPUT_DIR/graphs/kernel_tax"
 
 # Baremetal
 export BAREMETAL_JOBS="$BAREMETAL_OUTPUT_DIR/jobs.json"
-export BAREMETAL_GEMM_KERNELS="$BAREMETAL_OUTPUT_DIR/baremetal_gemm_kernels.json"
+export BAREMETAL_GEMM_KERNELS="$BAREMETAL_OUTPUT_DIR/baremetal_gemm_profile.json"
 export BAREMETAL_TRACES="$BAREMETAL_OUTPUT_DIR/traces"
 
 export FINAL_REPORT="microbench/bm_vs_pytorch_report.json"

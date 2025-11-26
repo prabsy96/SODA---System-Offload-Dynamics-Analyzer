@@ -47,7 +47,5 @@ def compare_sequences(target_sequences: list, actual_sequences: list):
         assert kernel_match, f"Kernel mismatch: target={target_kernel.name}, actual={actual_kernel.name}"
         
         summary.append([sequence, cpu_op_match, kernel_match])
-        
-        print_utils.iter_end()
     
     print_utils.comp_table("Sequence comparison", ["Sequence", "cpu_op", "kernel"], summary)

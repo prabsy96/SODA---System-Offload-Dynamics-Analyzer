@@ -118,7 +118,7 @@ def replay_sequences_from_cpu_ops(
     # Store sequences per replay index
     sequence_by_idx = {}
     
-    print(f"Replaying {len(event_sequences)} kernels with {runs} run{'s' if runs > 1 else ''} each (warmup={warmup})")
+    print(f"Profiling {len(event_sequences)} PyTorch GEMM kernels with {runs} run{'s' if runs > 1 else ''} each (warmup={warmup})")
     
     # Replay each event sequence
     for i, event_sequence in enumerate(event_sequences):

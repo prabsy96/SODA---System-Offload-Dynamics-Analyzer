@@ -34,18 +34,33 @@ def iter_end(style: str = "cyan") -> None:
     console = Console()
     console.print(Rule(characters="·", style=style))
 
-def subsection(title: str, level: int = 1, style: str = "cyan") -> None:
-    """Print a subsection using Panel with indentation.
+def section_end(title: str = "", style: str = "cyan") -> None:
+    """Print a strong separator using rich Rule with heavy line for section end.
     
     Args:
-        title: Subsection title text
-        level: Indentation level (0 = no indent, 1 = 2 spaces, 2 = 4 spaces, etc.)
-        style: Style/color for the panel border (default: "cyan")
+        title: Optional title to display as </Title> (default: empty for just a line)
+        style: Style/color for the rule (default: "cyan")
     """
     console = Console()
-    indent = level * 2  # 2 spaces per level
-    panel = Panel(title, border_style=style, style="bold")
-    console.print(Padding(panel, (0, 0, 0, indent)))
+    if title:
+        colored_title = f"[{style}]</{title}>[/{style}]"
+        console.print(Rule(colored_title, style=style, characters="━"))
+    else:
+        console.print(Rule(characters="━", style=style))
+    console.print("\n")
+
+def section_start(title: str, style: str = "cyan") -> None:
+    """Print a section_start heading using Rule with double line separator.
+    
+    Args:
+        title: section_start title text (will be displayed as <Title>)
+        style: Style/color for the rule (default: "cyan")
+    """
+    console = Console()
+    indent = 0
+    colored_title = f"[{style}]<{title}>[/{style}]"
+    rule = Rule(colored_title, style=style, characters="═")
+    console.print(Padding(rule, (0, 0, 0, indent)))
 
 def comp_table(title: str, headers: List[str], data: List[List[Any]]):
     """Print a rich table with automatic boolean formatting and justification.
@@ -85,4 +100,3 @@ def comp_table(title: str, headers: List[str], data: List[List[Any]]):
         table.add_row(*formatted_row)
     
     console.print(table)
-

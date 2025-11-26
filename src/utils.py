@@ -169,15 +169,6 @@ def ensure_file(file_path: Path) -> None:
     if not file_path.exists():
         raise FileNotFoundError(f"{file_path.name} not found at {file_path}")
 
-def print_subsection(title: str) -> None:
-    """
-    Print a subsection header.
-    
-    Args:
-        title: Subsection title.
-    """
-    print(f"\n=== {title} ===")
-
 def ensure_dir(path, cleanup: bool = False) -> None:
     """
     Ensure directory exists, creating parent directories if needed.
@@ -214,8 +205,7 @@ def load_json(file_path: str | Path) -> Dict[str, Any]:
         FileNotFoundError: If file does not exist.
     """
     file_path = Path(file_path)
-    if not file_path.is_file():
-        raise FileNotFoundError(f"File does not exist: {file_path}")
+    ensure_file(file_path)
     
     with open(file_path, "r", encoding="utf-8") as f:
         return json.load(f)

@@ -52,16 +52,6 @@ def build_binary():
     print("Build successful")
 
 
-def get_kernel_from_job(job):
-    """Construct a Kernel object from a job dict."""
-    return Kernel(
-        name=job.get("target_kernel"),
-        grid=job.get("target_grid"),
-        block=job.get("target_block"),
-        shared_memory=job.get("target_shared_mem"),
-        registers_per_thread=job.get("target_registers_per_thread")
-    )
-
 def get_max_algo_idx(job):
     """
     Query how many algorithms are available for this problem.
@@ -179,45 +169,6 @@ def build_base_args(job):
         "--beta", str(job["beta"]),
     ]
     
-    
-def test_cublas_algo(job, algo_idx):
-    """
-    Run nsys profiling for a specific algorithm index, extract kernel, and clean up.
-    Handles errors internally and returns a simple context message.
-    
-    Args:
-        job: Job dictionary with 'id' field
-        algo_idx: Algorithm index to test
-    
-    Returns:
-        (success: bool, kernel: Kernel|None, message: str)
-    """
-    
-    trace_dir = nsys_utils.get_trace_dir()
-    trace_path = trace_dir / f"match_{job['id']}_algo{algo_idx}.nsys-rep"
-    
-    base_args = build_base_args(job)
-    args = base_args + ["--warmup", "0", "--runs", "1", "--algo_index", str(algo_idx)]
-    success, sqlite_path, message = nsys_utils.nsys_profile_to_sqlite(
-        trace_path, args, timeout=100, clean_trace=True
-    )
-    
-    if not success:
-        return (False, None, message)
-    
-    # Extract kernel from trace
-    kernel = extract_kernel_from_trace(sqlite_path)
-    
-    # Clean up sqlite file
-    utils.remove_file(sqlite_path)
-    
-    if kernel is None:
-        return (False, None, "Failed to extract kernel from trace")
-    
-    # Successful profiling and kernel extraction
-    return (True, kernel, "success")
-
-
 def sweep_cublas_algos(job, max_idx=200):
     """Search for cuBLASLt algorithm index that produces target kernel config.
 
@@ -226,37 +177,57 @@ def sweep_cublas_algos(job, max_idx=200):
 
     Returns: algorithm index or None if no match found.
     """
+    trace_dir = nsys_utils.get_trace_dir()
+    
     # Initialize result variables
     match_algo_idx = None
 
     # Get target kernel from job
-    target_kernel = get_kernel_from_job(job)
+    target_kernel = Kernel.from_dict(job)
 
     # Force cublas algo search to fail (used for testing)
-    if os.getenv("FORCE_NO_MATCH") == "1" or True:
+    if os.getenv("FORCE_NO_MATCH") == "1":
         target_kernel.grid = [999, 999, 999]
     target_kernel.print()
 
     # Sweep through algorithm indices
     for algo_idx in range(max_idx +1):
-        # Test cuBLAS algo index and extract generated kernel
-        success, actual_kernel, message = test_cublas_algo(job, algo_idx)
+
+        # Build trace path and args
+        trace_path = trace_dir / f"match_{job['id']}_algo{algo_idx}.nsys-rep"
+        args = build_base_args(job) + [
+            "--warmup", "0", 
+            "--runs", "1", 
+            "--algo_index", str(algo_idx)
+        ]
+
+        # Test cuBLAS algo index 
+        success, sqlite_path, message = nsys_utils.nsys_profile_to_sqlite(
+            trace_path, args, timeout=100, clean_trace=True
+        )
 
         if not success:
             print(message)
             continue
+        else: 
+            # Extract kernel from trace
+            actual_kernel = extract_kernel_from_trace(sqlite_path)
+            assert actual_kernel is not None, "Failed to extract kernel from trace"
 
-        # Compare actual kernel with target kernel
-        match_result = actual_kernel.compare(
-            target_kernel,
-            show_table=True,
-            title=f"Algorithm #{algo_idx}",
-            full=False,
-        )
+            # Compare actual kernel with target kernel
+            match_result = actual_kernel.compare(
+                target_kernel,
+                show_table=True,
+                title=f"Algorithm #{algo_idx}",
+                full=False,
+            )
 
-        if match_result["match"]:
-            match_algo_idx = algo_idx
-            break
+            if match_result["match"]:
+                match_algo_idx = algo_idx
+                break
+            else: 
+                # Kernel didn't match for this algorithm index
+                pass 
 
     # Report outcome
     if match_algo_idx is None:
@@ -291,13 +262,13 @@ def search_cublas_algos_offline():
     for job in jobs:
 
         # Skip null kernel jobs 
-        if job.get("null_kernel"):
+        if job.get("name") == "__null__":
             job["cublas_index"] = None
             continue
         
         # Get algorithm count
         max_algo_idx = get_max_algo_idx(job)
-        algo_info = f"(0-{max_algo_idx} algorithms)"
+        algo_info = f"({max_algo_idx+1} algorithm(s))"
         print_utils.iter_start(f"Job {job['id']} {algo_info}")
         
         # Search for algorithm index
@@ -313,15 +284,13 @@ def search_cublas_algos_offline():
             num_algos_found += 1
         num_jobs_searched += 1
 
-        print_utils.iter_end()
-    
     # Update jobs.json with cublas_index and matching summary
     jobs_data["jobs"] = jobs
-    if "matching_summary" not in jobs_data:
-        jobs_data["matching_summary"] = {}
-    jobs_data["matching_summary"]["algos_found"] = num_algos_found
-    jobs_data["matching_summary"]["algos_not_found"] = num_algos_not_found
-    jobs_data["matching_summary"]["total_jobs"] = num_jobs_searched
+    if "cublas_algo_summary" not in jobs_data:
+        jobs_data["cublas_algo_summary"] = {}
+    jobs_data["cublas_algo_summary"]["algos_found"] = num_algos_found
+    jobs_data["cublas_algo_summary"]["algos_not_found"] = num_algos_not_found
+    jobs_data["cublas_algo_summary"]["total_jobs"] = num_jobs_searched
 
     assert num_jobs_searched == num_algos_found + num_algos_not_found, "Total jobs != Algos found + Algos not found"
     

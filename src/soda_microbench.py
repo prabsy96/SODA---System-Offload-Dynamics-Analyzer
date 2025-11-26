@@ -77,35 +77,45 @@ class SodaMicrobench:
         target_gemm_sequences = self.extract_unique_gemm_sequences()
 
         # Benchmark pytorch performance
+        section = "Profile PyTorch GEMM Kernels"  
+        print_utils.section_start(section)
         pytorch_gemm_sequences = profile_pytorch_gemm_sequences(
             target_gemm_sequences,
             warmup=self.warmup,
             runs=self.runs
         )
+        print_utils.section_end(section)
         
-        print_utils.subsection("Verifying pytorch gemm sequences", level=0)
+        section = "Verify PyTorch GEMM Sequences"
+        print_utils.section_start(section)
         # Convert dict sequences to Sequence objects
         target_seq_objects = [Sequence.from_dict(seq_dict) for seq_dict in target_gemm_sequences["sequences"]]
         pytorch_seq_objects = [Sequence.from_dict(seq_dict) for seq_dict in pytorch_gemm_sequences["sequences"]]
         compare_sequences(target_seq_objects, pytorch_seq_objects)
         plot_pytorch_gemm_sequences(pytorch_gemm_sequences)
+        print_utils.section_end(section)
 
-        # Benchmark baremetal performance
-        print_utils.subsection("Generate Baremetal Jobs", level=0)
+        # Generate baremetal jobs
+        section = "Generate Baremetal Jobs"
+        print_utils.section_start(section)
         generate_jobs(target_gemm_sequences, warmup=self.warmup, runs=self.runs)
-        
-        print_utils.subsection("Offline Search for cuBLASLt Algorithms", level=0)
+        print_utils.section_end(section)
+
+        # # Search for cuBLASLt algorithms
+        section = "Offline Search for cuBLASLt Algorithms"
+        print_utils.section_start(section)
         search_cublas_algos_offline()
+        print_utils.section_end(section)
         
-        print_utils.subsection("Profile Baremetal (under nsys profiling)", level=0)
+        # Profile baremetal performance
+        section = "Profile Baremetal GEMM Kernels"
+        print_utils.section_start(section)
         print("This will run nsys profiling for multiple jobs, may take several minutes")
         profile_baremetal_gemm_kernels()
+        print_utils.section_end(section)
         
-        print_utils.subsection("Compare PyTorch vs Baremetal", level=0)
+        # Compare PyTorch vs Baremetal
+        section = "Compare PyTorch vs Baremetal"
+        print_utils.section_start(section)
         compare()
-        
-        # Print summary
-        jobs_file = utils.get_path("BAREMETAL_JOBS")
-        baremetal_gemm_kernels_file = utils.get_path("BAREMETAL_GEMM_KERNELS")
-
-        print("Done!")
+        print_utils.section_end(section)

@@ -29,6 +29,9 @@ def clean_kernel_name(kernel_name: str) -> str:
     """
     # Extract everything before '<' (removes template parameters)
     # This handles cases where '(' appears in template params like "(anonymous namespace)"
+    if not kernel_name:
+        return None
+    
     if '<' in kernel_name:
         clean_kernel_name = kernel_name.split('<')[0].strip()
     elif '(' in kernel_name:
@@ -93,7 +96,7 @@ class Kernel:
                  all_dur: Optional[List[float]] = None):
         """Initialize kernel configuration with normalization."""
         # Normalize name
-        self.name = clean_kernel_name(name or "")
+        self.name = clean_kernel_name(name) if name else "unknown"
         
         # Apply defaults if None
         if grid is None:
@@ -139,7 +142,7 @@ class Kernel:
             ["name", self.name],
             ["grid", str(list(self.grid))],
             ["block", str(list(self.block))],
-            ["shared_mem", str(self.shared_memory)],
+            ["shared_memory", str(self.shared_memory)],
         ]
         
         # Add optional fields if they exist
@@ -306,7 +309,7 @@ class Kernel:
         if not kernel_dict:
             return None
         return cls(
-            name=kernel_dict.get("name", ""),
+            name=kernel_dict.get("name"),
             grid=kernel_dict.get("grid"),
             block=kernel_dict.get("block"),
             shared_memory=kernel_dict.get("shared_memory"),

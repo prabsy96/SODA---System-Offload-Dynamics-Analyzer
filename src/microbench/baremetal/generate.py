@@ -232,12 +232,11 @@ def generate_jobs(target_sequences: dict, warmup: int, runs: int):
     # Add null kernel job (job 0000) for baseline launch tax measurement
     jobs.append({
         "id": "0000",
-        "target_kernel": "__null__",
-        "target_grid": [1, 1, 1],  # Explicit value for null kernel, not a default
-        "target_block": [1, 1, 1],  # Explicit value for null kernel, not a default
-        "target_shared_mem": 0,  # Explicit value for null kernel, not a default
-        "cpu_op": "null_kernel",
-        "null_kernel": True,
+        "name": "__null__",
+        "grid": [1, 1, 1],  # Explicit value for null kernel, not a default
+        "block": [1, 1, 1],  # Explicit value for null kernel, not a default
+        "shared_memory": 0,  # Explicit value for null kernel, not a default
+        "cpu_op": None,
         "warmup": warmup,
         "runs": runs,
     })
@@ -258,11 +257,11 @@ def generate_jobs(target_sequences: dict, warmup: int, runs: int):
         cpu_op = sequence.get("cpu_op", {})
         job = {
             "id": job_id,
-            "target_kernel": kernel.get("name", "unknown"),
-            "target_grid": kernel.get("grid"),
-            "target_block": kernel.get("block"),
-            "target_shared_mem": kernel.get("shared_memory"),
-            "target_registers_per_thread": kernel.get("registers_per_thread"),
+            "name": kernel.get("name", "unknown"),
+            "grid": kernel.get("grid"),
+            "block": kernel.get("block"),
+            "shared_memory": kernel.get("shared_memory"),
+            "registers_per_thread": kernel.get("registers_per_thread"),
             "cpu_op": cpu_op.get("name", ""),
             "m": params["m"],
             "n": params["n"],
