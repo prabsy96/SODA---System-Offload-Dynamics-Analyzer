@@ -20,37 +20,8 @@ from soda import utils
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 from common import print_utils
 from data import Kernel
-from microbench.baremetal import nsys_utils
-
-
-def build_binary():
-    """Build the C++ binary using cmake."""
-    baremetal_dir = utils.get_path("BAREMETAL_MICROBENCH_DIR")
-    print("Building C++ binary")
-    build_dir = baremetal_dir / "build"
-    
-    # Configure
-    result = subprocess.run(
-        ["cmake", "-B", str(build_dir), "-DCMAKE_BUILD_TYPE=Release"],
-        cwd=str(baremetal_dir),
-        capture_output=True,
-        text=True
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"CMake configure failed:\n{result.stderr}")
-    
-    # Build
-    result = subprocess.run(
-        ["cmake", "--build", str(build_dir)],
-        cwd=str(baremetal_dir),
-        capture_output=True,
-        text=True
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"Build failed:\n{result.stderr}")
-    
-    print("Build successful")
-
+from typing import Optional, Tuple, List
+from microbench.baremetal.utils import build_binary, build_base_args, nsys_profile_to_sql, extract_kernels_from_trace, extract_launches_from_trace
 
 def get_max_algo_idx(job):
     """
@@ -87,87 +58,6 @@ def get_max_algo_idx(job):
     
     raise RuntimeError(f"Could not parse algorithm count from output for job {job.get('id')}:\n{result.stdout}")
 
-def extract_kernel_from_trace(sqlite_path):
-    """Extract kernel from nsys sqlite trace.
-    
-    Returns: Kernel object or None if no kernel found
-    """
-
-    kernel = None
-    try:
-        conn = sqlite3.connect(sqlite_path)
-        cursor = conn.cursor()
-        
-        # Query for all kernel events with all available fields
-        cursor.execute("""
-            SELECT k.start, k.end, k.correlationId, s.value, 
-                   k.gridX, k.gridY, k.gridZ,
-                   k.blockX, k.blockY, k.blockZ,
-                   k.staticSharedMemory, k.dynamicSharedMemory,
-                   k.deviceId, k.contextId, k.streamId,
-                   k.registersPerThread
-            FROM CUPTI_ACTIVITY_KIND_KERNEL as k
-            JOIN StringIds as s ON k.demangledName = s.id
-        """)
-        
-        kernel = None
-        # Fetch all rows and filter in Python
-        for row in cursor.fetchall():
-            start_ns, end_ns, corr_id, name, gx, gy, gz, bx, by, bz, static_smem, dyn_smem, device_id, context_id, stream_id, regs = row
-
-            if kernel is not None and "gemm" in name.lower(): 
-                raise RuntimeError(f"Multiple kernels found in trace: {kernel.name} and {name}")
-            
-            if "gemm" in name.lower() or "null" in name.lower(): 
-                kernel = Kernel(
-                    name=name,
-                    grid=[gx, gy, gz],
-                    block=[bx, by, bz],
-                    shared_memory=static_smem + dyn_smem,
-                    correlation=corr_id,
-                    ts=start_ns / 1000.0,  # Convert nanoseconds to microseconds
-                    dur=(end_ns - start_ns) / 1000.0,  # Convert nanoseconds to microseconds
-                    device=device_id,
-                    context=context_id,
-                    stream=stream_id,
-                    registers_per_thread=regs
-                )
-            
-        conn.close()
-    except Exception as e:
-        print(f"Error extracting kernel from trace: {e}")
-        return None
-
-    utils.remove_file(sqlite_path)
-    return kernel
-
-def build_base_args(job):
-    """Build base command line arguments for the C++ binary.
-    
-    Args:
-        job: Job dictionary with GEMM parameters
-    
-    Returns:
-        List of command line arguments 
-    """
-    binary_path = utils.get_path("BAREMETAL_BINARY")
-    
-    return [
-        str(binary_path),
-        "--m", str(job["m"]),
-        "--n", str(job["n"]),
-        "--k", str(job["k"]),
-        "--lda", str(job["lda"]),
-        "--ldb", str(job["ldb"]),
-        "--ldc", str(job["ldc"]),
-        "--order_a", job.get("order_a", "row"),
-        "--order_b", job.get("order_b", "row"),
-        "--trans_a", job.get("trans_a", "N"),
-        "--trans_b", job.get("trans_b", "N"),
-        "--dtype", job["dtype"],
-        "--alpha", str(job["alpha"]),
-        "--beta", str(job["beta"]),
-    ]
     
 def sweep_cublas_algos(job, max_idx=200):
     """Search for cuBLASLt algorithm index that produces target kernel config.
@@ -177,8 +67,9 @@ def sweep_cublas_algos(job, max_idx=200):
 
     Returns: algorithm index or None if no match found.
     """
-    trace_dir = nsys_utils.get_trace_dir()
-    
+    traces_dir = utils.get_path("BAREMETAL_TRACES")
+    utils.ensure_dir(traces_dir)
+
     # Initialize result variables
     match_algo_idx = None
 
@@ -194,7 +85,7 @@ def sweep_cublas_algos(job, max_idx=200):
     for algo_idx in range(max_idx +1):
 
         # Build trace path and args
-        trace_path = trace_dir / f"match_{job['id']}_algo{algo_idx}.nsys-rep"
+        trace_file_name = f"match_{job['id']}_algo{algo_idx}"
         args = build_base_args(job) + [
             "--warmup", "0", 
             "--runs", "1", 
@@ -202,17 +93,26 @@ def sweep_cublas_algos(job, max_idx=200):
         ]
 
         # Test cuBLAS algo index 
-        success, sqlite_path, message = nsys_utils.nsys_profile_to_sqlite(
-            trace_path, args, timeout=100, clean_trace=True
+        success, trace_file_sql, message = nsys_profile_to_sql(
+            trace_file_name, args, timeout=100, cleanup=True
         )
 
         if not success:
             print(message)
             continue
         else: 
-            # Extract kernel from trace
-            actual_kernel = extract_kernel_from_trace(sqlite_path)
-            assert actual_kernel is not None, "Failed to extract kernel from trace"
+            actual_kernel = None
+
+            # Extract kernels from trace
+            kernels = extract_kernels_from_trace(trace_file_sql, cleanup=True)
+            if not kernels:
+                # Failed to extract any kernel at all 
+                raise RuntimeError("Failed to extract kernel from trace")
+            else: 
+                if len(kernels) != 1:
+                    raise RuntimeError(f"Multiple kernels found in trace: {[k.name for k in kernels]}")
+                else: 
+                    actual_kernel = kernels[0]
 
             # Compare actual kernel with target kernel
             match_result = actual_kernel.compare(
@@ -227,6 +127,7 @@ def sweep_cublas_algos(job, max_idx=200):
                 break
             else: 
                 # Kernel didn't match for this algorithm index
+                # Let's try the next one
                 pass 
 
     # Report outcome
