@@ -382,15 +382,28 @@ def aggregate_execution_metrics(instances):
     meta.update(calculate_avg_min_max(kernel_tax_values, "kernel_tax"))
     base_instance["meta"] = meta
 
-    # Clean up unneeded fields
-    base_instance.pop("kernel_tax")
-    base_instance["kernel"].pop("dur")
-    base_instance["cpu_op"].pop("dur")
-    base_instance["cuda_launch"].pop("dur")
-    base_instance["kernel"].pop("ts")
-    base_instance["cpu_op"].pop("ts")
-    base_instance["cuda_launch"].pop("ts")
     
+    # TODO: Remove old code
+    # base_instance.pop("kernel_tax")
+    # base_instance["kernel"].pop("dur")
+    # base_instance["cpu_op"].pop("dur")
+    # base_instance["cuda_launch"].pop("dur")
+    # base_instance["kernel"].pop("ts")
+    # base_instance["cpu_op"].pop("ts")
+    # base_instance["cuda_launch"].pop("ts")
+    
+    # Null these fields since they dont mean anything after aggregation
+    # Kernel tax of the first sequence (base instance)
+    base_instance["kernel_tax"] = None
+    # Duration of each event of the first sequence (base instance)
+    base_instance["kernel"]["dur"] = None
+    base_instance["cpu_op"]["dur"] = None
+    base_instance["cuda_launch"]["dur"] = None
+    # Timestamp of each event of the first sequence (base instance)
+    base_instance["kernel"]["ts"] = None
+    base_instance["cpu_op"]["ts"] = None
+    base_instance["cuda_launch"]["ts"] = None
+
     return base_instance
 
 def deduplicate_and_aggregate(sequences):
@@ -416,16 +429,15 @@ def deduplicate_and_aggregate(sequences):
         # Aggregate execution metrics (kernel tax, cpu op duration, cuda launch duration, kernel duration)
         base_instance = aggregate_execution_metrics(instances)
         
-        # Remove timestamp
-        base_instance['kernel'].pop('ts', None)
-        
         # Construct output structure 
-        sequence_entry = {
-            "meta": base_instance.get('meta'),
-            "kernel": base_instance['kernel'],
-            "cuda_launch": base_instance.get('cuda_launch'),
-            "cpu_op": base_instance.get('cpu_op')
-        }
+        # TODO: Cleanup
+        # sequence_entry = {
+        #     "meta": base_instance.get('meta'),
+        #     "kernel": base_instance['kernel'],
+        #     "cuda_launch": base_instance.get('cuda_launch'),
+        #     "cpu_op": base_instance.get('cpu_op')
+        # }
+        sequence_entry = base_instance
         
         unique_gemm_sequences.append(sequence_entry)
     
@@ -788,8 +800,8 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
     for kernel in kernel_events:
         external_id = kernel.get("external_id")
         correlation = kernel.get("correlation")
-        cpu_op = cpu_ops.get(external_id) if external_id is not None else None
-        cuda_launch = cuda_launches.get(correlation) if correlation is not None else None
+        cpu_op = cpu_ops.get(external_id) 
+        cuda_launch = cuda_launches.get(correlation) 
         
         event_sequences.append({
             "kernel": kernel,

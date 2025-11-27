@@ -14,22 +14,23 @@ import json
 import sys
 import subprocess
 import re
-from microbench.baremetal.search import build_binary, build_base_args
-from microbench.baremetal import nsys_utils
+from microbench.baremetal.utils import build_binary, build_base_args, nsys_profile_to_sql, extract_kernels_from_trace, extract_launches_from_trace
+
 from soda import utils
 from common import print_utils
+from data import CPUOp
 
 
-def run_job_under_nsys(job):
+def run_job(job):
     """
-    Run a single job under nsys profiling using matched algorithm index.
+    Run a single job under nsys profiling and emit sqlite trace.
     """
     job_id = job["id"]
     
     print(f"Running job {job_id}")
     
     binary_path = utils.get_path("BAREMETAL_BINARY")
-    trace_dir = nsys_utils.get_trace_dir()
+    utils.ensure_file(binary_path)
 
     # Handle null kernel job
     if job.get("name") == "__null__":
@@ -40,9 +41,8 @@ def run_job_under_nsys(job):
             "--runs", str(job["runs"]),
         ]
     else:
+
         matched_algo_idx = job.get("cublas_index")
-        
-        # Build command line args 
         args = build_base_args(job) + [
             "--warmup", str(job["warmup"]),
             "--runs", str(job["runs"]),
@@ -54,150 +54,118 @@ def run_job_under_nsys(job):
         if matched_algo_idx is not None:
             args = args + ["--algo_index", str(matched_algo_idx)]
     
-    trace_output = trace_dir / f"trace_{job_id}"
-    success, sqlite_path, message = nsys_utils.nsys_profile_to_sqlite(
-        trace_output, args
+    trace_file_name = f"trace_{job_id}"
+    success, trace_file_sql, message = nsys_profile_to_sql(
+        trace_file_name, args, timeout=600, cleanup=True
     )
 
     if not success:
         print(f"nsys profiling failed for job {job_id}:\n{message}", file=sys.stderr)
         return None
 
-    return sqlite_path
+    return trace_file_sql
 
 
-def parse_trace_and_compute_stats(sqlite_path, runs, warmup=0):
+def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
     """
     Parse nsys sqlite trace and compute kernel launch tax statistics.
     
-    Uses same event linking logic as PyTorch extract_kernel_sequences.py:
+    Uses same event linking and aggregation logic as PyTorch pipeline:
     - Find cudaLaunchKernel events (cuda_runtime)
     - Find kernel events (kernel category)
-    - Link via correlation ID
-    - Compute kernel_tax = kernel.ts - cudaLaunchKernel.ts (microseconds)
-    - Aggregate statistics
+    - Link via correlation ID (utils.link_sequences)
+    - Compute kernel_tax = kernel.ts - cudaLaunchKernel.ts (utils.calculate_per_seq_launch_tax)
+    - Aggregate multiple runs (utils.deduplicate_and_aggregate)
     
     Args:
-        sqlite_path: Path to nsys sqlite export
+        job: Job dictionary with cpu_op, job_id, and config
+        trace_file_sql: Path to nsys sqlite export
         runs: Expected number of measurement runs
         warmup: Number of warmup runs to skip
     
-    Returns: dict with kernel info and stats
+    Returns: Aggregated sequence dict with keys: kernel, meta, cuda_launch, cpu_op
     """
-    # Connect to sqlite database
-    try:
-        conn = sqlite3.connect(sqlite_path)
-        cursor = conn.cursor()
-    except Exception as e:
-        print(f"Error opening sqlite database {sqlite_path}: {e}", file=sys.stderr)
-        return None
-    
-    # Query for CUDA runtime API calls (cudaLaunchKernel)
-    cuda_launches = {}
-    try:
-        cursor.execute("""
-            SELECT start, end, correlationId
-            FROM CUPTI_ACTIVITY_KIND_RUNTIME
-            WHERE nameId IN (SELECT id FROM StringIds WHERE value LIKE 'cudaLaunchKernel%')
-        """)
-        for row in cursor.fetchall():
-            start_ns, end_ns, corr_id = row
-            cuda_launches[corr_id] = {
-                "ts": start_ns / 1000.0,  # Convert ns to us
-                "dur": (end_ns - start_ns) / 1000.0,
-                "correlation": corr_id,
-            }
-    except Exception as e:
-        print(f"Warning: Could not query CUDA runtime events: {e}", file=sys.stderr)
-    
-    # Query for kernel events (with all available fields)
-    # For null kernel, get any kernel; for GEMM, filter by name
-    kernels = []
-    try:
-        # Query all kernels (will filter by name later if needed)
-        cursor.execute("""
-            SELECT k.start, k.end, k.correlationId, s.value, 
-                   k.gridX, k.gridY, k.gridZ,
-                   k.blockX, k.blockY, k.blockZ,
-                   k.staticSharedMemory, k.dynamicSharedMemory,
-                   k.deviceId, k.contextId, k.streamId,
-                   k.registersPerThread
-            FROM CUPTI_ACTIVITY_KIND_KERNEL as k
-            JOIN StringIds as s ON k.demangledName = s.id
-        """)
-        for row in cursor.fetchall():
-            start_ns, end_ns, corr_id, name, gx, gy, gz, bx, by, bz, static_smem, dyn_smem, device_id, context_id, stream_id, regs = row
-            # For GEMM jobs, only include kernels with 'gemm' in name
-            # For null kernel, include all kernels
-            if "gemm" not in name.lower() and "null" not in name.lower():
-                continue
-            kernels.append({
-                "name": "__null__" if "null" in name.lower() else name,
-                "ts": start_ns / 1000.0,  # Convert ns to us
-                "dur": (end_ns - start_ns) / 1000.0,
-                "correlation": corr_id,
-                "grid": [gx, gy, gz],
-                "block": [bx, by, bz],
-                "shared_memory": static_smem + dyn_smem,
-                "device": device_id,
-                "context": context_id,
-                "stream": stream_id,
-                "registers_per_thread": regs,
-            })
-    except Exception as e:
-        print(f"Warning: Could not query kernel events: {e}", file=sys.stderr)
-    
-    conn.close()
-    
+    # Extract cuda runtime and kernel events
+    cuda_launches = extract_launches_from_trace(trace_file_sql)
+    kernels = extract_kernels_from_trace(trace_file_sql, cleanup=False)
+
     if not cuda_launches:
-        print(f"Warning: No CUDA launch events found in {sqlite_path}", file=sys.stderr)
-        return None
-    
+        raise RuntimeError(f"No CUDA launch events found in {trace_file_sql}")
     if not kernels:
-        print(f"Warning: No kernel events found in {sqlite_path}", file=sys.stderr)
-        return None
+        raise RuntimeError(f"No kernel events found in {trace_file_sql}")
     
-    # Link kernels to cuda launches and compute kernel tax
-    # Skip warmup iterations (first N kernel launches)
-    kernel_tax_values = []
-    kernel_info = None
-    skipped = 0
+    # All kernels in this trace belong to the same job/cpu_op
+    # Handle null kernel vs regular GEMM jobs differently
+    external_id = job["id"]
+    if job.get("name") == "__null__":
+        # Null kernel job (hack to ensure we have a cpu_op)
+        # cpu_op is null in jobs.json so use a dummy __nop__ cpu_op
+        # and use job_id as external_id
+        cpu_op = CPUOp(
+            name="__nop__",
+            external_id=external_id,
+        ).get_signature(full=True)
+    else:
+        # Regular GEMM job: cpu_op was extracted from PyTorch ptrace
+        # Use its original external_id to preserve linking
+        cpu_op = job.get("cpu_op")
+        external_id = cpu_op.get("external_id")
     
-    for kernel in kernels:
-        correlation = kernel["correlation"]
-        cuda_launch = cuda_launches.get(correlation)
-        
-        if cuda_launch and kernel["ts"] is not None and cuda_launch["ts"] is not None:
-            # Skip warmup iterations
-            if skipped < warmup:
-                skipped += 1
-                continue
-            
-            kernel_tax = kernel["ts"] - cuda_launch["ts"]
-            assert kernel_tax >= 0, f"Negative kernel tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={cuda_launch['ts']}, tax={kernel_tax}"
-            kernel_tax_values.append(kernel_tax)
-            
-            # Capture kernel info from first kernel
-            if kernel_info is None:
-                kernel_info = {
-                    "name": kernel["name"],
-                    "grid": kernel["grid"],
-                    "block": kernel["block"],
-                    "shared_memory": kernel["shared_memory"],
+    # Convert to events structure for shared utilities
+    # This adapts baremetal data to the format expected by utils.link_sequences()
+    events = {
+        "cpu": {
+            "ops": {
+                # Map external_id -> cpu_op (preserves original linking)
+                external_id: cpu_op
+            },
+            "launches": cuda_launches  # Dict[corr_id -> launch_dict]
+        },
+        "gpu": {
+            "kernels": [
+                {
+                    "name": kernel.name,
+                    "external_id": external_id,
+                    "ts": kernel.ts,
+                    "dur": kernel.dur,
+                    "correlation": kernel.correlation,
+                    "grid": kernel.grid,
+                    "block": kernel.block,
+                    "shared_memory": kernel.shared_memory,
+                    "device": kernel.device,
+                    "context": kernel.context,
+                    "stream": kernel.stream,
+                    "registers_per_thread": kernel.registers_per_thread,
                 }
-    
-    # Compute statistics
-    if not kernel_tax_values:
-        print(f"Warning: No matched kernel-launch pairs found in {sqlite_path}", file=sys.stderr)
-        return None
-    
-    stats = utils.calculate_avg_min_max(kernel_tax_values, "kernel_tax")
-    stats["count"] = len(kernel_tax_values)
-    
-    return {
-        "kernel": kernel_info,
-        "stats": stats,
+                for kernel in kernels
+            ]
+        }
     }
+    
+    # Same approach as PyTorch microbench (see microbench/framework/pytorch/profile.py)
+    linked_sequences = utils.link_sequences(events)
+    linked_sequences_with_tax = utils.calculate_per_seq_launch_tax(linked_sequences)
+    
+    # Skip warmup iterations by slicing
+    sequences_after_warmup = linked_sequences_with_tax[warmup:]
+    
+    if not sequences_after_warmup:
+        raise RuntimeError(f"No sequences remaining after warmup in {trace_file_sql}")
+    
+    # Aggregate using shared utility (same as PyTorch pipeline)
+    # This deduplicates by kernel signature and aggregates kernel_tax stats into meta
+    aggregated_sequences = utils.deduplicate_and_aggregate(sequences_after_warmup)
+    
+    # Baremetal runs same kernel config multiple times, so should have exactly 1 unique kernel
+    if len(aggregated_sequences) != 1:
+        kernel_names = [seq["kernel"]["name"] for seq in aggregated_sequences]
+        raise RuntimeError(
+            f"Expected 1 unique kernel after aggregation, found {len(aggregated_sequences)}: {kernel_names}"
+        )
+    
+    # Return the single aggregated sequence
+    # Format: {meta: {avg_kernel_tax, ...}, kernel: {...}, cuda_launch: {...}, cpu_op: {...}}
+    return aggregated_sequences[0]
 
 def profile_baremetal_gemm_kernels():
     """
@@ -223,8 +191,9 @@ def profile_baremetal_gemm_kernels():
     binary_path = utils.get_path("BAREMETAL_BINARY")
     utils.ensure_file(binary_path)
     
-    # Run each job
+    # Run each job and collect sequences
     sequences = []
+    null_kernel_tax = None
     
     for job in jobs:
 
@@ -233,35 +202,26 @@ def profile_baremetal_gemm_kernels():
             print(f"Skipping job {job['id']} (FIXME batched GEMM)")
             continue
         
-        sqlite_path = run_job_under_nsys(job)
+        trace_file_sql = run_job(job)
+        if trace_file_sql is None:
+            raise Exception(f"No trace file found for job {job['id']}")
         
-        if sqlite_path is None:
-            continue
+        # Parse trace and compute stats (returns aggregated sequence with cpu_op already included)
+        sequence = parse_trace_and_compute_stats(job, trace_file_sql, job["runs"], job.get("warmup", 0))
         
-        # Parse trace and compute stats
-        result = parse_trace_and_compute_stats(sqlite_path, job["runs"], job.get("warmup", 0))
+        if sequence is None:
+            raise Exception(f"No kernel events found for job {job['id']}")
         
-        if result is None:
-            print(f"Warning: No kernel events found for job {job['id']}", file=sys.stderr)
-            continue
-        
-        # Build sequence entry matching PyTorch format
-        sequence_entry = {
-            "cpu_op": job.get("cpu_op") if job.get("name") != "__null__" else {},
-            "kernel": result["kernel"],
-            "meta": {
-                "job_id": job["id"],
-                **result["stats"]  # avg_kernel_tax, min_kernel_tax, max_kernel_tax, count
-            }
-        }
+        # Add job_id to meta (cpu_op already included from parse_trace_and_compute_stats)
+        sequence["meta"]["job_id"] = job["id"]
         
         # Capture null kernel baseline tax for delta calculations
         if job["name"] == "__null__":
-            null_kernel_tax = result["stats"]["avg_kernel_tax"]
+            null_kernel_tax = sequence["meta"]["avg_kernel_tax"]
         
-        sequences.append(sequence_entry)
+        sequences.append(sequence)
     
-    # Write output in PyTorch format
+    # Write output in PyTorch-compatible format
     output_data = {
         "summary": {"count": len(sequences)},
         "sequences": sequences,
