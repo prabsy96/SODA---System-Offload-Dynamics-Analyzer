@@ -21,7 +21,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 from common import print_utils
 from data import Kernel
 from typing import Optional, Tuple, List
-from microbench.baremetal.utils import build_binary, build_base_args, nsys_profile_to_sql, extract_kernels_from_trace, extract_launches_from_trace
+from microbench.baremetal.utils import (
+    nsys_profile_to_sql, 
+    extract_kernels_from_trace, 
+    extract_launches_from_trace,
+    build_binary,
+    build_base_args
+)
+
 
 def get_max_algo_idx(job):
     """
