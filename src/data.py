@@ -77,19 +77,19 @@ class Kernel:
                 registers_per_thread: Optional[int] = None,
                 occupancy: Optional[float] = None,
                 stream: Optional[int] = None,
-                dur: Optional[float] = None,
                 device: Optional[int] = None,
                 context: Optional[int] = None,
                 queued: Optional[bool] = None,
-                 blocks_per_SM: Optional[float] = None,
-                 warps_per_SM: Optional[float] = None,
+                blocks_per_SM: Optional[float] = None,
+                warps_per_SM: Optional[float] = None,
 
                  # Metadata fields (not used for comparison)
                  type: Optional[str] = None,
                  external_id: Optional[int] = None,
                  correlation: Optional[int] = None,
                  ts: Optional[float] = None,
-                 # Aggregated duration fields (not used for comparison)
+                 # Fields related to duration (not used for comparison)
+                 dur: Optional[float] = None,
                  avg_dur: Optional[float] = None,
                  min_dur: Optional[float] = None,
                  max_dur: Optional[float] = None,
@@ -186,24 +186,14 @@ class Kernel:
         }
         
         if full:
-            # Include all optional performance fields explicitly (excluding metadata/aggregated fields)
-            if self.registers_per_thread is not None:
-                signature["registers_per_thread"] = self.registers_per_thread
-            if self.occupancy is not None:
-                signature["occupancy"] = self.occupancy
-            if self.stream is not None:
-                signature["stream"] = self.stream
-            if self.device is not None:
-                signature["device"] = self.device
-            if self.context is not None:
-                signature["context"] = self.context
-            if self.queued is not None:
-                signature["queued"] = self.queued
-            if self.blocks_per_SM is not None:
-                signature["blocks_per_SM"] = self.blocks_per_SM
-            if self.warps_per_SM is not None:
-                signature["warps_per_SM"] = self.warps_per_SM
-        
+            signature["registers_per_thread"] = self.registers_per_thread
+            signature["occupancy"] = self.occupancy
+            signature["stream"] = self.stream
+            signature["device"] = self.device
+            signature["context"] = self.context
+            signature["queued"] = self.queued
+            signature["blocks_per_SM"] = self.blocks_per_SM
+            signature["warps_per_SM"] = self.warps_per_SM
         return signature
     
     def compare(self, other: 'Kernel', show_table: bool = False, title: str = "Kernel comparison", full: bool = False) -> Dict[str, Any]:
@@ -339,20 +329,20 @@ class Kernel:
 
 class CPUOp:
     """CPU operation class."""
-    def __init__(self, name: str,
-                 input_dims: Optional[List[List[int]]] = None,
-                 input_strides: Optional[List[List[int]]] = None,
-                 input_type: Optional[List[str]] = None,
-                 concrete_inputs: Optional[List[Any]] = None,
-                 ts: Optional[float] = None,
-                 dur: Optional[float] = None,
-                 external_id: Optional[int] = None):
+    def __init__(self, name: str = "unknown",
+                 input_dims: Optional[List[List[int]]] = [],
+                 input_strides: Optional[List[List[int]]] = [],
+                 input_type: Optional[List[str]] = [],
+                 concrete_inputs: Optional[List[Any]] = [],
+                 external_id: Optional[int] = -1,
+                 ts: Optional[float] = 0.0,
+                 dur: Optional[float] = 0.0):
         """Initialize CPU operation."""
-        self.name = name or "unknown"
-        self.input_dims = input_dims or []
-        self.input_strides = input_strides or []
-        self.input_type = input_type or []
-        self.concrete_inputs = concrete_inputs or []
+        self.name = name
+        self.input_dims = input_dims
+        self.input_strides = input_strides
+        self.input_type = input_type
+        self.concrete_inputs = concrete_inputs
         self.ts = ts
         self.dur = dur
         self.external_id = external_id
@@ -385,7 +375,7 @@ class CPUOp:
         
         return alpha, beta
     
-    def get_signature(self) -> dict:
+    def get_signature(self, full: bool = False) -> dict:
         """
         Extract canonical operation signature (input conditions) from cpu_op.
         
@@ -403,13 +393,20 @@ class CPUOp:
             - input_type: input types 
             - concrete_inputs: concrete input values 
         """
-        return {
+        signature = {
             "name": self.name,
             "input_dims": self.input_dims,
             "input_strides": self.input_strides,
             "input_type": self.input_type,
-            "concrete_inputs": self.concrete_inputs,
         }
+        
+        if full:
+            signature["concrete_inputs"] = self.concrete_inputs
+            signature["ts"] = self.ts
+            signature["dur"] = self.dur
+            signature["external_id"] = self.external_id
+
+        return signature
     
     def compare(self, other: 'CPUOp', show_table: bool = False, title: str = "CPU op comparison") -> bool:
         """Compare this CPU op with another CPU op and return True if all fields match.
@@ -489,7 +486,7 @@ class CPUOp:
         if not cpu_op_dict:
             return None
         return cls(
-            name=cpu_op_dict.get("name", ""),
+            name=cpu_op_dict.get("name"),
             input_dims=cpu_op_dict.get("input_dims"),
             input_strides=cpu_op_dict.get("input_strides"),
             input_type=cpu_op_dict.get("input_type"),
