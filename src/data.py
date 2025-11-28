@@ -344,11 +344,11 @@ class Kernel:
             queued=kernel_dict.get("queued"),
             blocks_per_SM=kernel_dict.get("blocks_per_SM"),
             warps_per_SM=kernel_dict.get("warps_per_SM"),
-            # Metadata 
+
+            # Other fields 
             external_id=kernel_dict.get("external_id"),
             correlation=kernel_dict.get("correlation"),
             ts=kernel_dict.get("ts"),
-            # Duration fields
             dur=kernel_dict.get("dur"),
             avg_dur=kernel_dict.get("avg_dur"),
             min_dur=kernel_dict.get("min_dur"),
@@ -366,7 +366,11 @@ class CPUOp:
                  concrete_inputs: Optional[List[Any]] = [],
                  external_id: Optional[int] = -1,
                  ts: Optional[float] = 0.0,
-                 dur: Optional[float] = 0.0):
+                 dur: Optional[float] = 0.0,
+                 avg_dur: Optional[float] = None,
+                 min_dur: Optional[float] = None,
+                 max_dur: Optional[float] = None,
+                 all_dur: Optional[List[float]] = None):
         """Initialize CPU operation."""
         self.name = name
         self.input_dims = input_dims
@@ -376,6 +380,10 @@ class CPUOp:
         self.ts = ts
         self.dur = dur
         self.external_id = external_id
+        self.avg_dur = avg_dur
+        self.min_dur = min_dur
+        self.max_dur = max_dur
+        self.all_dur = all_dur
     
     def get_alpha_beta(self, default_alpha: float = 1.0, default_beta: float = 1.0) -> Tuple[float, float]:
         """Extract alpha and beta scalars from concrete_inputs for addmm operations.
@@ -521,9 +529,15 @@ class CPUOp:
             input_strides=cpu_op_dict.get("input_strides"),
             input_type=cpu_op_dict.get("input_type"),
             concrete_inputs=cpu_op_dict.get("concrete_inputs"),
+
+            # Other fields
+            external_id=cpu_op_dict.get("external_id"),
             ts=cpu_op_dict.get("ts"),
             dur=cpu_op_dict.get("dur"),
-            external_id=cpu_op_dict.get("external_id")
+            avg_dur=cpu_op_dict.get("avg_dur"),
+            min_dur=cpu_op_dict.get("min_dur"),
+            max_dur=cpu_op_dict.get("max_dur"),
+            all_dur=cpu_op_dict.get("all_dur")
         )
 
 
