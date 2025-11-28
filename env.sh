@@ -10,6 +10,7 @@ export SODA_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Flag to indicate env.sh has been sourced
 export SODA_ENV_LOADED=1
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
 # Core directory structure
 export SODA_SRC="$SODA_ROOT/src"
@@ -67,7 +68,6 @@ export PYTORCH_VERIFY_LOG="$PYTORCH_OUTPUT_DIR/microbench.log"
 # HuggingFace cache (set default if not already set)
 # export HF_HOME="${HF_HOME:-/tmp/hf_cache_$USER}"
 export HF_HOME="/scratch/$USER/hf_cache"
-mkdir -p HF_HOME
 
 # Python path setup for imports
 export PYTHONPATH="$SODA_SRC:$PYTHONPATH"

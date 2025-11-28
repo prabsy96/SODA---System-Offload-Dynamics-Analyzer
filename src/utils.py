@@ -76,7 +76,14 @@ def parse_dtype_to_cublaslt(dtype_str: str) -> str:
         "double": "f64",
         "float64": "f64",
     }
-    return dtype_map.get(dtype_str.lower(), "f32")
+
+    # FIXME: Hack for c10::BFloat16 type strings
+    dtype_str = dtype_str.replace("c10::", "").lower()
+
+    if dtype_str not in dtype_map:
+        raise ValueError(f"Unsupported data type: '{dtype_str}'. Supported types: {list(dtype_map.keys())}")
+    
+    return dtype_map[dtype_str.lower()]
 
 def parse_dtype_to_torch(dtype_str: str):
     """Map dtype strings to torch.dtype objects.
@@ -87,7 +94,7 @@ def parse_dtype_to_torch(dtype_str: str):
     Returns:
         torch.dtype object
     """
-    import torch
+
     dtype_map = {
         "float": torch.float32,
         "float32": torch.float32,
@@ -100,7 +107,14 @@ def parse_dtype_to_torch(dtype_str: str):
         "int64": torch.int64,
         "long": torch.int64,
     }
-    return dtype_map.get(dtype_str.lower(), torch.float32)
+    
+    # FIXME: Hack for c10::BFloat16 type strings
+    dtype_str = dtype_str.replace("c10::", "").lower()
+    
+    if dtype_str not in dtype_map:
+        raise ValueError(f"Unsupported data type: '{dtype_str}'. Supported types: {list(dtype_map.keys())}")
+    
+    return dtype_map[dtype_str]
 
 def get_sequence_str(sequence: Dict[str, Any]) -> str:
     """
@@ -112,11 +126,9 @@ def get_sequence_str(sequence: Dict[str, Any]) -> str:
     Returns:
         Formatted sequence string: "{op_name} -> {kernel_name}".
     """
-    cpu_op = sequence.get('cpu_op', {})
-    kernel = sequence.get('kernel', {})
-    op_name = cpu_op.get('name')
-    kernel_name = clean_kernel_name(kernel.get('name'))
-    return f"{op_name} -> {kernel_name}"
+    cpu_op = sequence['cpu_op']
+    kernel = sequence['kernel']
+    return f"{cpu_op['name']} -> {kernel['name']}"
 
 def us_to_ms(microseconds: float) -> float:
     """
@@ -258,29 +270,30 @@ def extract_alpha_beta(concrete_inputs: List[Any], default_alpha: float = 1.0, d
 
 
 
-def validate_sequences(event_sequences: List[Dict[str, Any]]) -> None:
+def validate_sequences(sequences: List[Dict[str, Any]]) -> None:
     """Validate that all sequences have required fields (kernel, cpu_op, cuda_launch).
     
     Args:
-        event_sequences: List of event sequences.
+        sequences: List of event sequences.
     
     Raises:
         AssertionError: If any sequence is missing required fields.
     """
-    num_sequences = len(event_sequences)
-    assert all(c.get("kernel") for c in event_sequences), f"Some sequences missing kernel (total: {num_sequences})"
-    assert all(c.get("cpu_op") for c in event_sequences), f"Some sequences missing cpu_op (total: {num_sequences})"
-    assert all(c.get("cuda_launch") for c in event_sequences), f"Some sequences missing cuda_launch (total: {num_sequences})"
+    num_sequences = len(sequences)
+    assert all(c['kernel'] for c in sequences), f"Some sequences missing kernel (total: {num_sequences})"
+    assert all(c['cpu_op'] for c in sequences), f"Some sequences missing cpu_op (total: {num_sequences})"
+    assert all(c['cuda_launch'] for c in sequences), f"Some sequences missing cuda_launch (total: {num_sequences})"
 
-def filter_gemm_sequences(event_sequences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def filter_gemm_sequences(sequences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Filter for GEMM kernels only."""
     gemm_sequences = []
-    for e in event_sequences:
+    for seq in sequences:
+        cpu_op_name = seq['cpu_op']['name']
+        kernel_name = seq['kernel']['name']
         # Must be from a GEMM operation
-        if e.get('cpu_op') and e['cpu_op']['name'] in GEMM_OPS:
-            # Kernel name must contain 'gemm' (eg: volta_sgemm_64x32_sliced1x4_nn)
-            if 'gemm' in e.get('kernel', {}).get('name', '').lower():
-                gemm_sequences.append(copy.deepcopy(e))
+        # Kernel name must contain 'gemm'
+        if cpu_op_name in GEMM_OPS and 'gemm' in kernel_name.lower():
+            gemm_sequences.append(copy.deepcopy(seq))
                 
     validate_sequences(gemm_sequences)
     return gemm_sequences

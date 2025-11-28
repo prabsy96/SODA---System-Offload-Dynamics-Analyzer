@@ -209,10 +209,12 @@ def build_base_args(job):
         "--lda", str(job["lda"]),
         "--ldb", str(job["ldb"]),
         "--ldc", str(job["ldc"]),
-        "--order_a", job.get("order_a", "row"),
-        "--order_b", job.get("order_b", "row"),
-        "--trans_a", job.get("trans_a", "N"),
-        "--trans_b", job.get("trans_b", "N"),
+
+        "--order_a", job["order_a"],
+        "--order_b", job["order_b"],
+        "--trans_a", job["trans_a"],
+        "--trans_b", job["trans_b"],
+        
         "--dtype", job["dtype"],
         "--alpha", str(job["alpha"]),
         "--beta", str(job["beta"]),

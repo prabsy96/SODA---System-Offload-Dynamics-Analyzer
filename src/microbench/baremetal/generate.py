@@ -192,12 +192,12 @@ def extract_gemm_params(sequence):
     
     Returns dict with M, N, K, trans_a, trans_b, lda, ldb, ldc, alpha, beta, dtype
     """
-    cpu_op = sequence.get("cpu_op", {})
-    op_name = cpu_op.get("name")
-    input_dims = cpu_op.get("input_dims")
-    input_strides = cpu_op.get("input_strides")
-    input_types = cpu_op.get("input_type")
-    concrete_inputs = cpu_op.get("concrete_inputs")
+    cpu_op = sequence["cpu_op"]
+    op_name = cpu_op["name"]
+    input_dims = cpu_op["input_dims"]
+    input_strides = cpu_op["input_strides"]
+    input_types = cpu_op["input_type"]
+    concrete_inputs = cpu_op["concrete_inputs"]
     
     # Dispatch to operation-specific extractors
     if op_name == "aten::addmm":
@@ -225,7 +225,7 @@ def generate_jobs(target_sequences: dict, warmup: int, runs: int):
         runs: Number of measurement runs.
     """
     output_file = utils.get_path("BAREMETAL_JOBS")
-    sequences = target_sequences.get("sequences", [])
+    sequences = target_sequences["sequences"]
     
     jobs = []
     
@@ -256,29 +256,29 @@ def generate_jobs(target_sequences: dict, warmup: int, runs: int):
             continue
         
         # Build job entry
-        kernel = sequence.get("kernel", {})
-        cpu_op = sequence.get("cpu_op", {})
+        kernel = sequence["kernel"]
+        cpu_op = sequence["cpu_op"]
         job = {
             "id": job_id,
-            "name": kernel.get("name"),
-            "grid": kernel.get("grid"),
-            "block": kernel.get("block"),
-            "shared_memory": kernel.get("shared_memory"),
-            "registers_per_thread": kernel.get("registers_per_thread"),
+            "name": kernel["name"],
+            "grid": kernel["grid"],
+            "block": kernel["block"],
+            "shared_memory": kernel["shared_memory"],
+            "registers_per_thread": kernel["registers_per_thread"],
             "cpu_op": cpu_op,  
             "m": params["m"],
             "n": params["n"],
             "k": params["k"],
-            "order_a": params.get("order_a", "row"),
-            "order_b": params.get("order_b", "row"),
-            "trans_a": params.get("trans_a", "N"),
-            "trans_b": params.get("trans_b", "N"),
-            "lda": params.get("lda", params["k"]),
-            "ldb": params.get("ldb", params["n"]),
-            "ldc": params.get("ldc", params["n"]),
-            "dtype": params.get("dtype", "f32"),
-            "alpha": params.get("alpha", 1.0),
-            "beta": params.get("beta", 0.0),
+            "order_a": params["order_a"],
+            "order_b": params["order_b"],
+            "trans_a": params["trans_a"],
+            "trans_b": params["trans_b"],
+            "lda": params["lda"],
+            "ldb": params["ldb"],
+            "ldc": params["ldc"],
+            "dtype": params["dtype"],
+            "alpha": params["alpha"],
+            "beta": params["beta"],
             "warmup": warmup,
             "runs": runs,
         }

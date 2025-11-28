@@ -154,7 +154,7 @@ def search_cublas_algos_offline():
     
     # Load jobs
     jobs_data = utils.load_json(jobs_file)
-    jobs = jobs_data.get("jobs", [])
+    jobs = jobs_data["jobs"]
     print(f"Loaded {len(jobs)}")
     
     # Build binary
@@ -170,7 +170,7 @@ def search_cublas_algos_offline():
     for job in jobs:
 
         # Skip null kernel jobs 
-        if job.get("name") == "__null__":
+        if job["name"] == "__null__":
             job["cublas_index"] = None
             continue
         

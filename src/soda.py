@@ -209,7 +209,6 @@ class SodaAnalyzer:
         metrics = self.results["metrics"]
         stream_info = self.results["stream_info"]
         top_k_kernels = self.results["top_k_kernels"]
-        fusion_results = self.results.get("fusion_results")
         
         # Generate model_name and config from args
         model_name = self.args.model
@@ -261,8 +260,8 @@ class SodaAnalyzer:
         }
         
         # Add fusion results if available
-        if fusion_results is not None:
-            output["fusion_analysis"] = fusion_results
+        if "fusion_results" in self.results:
+            output["fusion_analysis"] = self.results["fusion_results"]
         
         # Save to file
         utils.save_json(self.report_file, output)
@@ -582,7 +581,7 @@ def main() -> int:
     """Main entry point for the SODA CLI."""
     
     # Check if env.sh has been sourced and loaded
-    if not os.environ.get("SODA_ENV_LOADED"):
+    if "SODA_ENV_LOADED" not in os.environ:
         # Use stderr for early errors before logger is set up
         print("Error: SODA environment not loaded.", file=sys.stderr)
         print("Please run: source env.sh", file=sys.stderr)

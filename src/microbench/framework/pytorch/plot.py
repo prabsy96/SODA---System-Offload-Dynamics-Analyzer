@@ -23,18 +23,18 @@ def plot_pytorch_gemm_sequences(pytorch_gemm_sequences: Dict[str, Any]) -> None:
         plt.savefig(output_file, dpi=150)
         plt.close()
         
-    sequences = pytorch_gemm_sequences.get("sequences", [])
+    sequences = pytorch_gemm_sequences["sequences"]
 
     graphs_dir = utils.get_path("PYTORCH_KERNEL_TAX_GRAPHS")
     utils.ensure_dir(graphs_dir)
 
     for idx, sequence in enumerate(sequences, start=1):
-        kernel = sequence.get("kernel", {})
-        cpu_op = sequence.get("cpu_op", {})
-        meta = sequence.get("meta", {})
-        kernel_name = kernel.get("name", "unknown")
-        op_name = cpu_op.get("name", "unknown")
-        kernel_tax_values = meta.get("all_kernel_tax", [])
+        kernel = sequence["kernel"]
+        cpu_op = sequence["cpu_op"]
+        meta = sequence["meta"]
+        kernel_name = kernel["name"]
+        op_name = cpu_op["name"]
+        kernel_tax_values = meta["all_kernel_tax"]
 
         if not kernel_tax_values:
             # Nothing to plot

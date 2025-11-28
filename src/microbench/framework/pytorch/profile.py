@@ -10,8 +10,8 @@ def create_input_tensors(cpu_op: Dict[str, Any]) -> List[torch.Tensor]:
     Create input tensors from CPU operation metadata.
     """
     input_dims = cpu_op["input_dims"]
-    input_types = cpu_op.get("input_type", [])
-    input_strides = cpu_op.get("input_strides", [])
+    input_types = cpu_op["input_type"]
+    input_strides = cpu_op["input_strides"]
     
     inputs = []
     for i, dims in enumerate(input_dims):
@@ -122,11 +122,12 @@ def replay_sequences_from_cpu_ops(
     
     # Replay each event sequence
     for i, event_sequence in enumerate(event_sequences):
-        cpu_op = event_sequence.get("cpu_op")
-        kernel = event_sequence.get("kernel")
-        
-        assert kernel is not None, f"Kernel is None for event sequence {i}"
-        assert cpu_op is not None, f"CPU operation is None for event sequence {i}"
+        cpu_op = event_sequence["cpu_op"]
+        kernel = event_sequence["kernel"]
+
+        # FIXME: Clean up
+        # assert kernel is not None, f"Kernel is None for event sequence {i}"
+        # assert cpu_op is not None, f"CPU operation is None for event sequence {i}"
         expected_kernel = utils.clean_kernel_name(event_sequence['kernel']['name'])
         seq_idx = i+1 
         
@@ -135,7 +136,7 @@ def replay_sequences_from_cpu_ops(
         # Generate trace filename based on operation name and expected kernel name
         trace_file_name = utils.format_sequence_filename(
             seq_idx, 
-            cpu_op.get("name", "unknown"), 
+            cpu_op['name'], 
             expected_kernel, 
             extension="json"
         )

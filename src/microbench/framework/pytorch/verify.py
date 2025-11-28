@@ -43,7 +43,7 @@ def compare_sequences(target_sequences: list, actual_sequences: list):
         # Compare kernels
         assert actual_kernel is not None and target_kernel is not None, "Missing kernel in sequence"
         results = actual_kernel.compare(target_kernel, show_table=True, title="Pytorch vs Target kernel", full=True)
-        kernel_match = results.get("match", False)
+        kernel_match = results["match"]
         assert kernel_match, f"Kernel mismatch: target={target_kernel.name}, actual={actual_kernel.name}"
         
         summary.append([sequence, cpu_op_match, kernel_match])

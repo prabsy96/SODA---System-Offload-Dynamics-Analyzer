@@ -95,25 +95,28 @@ class Kernel:
                  max_dur: Optional[float] = None,
                  all_dur: Optional[List[float]] = None):
         """Initialize kernel configuration with normalization."""
-        # Normalize name
-        self.name = clean_kernel_name(name) if name else "unknown"
+        if name: 
+            self.name = clean_kernel_name(name)
+        else:
+            self.name = "unknown"
         
-        # Apply defaults if None
         if grid is None:
-            grid = [1, 1, 1]  # Minimum valid CUDA grid dimensions
+            self.grid = to_tuple_int([1, 1, 1]) # Minimum valid CUDA grid dimensions
+        else:
+            self.grid = to_tuple_int(grid)
+
         if block is None:
-            block = [1, 1, 1]  # Minimum valid CUDA block dimensions
+            self.block = to_tuple_int([1, 1, 1]) # Minimum valid CUDA block dimensions
+        else:
+            self.block = to_tuple_int(block)
+        
         if shared_memory is None:
             shared_memory = 0
+            self.shared_memory = norm_shared_mem(shared_memory)
+        else:
+            self.shared_memory = norm_shared_mem(shared_memory)
         
-        # Normalize grid and block to tuples of ints
-        self.grid = to_tuple_int(grid)
-        self.block = to_tuple_int(block)
-        
-        # Normalize shared memory
-        self.shared_memory = norm_shared_mem(shared_memory)
-        
-        # Optional performance fields
+        # These fields stay null if not provided
         self.registers_per_thread = registers_per_thread
         self.occupancy = occupancy
         self.stream = stream
@@ -124,13 +127,9 @@ class Kernel:
         self.blocks_per_SM = blocks_per_SM
         self.warps_per_SM = warps_per_SM
         
-        # Metadata fields (not used for comparison)
-        self.type = type
         self.external_id = external_id
         self.correlation = correlation
         self.ts = ts
-        
-        # Aggregated duration fields (not used for comparison)
         self.avg_dur = avg_dur
         self.min_dur = min_dur
         self.max_dur = max_dur
@@ -143,25 +142,43 @@ class Kernel:
             ["grid", str(list(self.grid))],
             ["block", str(list(self.block))],
             ["shared_memory", str(self.shared_memory)],
+
+            ["registers_per_thread", str(self.registers_per_thread)],
+            ["occupancy", str(self.occupancy)],
+            ["stream", str(self.stream)],
+            ["device", str(self.device)],
+            ["context", str(self.context)],
+            ["queued", str(self.queued)],
+            ["blocks_per_SM", str(self.blocks_per_SM)],
+            ["warps_per_SM", str(self.warps_per_SM)],
         ]
         
-        # Add optional fields if they exist
-        if self.registers_per_thread is not None:
-            data.append(["registers_per_thread", str(self.registers_per_thread)])
-        if self.occupancy is not None:
-            data.append(["occupancy", str(self.occupancy)])
-        if self.stream is not None:
-            data.append(["stream", str(self.stream)])
-        if self.device is not None:
-            data.append(["device", str(self.device)])
-        if self.context is not None:
-            data.append(["context", str(self.context)])
-        if self.queued is not None:
-            data.append(["queued", str(self.queued)])
-        if self.blocks_per_SM is not None:
-            data.append(["blocks_per_SM", str(self.blocks_per_SM)])
-        if self.warps_per_SM is not None:
-            data.append(["warps_per_SM", str(self.warps_per_SM)])
+        # FIXME: Cleanup
+        # if self.registers_per_thread is not None:
+        #     data.append(["registers_per_thread", str(self.registers_per_thread)])
+        # if self.occupancy is not None:
+        #     data.append(["occupancy", str(self.occupancy)])
+        # if self.stream is not None:
+        #     data.append(["stream", str(self.stream)])
+        # if self.device is not None:
+        #     data.append(["device", str(self.device)])
+        # if self.context is not None:
+        #     data.append(["context", str(self.context)])
+        # if self.queued is not None:
+        #     data.append(["queued", str(self.queued)])
+        # if self.blocks_per_SM is not None:
+        #     data.append(["blocks_per_SM", str(self.blocks_per_SM)])
+        # if self.warps_per_SM is not None:
+        #     data.append(["warps_per_SM", str(self.warps_per_SM)])
+
+        # Mentioned for completeness, but not used 
+        # data.append(["external_id", str(self.external_id)])
+        # data.append(["correlation", str(self.correlation)])
+        # data.append(["ts", str(self.ts)])
+        # data.append(["avg_dur", str(self.avg_dur)])
+        # data.append(["min_dur", str(self.min_dur)])
+        # data.append(["max_dur", str(self.max_dur)])
+        # data.append(["all_dur", str(self.all_dur)])
         
         print_utils.comp_table(title, ["Field", "Value"], data)
     
@@ -176,7 +193,7 @@ class Kernel:
             Dictionary with kernel signature fields:
             - name, grid, block, shared_memory (always included)
             - registers_per_thread, occupancy, stream, dur (if full=True)
-            - Excludes: type, external_id, correlation, ts, avg_dur, min_dur, max_dur, all_dur
+            - Excludes: external_id, correlation, ts, avg_dur, min_dur, max_dur, all_dur
         """
         signature = {
             "name": self.name,
@@ -194,6 +211,14 @@ class Kernel:
             signature["queued"] = self.queued
             signature["blocks_per_SM"] = self.blocks_per_SM
             signature["warps_per_SM"] = self.warps_per_SM
+            # Mentioned for completeness, but not used 
+            # signature["external_id"] = self.external_id
+            # signature["correlation"] = self.correlation
+            # signature["ts"] = self.ts
+            # signature["avg_dur"] = self.avg_dur
+            # signature["min_dur"] = self.min_dur
+            # signature["max_dur"] = self.max_dur
+            # signature["all_dur"] = self.all_dur
         return signature
     
     def compare(self, other: 'Kernel', show_table: bool = False, title: str = "Kernel comparison", full: bool = False) -> Dict[str, Any]:
@@ -274,6 +299,15 @@ class Kernel:
                 ("queued", self.queued, other.queued),
                 ("blocks_per_SM", self.blocks_per_SM, other.blocks_per_SM),
                 ("warps_per_SM", self.warps_per_SM, other.warps_per_SM),
+                # Mentioned for completeness, but not used 
+                # ("external_id", self.external_id, other.external_id),
+                # ("correlation", self.correlation, other.correlation),
+                # ("ts", self.ts, other.ts),
+                # ("dur", self.dur, other.dur),
+                # ("avg_dur", self.avg_dur, other.avg_dur),
+                # ("min_dur", self.min_dur, other.min_dur),
+                # ("max_dur", self.max_dur, other.max_dur),
+                # ("all_dur", self.all_dur, other.all_dur),
             ]
             
             for field, self_val, other_val in fields:
@@ -281,9 +315,6 @@ class Kernel:
                 match = match and field_match
                 results[field] = field_match
                 table_data.append([field, self_val, other_val, field_match])
-        
-        # Note: Never show or compare metadata fields (type, external_id, correlation)
-        # Note: Never show or compare duration fields (dur, ts, avg_dur, min_dur, max_dur, all_dur)
         
         results["match"] = match
         
@@ -314,7 +345,6 @@ class Kernel:
             blocks_per_SM=kernel_dict.get("blocks_per_SM"),
             warps_per_SM=kernel_dict.get("warps_per_SM"),
             # Metadata 
-            type=kernel_dict.get("type"),
             external_id=kernel_dict.get("external_id"),
             correlation=kernel_dict.get("correlation"),
             ts=kernel_dict.get("ts"),
