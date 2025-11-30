@@ -142,34 +142,24 @@ class Kernel:
             ["grid", str(list(self.grid))],
             ["block", str(list(self.block))],
             ["shared_memory", str(self.shared_memory)],
-
-            ["registers_per_thread", str(self.registers_per_thread)],
-            ["occupancy", str(self.occupancy)],
-            ["stream", str(self.stream)],
-            ["device", str(self.device)],
-            ["context", str(self.context)],
-            ["queued", str(self.queued)],
-            ["blocks_per_SM", str(self.blocks_per_SM)],
-            ["warps_per_SM", str(self.warps_per_SM)],
         ]
         
-        # FIXME: Cleanup
-        # if self.registers_per_thread is not None:
-        #     data.append(["registers_per_thread", str(self.registers_per_thread)])
-        # if self.occupancy is not None:
-        #     data.append(["occupancy", str(self.occupancy)])
-        # if self.stream is not None:
-        #     data.append(["stream", str(self.stream)])
-        # if self.device is not None:
-        #     data.append(["device", str(self.device)])
-        # if self.context is not None:
-        #     data.append(["context", str(self.context)])
-        # if self.queued is not None:
-        #     data.append(["queued", str(self.queued)])
-        # if self.blocks_per_SM is not None:
-        #     data.append(["blocks_per_SM", str(self.blocks_per_SM)])
-        # if self.warps_per_SM is not None:
-        #     data.append(["warps_per_SM", str(self.warps_per_SM)])
+        if self.registers_per_thread is not None:
+            data.append(["registers_per_thread", str(self.registers_per_thread)])
+        if self.occupancy is not None:
+            data.append(["occupancy", str(self.occupancy)])
+        if self.stream is not None:
+            data.append(["stream", str(self.stream)])
+        if self.device is not None:
+            data.append(["device", str(self.device)])
+        if self.context is not None:
+            data.append(["context", str(self.context)])
+        if self.queued is not None:
+            data.append(["queued", str(self.queued)])
+        if self.blocks_per_SM is not None:
+            data.append(["blocks_per_SM", str(self.blocks_per_SM)])
+        if self.warps_per_SM is not None:
+            data.append(["warps_per_SM", str(self.warps_per_SM)])
 
         # Mentioned for completeness, but not used 
         # data.append(["external_id", str(self.external_id)])

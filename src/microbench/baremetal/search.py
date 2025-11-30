@@ -46,12 +46,12 @@ def get_max_algo_idx(job):
     try:
         result = subprocess.run(base_args, capture_output=True, text=True, timeout=10)
     except subprocess.TimeoutExpired:
-        raise RuntimeError(f"Timeout querying algorithm count for job {job.get('id')}")
+        raise RuntimeError(f"Timeout querying algorithm count for job {job['id']}")
     except Exception as e:
-        raise RuntimeError(f"Failed to query algorithm count for job {job.get('id')}: {e}")
+        raise RuntimeError(f"Failed to query algorithm count for job {job['id']}: {e}")
 
     if result.returncode != 0:
-        raise RuntimeError(f"Query failed for job {job.get('id')} with return code {result.returncode}:\n{result.stderr}")
+        raise RuntimeError(f"Query failed for job {job['id']} with return code {result.returncode}:\n{result.stderr}")
     
     # Parse "Available algorithms: 0-X (total: Y)" format
     for line in result.stdout.split('\n'):
@@ -63,7 +63,7 @@ def get_max_algo_idx(job):
                 assert max_idx == total - 1
                 return max_idx
     
-    raise RuntimeError(f"Could not parse algorithm count from output for job {job.get('id')}:\n{result.stdout}")
+    raise RuntimeError(f"Could not parse algorithm count from output for job {job['id']}:\n{result.stdout}")
 
     
 def sweep_cublas_algos(job, max_idx=200):

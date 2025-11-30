@@ -32,19 +32,19 @@ class SodaMicrobench:
             Dictionary with unique GEMM sequences data.
         """
         # Calculate kernel tax for event sequences
-        event_sequences = utils.calculate_per_seq_launch_tax(list(self.tracer.event_sequences))
+        sequences = utils.calculate_per_seq_launch_tax(list(self.tracer.sequences))
 
         # Save all sequences
         all_sequences_file = utils.get_path("ALL_SEQUENCES")
         all_sequences_data = {
-            "summary": {"count": len(event_sequences)},
-            "sequences": event_sequences
+            "summary": {"count": len(sequences)},
+            "sequences": sequences
         }
         utils.save_json(all_sequences_file, all_sequences_data)
         print(f"Saved {all_sequences_data['summary']['count']} sequences to {all_sequences_file}")
 
         # Filter and save gemm sequences
-        gemm_sequences = utils.filter_gemm_sequences(event_sequences)
+        gemm_sequences = utils.filter_gemm_sequences(sequences)
         all_gemm_sequences_file = utils.get_path("ALL_GEMM_SEQUENCES")
         all_gemm_sequences_data = {
             "summary": {"count": len(gemm_sequences)},

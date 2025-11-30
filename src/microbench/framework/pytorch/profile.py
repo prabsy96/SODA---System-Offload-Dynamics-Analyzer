@@ -104,7 +104,7 @@ def profile_operation(
     prof.export_chrome_trace(str(trace_file))
 
 def replay_sequences_from_cpu_ops(
-    event_sequences: List[Dict[str, Any]], 
+    sequences: List[Dict[str, Any]], 
     warmup: int,
     runs: int
 ) -> List[Dict[str, Any]]:
@@ -118,10 +118,10 @@ def replay_sequences_from_cpu_ops(
     # Store sequences per replay index
     sequence_by_idx = {}
     
-    print(f"Profiling {len(event_sequences)} PyTorch GEMM kernels with {runs} run{'s' if runs > 1 else ''} each (warmup={warmup})")
+    print(f"Profiling {len(sequences)} PyTorch GEMM kernels with {runs} run{'s' if runs > 1 else ''} each (warmup={warmup})")
     
     # Replay each event sequence
-    for i, event_sequence in enumerate(event_sequences):
+    for i, event_sequence in enumerate(sequences):
         cpu_op = event_sequence["cpu_op"]
         kernel = event_sequence["kernel"]
 
@@ -131,7 +131,7 @@ def replay_sequences_from_cpu_ops(
         expected_kernel = utils.clean_kernel_name(event_sequence['kernel']['name'])
         seq_idx = i+1 
         
-        print(f"[{seq_idx}/{len(event_sequences)}] {cpu_op['name']} -> {expected_kernel}")
+        print(f"[{seq_idx}/{len(sequences)}] {cpu_op['name']} -> {expected_kernel}")
         
         # Generate trace filename based on operation name and expected kernel name
         trace_file_name = utils.format_sequence_filename(

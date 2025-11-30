@@ -284,6 +284,43 @@ def validate_sequences(sequences: List[Dict[str, Any]]) -> None:
     assert all(c['cpu_op'] for c in sequences), f"Some sequences missing cpu_op (total: {num_sequences})"
     assert all(c['cuda_launch'] for c in sequences), f"Some sequences missing cuda_launch (total: {num_sequences})"
 
+def validate_static_props(sequences: List[Dict[str, Any]]) -> None:
+    """Validate that static kernel properties are consistent across sequences.
+    
+    Static properties (shared_memory, registers_per_thread, occupancy, etc.) should be
+    identical for all sequences of the same kernel, as they are determined by the kernel
+    code and launch configuration, not execution timing.
+    
+    Args:
+        sequences: List of event sequences that should have identical static properties.
+    
+    Raises:
+        AssertionError: If any static property has inconsistent values across sequences.
+    """
+    # Note: Some fields (occupancy, blocks_per_SM etc.) are only available in PyTorch trace, and not in SQLite traces 
+    static_properties = [
+        'shared_memory', 
+        'registers_per_thread', 
+        'occupancy', 
+        'blocks_per_SM', 
+        'warps_per_SM', 
+        'stream', 
+        'device', 
+        'context',
+        'queued'
+    ]
+
+    for prop in static_properties:
+        values = []
+        for seq in sequences:
+            prop_value = seq['kernel'].get(prop)
+            if prop_value is not None:
+                values.append(prop_value)
+        
+        if values and len(set(values)) > 1:
+            kernel_name = clean_kernel_name(sequences[0]['kernel']['name'])
+            raise AssertionError(f"Static property '{prop}' inconsistent for kernel {kernel_name}: {set(values)} (across {len(sequences)} sequences)")
+
 def filter_gemm_sequences(sequences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Filter for GEMM kernels only."""
     gemm_sequences = []
@@ -331,8 +368,8 @@ def group_by_identity(sequences):
     """
     grouped = defaultdict(list)
     for seq in sequences:
-        kernel = seq.get('kernel')
-        cpu_op = seq.get('cpu_op')
+        kernel = seq["kernel"]
+        cpu_op = seq["cpu_op"]
         if kernel and cpu_op:
             kernel_obj = Kernel.from_dict(kernel)
             cpu_op_obj = CPUOp.from_dict(cpu_op)
@@ -356,9 +393,9 @@ def aggregate_execution_metrics(instances):
     
     # Aggregate kernel duration
     kernel_durations = [
-        inst.get("kernel", {}).get("dur")
+        inst["kernel"]["dur"]
         for inst in instances
-        if inst.get("kernel", {}).get("dur") is not None
+        if inst["kernel"]["dur"] is not None
     ]
     if kernel_durations:
         base_instance["kernel"].update(calculate_avg_min_max(kernel_durations, "dur"))
@@ -366,9 +403,9 @@ def aggregate_execution_metrics(instances):
     
     # Aggregate cpu_op duration
     cpu_op_durations = [
-        inst.get("cpu_op", {}).get("dur")
+        inst["cpu_op"]["dur"]
         for inst in instances
-        if inst.get("cpu_op", {}).get("dur") is not None
+        if inst["cpu_op"]["dur"] is not None
     ]
     if cpu_op_durations:
         base_instance["cpu_op"].update(calculate_avg_min_max(cpu_op_durations, "dur"))
@@ -376,9 +413,9 @@ def aggregate_execution_metrics(instances):
     
     # Aggregate cuda_launch duration
     cuda_launch_durations = [
-        inst.get("cuda_launch", {}).get("dur")
+        inst["cuda_launch"]["dur"]
         for inst in instances
-        if inst.get("cuda_launch", {}).get("dur") is not None
+        if inst["cuda_launch"]["dur"] is not None
     ]
     if cuda_launch_durations:
         base_instance["cuda_launch"].update(calculate_avg_min_max(cuda_launch_durations, "dur"))
@@ -386,9 +423,9 @@ def aggregate_execution_metrics(instances):
     
     # Aggregate kernel_tax
     kernel_tax_values = [
-        inst.get("kernel_tax")
+        inst["kernel_tax"]
         for inst in instances
-        if inst.get("kernel_tax") is not None
+        if inst["kernel_tax"] is not None
     ]
 
     meta = {"count": len(instances), "all_kernel_tax": kernel_tax_values}
@@ -427,17 +464,8 @@ def deduplicate_and_aggregate(sequences):
     unique_gemm_sequences = []
     for key, instances in grouped_sequences.items():
         
-        # Verify static properties
-        base_instance = copy.deepcopy(instances[0])
-        base_kernel = base_instance['kernel']
-        
-        # Verify static properties
-        static_props = ['shared_memory', 'registers_per_thread', 'occupancy', 'blocks_per_SM', 'warps_per_SM', 'stream', 'device', 'context']
-        for prop in static_props:
-            values = [inst['kernel'].get(prop) for inst in instances if inst['kernel'].get(prop) is not None]
-            if values and len(set(values)) > 1:
-                kernel_name = clean_kernel_name(key[0])
-                raise AssertionError(f"Static property '{prop}' inconsistent for kernel {kernel_name}: {set(values)} (across {len(instances)} instances)")
+        # Verify static properties are consistent across instances
+        validate_static_props(instances)
 
         # Aggregate execution metrics (kernel tax, cpu op duration, cuda launch duration, kernel duration)
         base_instance = aggregate_execution_metrics(instances)
@@ -445,10 +473,10 @@ def deduplicate_and_aggregate(sequences):
         # Construct output structure 
         # TODO: Cleanup
         # sequence_entry = {
-        #     "meta": base_instance.get('meta'),
+        #     "meta": base_instance["meta"],
         #     "kernel": base_instance['kernel'],
-        #     "cuda_launch": base_instance.get('cuda_launch'),
-        #     "cpu_op": base_instance.get('cpu_op')
+        #     "cuda_launch": base_instance["cuda_launch"],
+        #     "cpu_op": base_instance["cpu_op"]
         # }
         sequence_entry = base_instance
         
@@ -714,67 +742,68 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
     kernel_events = []
     gpu_mem_events = []
     
-    for event in trace.get("traceEvents", []):
-        cat = event.get("cat")
+    for event in trace["traceEvents"]:
+
+        cat = event.get("cat", "")
         args = event.get("args", {})
-        external_id = args.get("External id")
-        correlation = args.get("correlation")
-        
+        external_id = args.get("External id", None)
+        correlation = args.get("correlation", None)
+         
         if cat == "cpu_op" and external_id is not None:
             op_events_by_ext_id[external_id] = {
                 "type": "cpu_op",
-                "name": event.get("name", ""),
+                "name": event["name"],
                 "external_id": external_id,
-                "input_dims": args.get("Input Dims", []),
-                "input_strides": args.get("Input Strides", []),
-                "input_type": args.get("Input type", []),
-                "concrete_inputs": args.get("Concrete Inputs", []),
-                "ts": event.get("ts"),
-                "dur": event.get("dur")
+                "input_dims": args["Input Dims"],
+                "input_strides": args["Input Strides"],
+                "input_type": args["Input type"],
+                "concrete_inputs": args["Concrete Inputs"],
+                "ts": event["ts"],
+                "dur": event["dur"]
             }
-        elif cat == "cuda_runtime" and event.get("name") == "cudaLaunchKernel":
+        elif cat == "cuda_runtime" and event["name"] == "cudaLaunchKernel":
             if external_id is not None and correlation is not None:
                 cuda_launch_events_by_corr[correlation] = {
                     "type": "cuda_launch",
-                    "name": event.get("name", ""),
+                    "name": event["name"],
                     "external_id": external_id,
                     "correlation": correlation,
-                    "ts": event.get("ts"),
-                    "dur": event.get("dur"),
-                    "cbid": args.get("cbid")
+                    "ts": event["ts"],
+                    "dur": event["dur"],
+                    "cbid": args["cbid"]
                 }
         elif cat == "kernel" and external_id is not None and correlation is not None:
             kernel_events.append({
                 "type": "kernel",
-                "name": clean_kernel_name(event.get("name", "")),
+                "name": clean_kernel_name(event["name"]),
                 "external_id": external_id,
                 "correlation": correlation,
-                "grid": args.get("grid"),
-                "block": args.get("block"),
-                "shared_memory": args.get("shared memory"),
-                "registers_per_thread": args.get("registers per thread"),
-                "blocks_per_SM": args.get("blocks per SM"),
-                "warps_per_SM": args.get("warps per SM"),
-                "occupancy": args.get("est. achieved occupancy %"),
-                "stream": args.get("stream"),
-                "device": args.get("device"),
-                "context": args.get("context"),
-                "queued": args.get("queued"),
-                "dur": event.get("dur"),
-                "ts": event.get("ts")
+                "grid": args["grid"],
+                "block": args["block"],
+                "shared_memory": args["shared memory"],
+                "registers_per_thread": args["registers per thread"],
+                "blocks_per_SM": args["blocks per SM"],
+                "warps_per_SM": args["warps per SM"],
+                "occupancy": args["est. achieved occupancy %"],
+                "stream": args["stream"],
+                "device": args["device"],
+                "context": args["context"],
+                "queued": args["queued"],
+                "dur": event["dur"],
+                "ts": event["ts"]
             })
         elif cat == "gpu_memcpy" or cat == "gpu_memset":
             gpu_mem_events.append({
                 "type": cat,
-                "name": event.get("name", ""),
+                "name": event["name"],
                 "correlation": correlation,
-                "stream": args.get("stream"),
-                "device": args.get("device"),
-                "context": args.get("context"),
-                "ts": event.get("ts"),
-                "dur": event.get("dur"),
-                "bytes": args.get("bytes"),
-                "memory_bandwidth_gbs": args.get("memory bandwidth (GB/s)") if cat == "gpu_memcpy" else None
+                "stream": args["stream"],
+                "device": args["device"],
+                "context": args["context"],
+                "ts": event["ts"],
+                "dur": event["dur"],
+                "bytes": args["bytes"],
+                "memory_bandwidth_gbs": args["memory bandwidth (GB/s)"] if cat == "gpu_memcpy" else None
             })
     
     # Create hierarchical structure
@@ -809,79 +838,76 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
     cuda_launches = events["cpu"]["launches"]
     kernel_events = gpu_events["kernels"]
 
-    event_sequences = []
+    sequences = []
     for kernel in kernel_events:
-        external_id = kernel.get("external_id")
-        correlation = kernel.get("correlation")
+        external_id = kernel["external_id"]
+        correlation = kernel["correlation"]
         cpu_op = cpu_ops.get(external_id) 
         cuda_launch = cuda_launches.get(correlation) 
         
-        event_sequences.append({
+        sequences.append({
             "kernel": kernel,
             "cuda_launch": cuda_launch,
             "cpu_op": cpu_op,
         })
     
-    validate_sequences(event_sequences)
-    return event_sequences
+    validate_sequences(sequences)
+    return sequences
 
 
-def calculate_per_seq_launch_tax(event_sequences: List[Dict]) -> List[Dict]:
+def calculate_per_seq_launch_tax(sequences: List[Dict]) -> List[Dict]:
     """
     Calculates launch tax for each sequence and adds it to the sequence dict.
 
     Args:
-        event_sequences: List of event sequence dictionaries.
+        sequences: List of event sequence dictionaries.
 
     Returns:
         Modified event sequences with "kernel_tax" key added to each.
     """
-    for seq in event_sequences:
-        kernel = seq.get("kernel")
-        cuda_launch = seq.get("cuda_launch")
-        if kernel and cuda_launch and kernel.get("ts") is not None and cuda_launch.get("ts") is not None:
-            launch_tax = kernel["ts"] - cuda_launch["ts"]
-            assert launch_tax >= 0, f"Negative launch tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={cuda_launch['ts']}, tax={launch_tax}"
-            seq["kernel_tax"] = launch_tax
-        else:
-            seq["kernel_tax"] = None
+    for seq in sequences:
+        kernel = seq["kernel"]
+        cuda_launch = seq["cuda_launch"]
+        launch_tax = kernel["ts"] - cuda_launch["ts"]
+        assert launch_tax >= 0, f"Negative launch tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={cuda_launch['ts']}, tax={launch_tax}"
+        seq["kernel_tax"] = launch_tax
 
-    return event_sequences
+    return sequences
 
 
-def calculate_total_launch_tax(event_sequences: List[Dict]) -> float:
+def calculate_total_launch_tax(sequences: List[Dict]) -> float:
     """
     Calculates total launch tax across all sequences.
 
     Args:
-        event_sequences: List of event sequence dictionaries with "kernel_tax" key.
+        sequences: List of event sequence dictionaries with "kernel_tax" key.
 
     Returns:
         Total launch tax in microseconds.
     """
     total_tax = 0.0
-    for seq in event_sequences:
-        kernel_tax = seq.get("kernel_tax")
+    for seq in sequences:
+        kernel_tax = seq["kernel_tax"]
         if kernel_tax is not None:
             total_tax += kernel_tax
     return total_tax
 
 
-def calculate_avg_launch_tax(event_sequences: List[Dict]) -> float:
+def calculate_avg_launch_tax(sequences: List[Dict]) -> float:
     """
     Calculates average launch tax across all sequences.
 
     Args:
-        event_sequences: List of event sequence dictionaries with "kernel_tax" key.
+        sequences: List of event sequence dictionaries with "kernel_tax" key.
 
     Returns:
         Average launch tax in microseconds.
     """
-    if not event_sequences:
+    if not sequences:
         return 0.0
     
-    total_tax = calculate_total_launch_tax(event_sequences)
-    num_kernels = len(event_sequences)
+    total_tax = calculate_total_launch_tax(sequences)
+    num_kernels = len(sequences)
     return total_tax / num_kernels if num_kernels > 0 else 0.0
 
 def get_average_kernel_duration(events: Dict[str, Any]) -> Dict[str, float]:
@@ -902,7 +928,7 @@ def get_average_kernel_duration(events: Dict[str, Any]) -> Dict[str, float]:
 
     for kernel in kernel_events:
         kernel_name = kernel["name"]
-        kernel_stats[kernel_name]["total_duration"] += kernel.get("dur", 0)
+        kernel_stats[kernel_name]["total_duration"] += kernel["dur"]
         kernel_stats[kernel_name]["count"] += 1
     
     avg_durations = {}
@@ -939,7 +965,7 @@ def get_top_k_kernels(events: Dict[str, Any], k: int = 3) -> Dict[str, List[Tupl
     for kernel in kernel_events:
         kernel_name = kernel["name"]
         kernel_stats[kernel_name]["frequency"] += 1
-        kernel_stats[kernel_name]["duration"] += float(kernel.get("dur", 0))
+        kernel_stats[kernel_name]["duration"] += float(kernel["dur"])
     
     # Top k by frequency
     top_k_by_freq = sorted(
@@ -992,10 +1018,10 @@ def calculate_total_inference_time(trace: Dict[str, Any]) -> float:
     """
     all_timestamps = []
     
-    for event in trace.get("traceEvents", []):
-        if event.get("ph") == "X":  # Only complete events (excludes flow markers)
-            start_time = float(event.get("ts"))
-            duration = float(event.get("dur", 0))
+    for event in trace["traceEvents"]:
+        if event["ph"] == "X":  # Only complete events (excludes flow markers)
+            start_time = float(event["ts"])
+            duration = float(event["dur"])
             end_time = start_time + duration
             all_timestamps.append((start_time, end_time))
     
@@ -1028,8 +1054,8 @@ def calculate_total_gpu_time_span(events: Dict[str, Any]) -> float:
     
     gpu_event_intervals = []
     for event in gpu_events:
-        start_time = float(event.get("ts", 0))
-        end_time = start_time + float(event.get("dur", 0))
+        start_time = float(event["ts"])
+        end_time = start_time + float(event["dur"])
         gpu_event_intervals.append((start_time, end_time))
     
     min_start = min(start_time for start_time, _ in gpu_event_intervals)
@@ -1052,7 +1078,7 @@ def calculate_kernel_exec_time(events: Dict[str, Any]) -> Dict[str, float]:
     
     total_kernel_exec_time = 0.0
     for kernel in kernel_events:
-        total_kernel_exec_time += float(kernel.get("dur", 0))
+        total_kernel_exec_time += float(kernel["dur"])
     
     avg_kernel_exec_time = total_kernel_exec_time / num_kernels if num_kernels > 0 else 0.0
     
@@ -1085,8 +1111,8 @@ def calculate_true_gpu_busy_time(events: Dict[str, Any]) -> float:
     # Extract GPU event intervals
     gpu_event_intervals = []
     for event in gpu_events:
-        start_time = float(event.get("ts", 0))
-        end_time = start_time + float(event.get("dur", 0))
+        start_time = float(event["ts"])
+        end_time = start_time + float(event["dur"])
         gpu_event_intervals.append((start_time, end_time))
     
     # Sort by start time
@@ -1165,19 +1191,19 @@ def analyze_per_stream(events: Dict[str, Any]) -> Dict:
         stream_info[stream_id]["ops"].append(op)
     
     for stream_id, data in stream_info.items():
-        ops_on_stream = sorted(data["ops"], key=lambda x: float(x.get("ts", 0)))
+        ops_on_stream = sorted(data["ops"], key=lambda x: float(x["ts"]))
         stream_info[stream_id]["ops"] = ops_on_stream
         stream_info[stream_id]["op_count"] = len(ops_on_stream)
         
-        stream_kernels = [op for op in ops_on_stream if op.get("type") == "kernel"]
+        stream_kernels = [op for op in ops_on_stream if op["type"] == "kernel"]
         stream_info[stream_id]["kernel_count"] = len(stream_kernels)
         stream_info[stream_id]["total_kernel_exec_time"] = sum(
-            float(k.get("dur", 0)) for k in stream_kernels
+            float(k["dur"]) for k in stream_kernels
         )
         
         if stream_kernels:
             stream_intervals = sorted([
-                (float(k["ts"]), float(k["ts"]) + float(k.get("dur", 0)))
+                (float(k["ts"]), float(k["ts"]) + float(k["dur"]))
                 for k in stream_kernels
             ])
             s_merged = [stream_intervals[0]]
@@ -1195,12 +1221,12 @@ def analyze_per_stream(events: Dict[str, Any]) -> Dict:
 
 
 
-def analyze_kernel_fusion_candidates(event_sequences: List[Dict], exact_length: int, prox_score_threshold: float, logger=None) -> Optional[Dict]:
+def analyze_kernel_fusion_candidates(sequences: List[Dict], exact_length: int, prox_score_threshold: float, logger=None) -> Optional[Dict]:
     """
     Analyzes kernel launch sequences to find opportunities for fusion.
 
     Args:
-        event_sequences: List of event sequence dictionaries.
+        sequences: List of event sequence dictionaries.
         exact_length: The exact length of sequences to analyze.
         prox_score_threshold: The proximity score required to recommend a fusion (e.g., 1.0 for deterministic).
         logger: Optional logger instance for logging results. If None, no logging is performed.
@@ -1216,9 +1242,9 @@ def analyze_kernel_fusion_candidates(event_sequences: List[Dict], exact_length: 
     all_segments = []
     current_segment = []
     # Separate event sequences by synchronization points
-    for seq in event_sequences:
-        cuda_launch = seq.get("cuda_launch")
-        if cuda_launch and 'cudaStreamSynchronize' in cuda_launch.get("name", ""):
+    for seq in sequences:
+        cuda_launch = seq["cuda_launch"]
+        if cuda_launch and 'cudaStreamSynchronize' in cuda_launch["name"]:
             if current_segment:
                 all_segments.append(current_segment)
             current_segment = []
@@ -1232,7 +1258,7 @@ def analyze_kernel_fusion_candidates(event_sequences: List[Dict], exact_length: 
     for segment in all_segments:
         current_chain = deque(maxlen=exact_length)
         for seq in segment:
-            kernel = seq.get("kernel")
+            kernel = seq["kernel"]
             if kernel:
                 current_chain.append(kernel["name"])
                 if len(current_chain) == exact_length:
@@ -1242,8 +1268,8 @@ def analyze_kernel_fusion_candidates(event_sequences: List[Dict], exact_length: 
     # Calculate proximity scores
     fusion_recommendations = []
     kernel_freq: DefaultDict[str, int] = defaultdict(int)
-    for seq in event_sequences:
-        kernel = seq.get("kernel")
+    for seq in sequences:
+        kernel = seq["kernel"]
         if kernel:
             kernel_freq[kernel["name"]] += 1
         
@@ -1251,7 +1277,7 @@ def analyze_kernel_fusion_candidates(event_sequences: List[Dict], exact_length: 
         # Count occurrences of this exact chain
         count = 0
         for segment in all_segments:
-            segment_kernels = [seq["kernel"]["name"] for seq in segment if seq.get("kernel")]
+            segment_kernels = [seq["kernel"]["name"] for seq in segment if seq["kernel"]]
             for i in range(len(segment_kernels) - exact_length + 1):
                 if tuple(segment_kernels[i:i+exact_length]) == chain:
                     count += 1

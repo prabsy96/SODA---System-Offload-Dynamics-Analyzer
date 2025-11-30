@@ -55,7 +55,7 @@ class SodaAnalyzer:
         
         self.trace = tracer.trace_data
         self.events = tracer.events
-        self.event_sequences = tracer.event_sequences
+        self.sequences = tracer.sequences
         self.results = None
     
     def analyze(self) -> Dict[str, Any]:
@@ -70,12 +70,12 @@ class SodaAnalyzer:
             - metrics: Performance metrics (inference time, GPU utilization, etc.)
             - stream_info: Per-stream analysis
             - top_k_kernels: Top-k kernels by frequency and duration
-            - event_sequences: Event sequences
+            - sequences: Event sequences
             - avg_kernel_dur: Average kernel duration results
         """
         LOGGER.info("=== Analyzing Trace Data ===")
-        LOGGER.info(f"Analyzing {len(self.event_sequences)} event sequences")
-        event_sequences = utils.calculate_per_seq_launch_tax(list(self.event_sequences))
+        LOGGER.info(f"Analyzing {len(self.sequences)} event sequences")
+        sequences = utils.calculate_per_seq_launch_tax(list(self.sequences))
         
         # Analyze per-stream metrics
         stream_info = utils.analyze_per_stream(self.events)
@@ -90,8 +90,8 @@ class SodaAnalyzer:
         
         # Kernel metrics
         kernel_exec_time = utils.calculate_kernel_exec_time(self.events)
-        total_launch_tax = utils.calculate_total_launch_tax(event_sequences)
-        avg_launch_tax = utils.calculate_avg_launch_tax(event_sequences)
+        total_launch_tax = utils.calculate_total_launch_tax(sequences)
+        avg_launch_tax = utils.calculate_avg_launch_tax(sequences)
         avg_kernel_dur = utils.get_average_kernel_duration(self.events)
         top_k_kernels = utils.get_top_k_kernels(self.events, k=3)
         
@@ -101,7 +101,7 @@ class SodaAnalyzer:
             LOGGER.info("=== Kernel Fusion Analysis ===")
             fusion_results = {}
             for f in self.args.fusion:
-                fusion_results[f] = utils.analyze_kernel_fusion_candidates(event_sequences, f, self.args.prox_score, logger=LOGGER)
+                fusion_results[f] = utils.analyze_kernel_fusion_candidates(sequences, f, self.args.prox_score, logger=LOGGER)
         
         # Build metrics dictionary 
         metrics = {
@@ -127,7 +127,7 @@ class SodaAnalyzer:
             "metrics": metrics,
             "stream_info": stream_info,
             "top_k_kernels": top_k_kernels,
-            "event_sequences": event_sequences,
+            "sequences": sequences,
             "avg_kernel_dur": avg_kernel_dur,
             "fusion_results": fusion_results,
         }
@@ -398,7 +398,7 @@ class ModelTracer:
         # Objects related to trace data collection and processing
         self.trace_data = None
         self.events = None
-        self.event_sequences = None
+        self.sequences = None
     
     def setup(self) -> None:
         """
@@ -520,8 +520,8 @@ class ModelTracer:
         Parses the trace to collect events and build linked event sequences.
         """
         self.events = utils.collect_events(self.trace_data)
-        self.event_sequences = utils.link_sequences(self.events)
-        LOGGER.info(f"Collected {len(self.event_sequences)} event sequences.")
+        self.sequences = utils.link_sequences(self.events)
+        LOGGER.info(f"Collected {len(self.sequences)} event sequences.")
 
     def trace_forward_pass_for_decoder(self) -> None:
         """

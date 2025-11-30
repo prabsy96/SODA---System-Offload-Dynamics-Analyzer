@@ -28,29 +28,29 @@ def load_pytorch_results(pytorch_file):
     with open(pytorch_file, 'r') as f:
         data = json.load(f)
     
-    sequences = data.get("sequences", [])
+    sequences = data["sequences"]
     results = {}
     
     for idx, sequence in enumerate(sequences):
         job_id = f"{idx+1:04d}"
         
-        kernel_dict = sequence.get("kernel", {})
-        cpu_op_dict = sequence.get("cpu_op", {})
-        meta = sequence.get("meta", {})
+        kernel_dict = sequence["kernel"]
+        cpu_op_dict = sequence["cpu_op"]
+        meta = sequence["meta"]
         
         # Convert dicts to objects
-        cpu_op = CPUOp.from_dict(cpu_op_dict) if cpu_op_dict else None
-        kernel = Kernel.from_dict(kernel_dict) if kernel_dict else None
+        cpu_op = CPUOp.from_dict(cpu_op_dict)
+        kernel = Kernel.from_dict(kernel_dict)
         
-        op_signature = cpu_op.get_signature() if cpu_op else {}  
-        kernel_info = kernel.get_signature() if kernel else {}
+        op_signature = cpu_op.get_signature()
+        kernel_info = kernel.get_signature()
         
         # Extract stats
         stats = {
-            "avg_kernel_tax": meta.get("avg_kernel_tax", 0.0),
-            "min_kernel_tax": meta.get("min_kernel_tax", 0.0),
-            "max_kernel_tax": meta.get("max_kernel_tax", 0.0),
-            "count": meta.get("count", 0),
+            "avg_kernel_tax": meta["avg_kernel_tax"],
+            "min_kernel_tax": meta["min_kernel_tax"],
+            "max_kernel_tax": meta["max_kernel_tax"],
+            "count": meta["count"],
         }
         
         results[job_id] = {
@@ -71,13 +71,13 @@ def load_baremetal_results(baremetal_file):
     with open(baremetal_file, 'r') as f:
         data = json.load(f)
     
-    sequences = data.get("sequences", [])
+    sequences = data["sequences"]
     results = {}
     
     for sequence in sequences:
         job_id = sequence["meta"]["job_id"]
         # Skip null kernel job (0000) from comparison results
-        if sequence.get("kernel", {}).get("name") == "__null__":
+        if sequence["kernel"]["name"] == "__null__":
             continue
         results[job_id] = {
             "kernel": sequence["kernel"],
@@ -104,10 +104,10 @@ def compare_kernels(pytorch_kernel, baremetal_kernel):
         baremetal_kernel, show_table=False, full=False
     )
 
-    name_match = compare_result.get("name", False)
-    grid_match = compare_result.get("grid", [])
-    block_match = compare_result.get("block", [])
-    shared_match = compare_result.get("shared_memory", False)
+    name_match = compare_result["name"]
+    grid_match = compare_result["grid"]
+    block_match = compare_result["block"]
+    shared_match = compare_result["shared_memory"]
     config_match = bool(
         grid_match and 
         all(grid_match) and 
@@ -189,7 +189,7 @@ def print_summary(matches, baseline_tax=None):
     for match in matches:
         name_match = "✓" if match["match_status"]["name_match"] else "✗"
         config_match = "✓" if match["match_status"]["config_match"] else "✗"
-        kernel_name = match["kernel"].get("name") or "__null_kernel__"
+        kernel_name = match["kernel"]["name"]
         per_kernel_rows.append([
             match["job_id"],
             kernel_name,
@@ -247,8 +247,8 @@ def compare():
     null_kernel_tax = None
 
     baremetal_data = utils.load_json(baremetal_file)
-    for sequence in baremetal_data.get("sequences", []):
-        if sequence.get("kernel", {}).get("name") == "__null__":
+    for sequence in baremetal_data["sequences"]:
+        if sequence["kernel"]["name"] == "__null__":
             null_kernel_tax = sequence["meta"]["avg_kernel_tax"]
             break
     
