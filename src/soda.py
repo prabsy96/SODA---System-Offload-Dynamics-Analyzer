@@ -17,6 +17,13 @@ from collections import defaultdict, deque
 from torch.profiler import ProfilerActivity, profile
 from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple
 
+# for fp8 e4m3 format support
+try:
+    from transformers.utils.quantization_config import FP8Config
+    FP8_CONFIG_AVAILABLE = True
+except ImportError:
+    FP8Config = None
+    FP8_CONFIG_AVAILABLE = False
 
 def us_to_ms(microseconds: float) -> float:
     """Convert microseconds to milliseconds."""
@@ -62,17 +69,17 @@ class SodaProfiler:
         parser.add_argument(
             "-p",
             "--precision",
-            default="float16",
-            choices=["float32", "float16", "bfloat16"],
+            default="bfloat16",
+            choices=["float32", "float16", "bfloat16", "float8_e4m3fn"],
             help="Precision for model weights and operations",
         )
         parser.add_argument(
-            "-sl", "--seq-len", dest="seq_len", type=int, default=512, 
-            help="Sequence length for synthetic input."
+            "-sl", "--seq-len", dest="seq_len", type=int, nargs="+", default=[512], 
+            help="Sequence length(s) for synthetic input. Provide multiple values for sweep."
         )
         parser.add_argument(
-            "-bs", "--batch-size", dest="batch_size", type=int, default=1, 
-            help="Batch size for synthetic input."
+            "-bs", "--batch-size", dest="batch_size", type=int, nargs="+", default=[1], 
+            help="Batch size(s) for synthetic input. Provide multiple values for sweep."
         )
         parser.add_argument(
             "-f",
@@ -105,28 +112,46 @@ class SodaProfiler:
         parsed_args = parser.parse_args(args)
         
         # Validate arguments
-        if parsed_args.device == "cpu" and parsed_args.precision == "float16":
-            print("Warning: float16 is not supported on CPU. Forcing float32.")
+        if parsed_args.device == "cpu" and parsed_args.precision in ["float16", "float8_e4m3fn", "float8_e5m2", "bfloat16"]:
+            print(f"Warning: {parsed_args.precision} is not supported on CPU. Forcing float32.")
             parsed_args.precision = "float32"
 
         if not torch.cuda.is_available() and parsed_args.device == "cuda":
             print("Error: CUDA is not available. Please select --device cpu.", file=sys.stderr)
             sys.exit(1)
         
+        if parsed_args.precision in ["float8_e4m3fn"]:
+            if not hasattr(torch, 'float8_e4m3fn'):
+                print("Error: FP8 requires PyTorch 2.1+. Please upgrade PyTorch.", file=sys.stderr)
+                sys.exit(1)
+
+            if parsed_args.device == "cuda":
+                capability = torch.cuda.get_device_capability()
+                if capability[0] < 9 and not (capability[0] == 8 and capability[1] >= 9):
+                    print(f"Warning: FP8 requires SM89+ (Ada/Hopper). Detected SM{capability[0]}{capability[1]}.", file=sys.stderr)
+                    print("FP8 may not be hardware-accelerated on this device.", file=sys.stderr)
+
         return parsed_args
 
     @staticmethod
     def generate_experiment_name(args: argparse.Namespace) -> str:
         """
         Generates a unique experiment directory name from arguments.
-        
-        Args:
-            args: Parsed command-line arguments.
-            
-        Returns:
-            Experiment directory name string.
+
         """
-        return f"{args.model.replace('/', '_')}_{args.compile_type}_bs{args.batch_size}_sl{args.seq_len}"
+        # Batch size part
+        if len(args.batch_size) == 1:
+            bs_str = f"bs{args.batch_size[0]}"
+        else:
+            bs_str = "bs_sweep"
+        
+        # Sequence length part
+        if len(args.seq_len) == 1:
+            sl_str = f"sl{args.seq_len[0]}"
+        else:
+            sl_str = "sl_sweep"
+            
+        return f"{args.model.replace('/', '_')}_{args.compile_type}_{bs_str}_{sl_str}"
 
     def __init__(self, model_handler: 'ModelHandler', args: argparse.Namespace, log_console: bool = True, log_file: bool = True):
         """
@@ -140,8 +165,12 @@ class SodaProfiler:
             log_console: If True, write logs to console/stdout.
             log_file: If True, write logs to file.
         """
+        from datetime import datetime
+
         self.args = args
         self.model_handler = model_handler
+
+        self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         # Derive experiment_name, output_dir from args
         self.experiment_name = self.generate_experiment_name(args)
@@ -157,11 +186,13 @@ class SodaProfiler:
         np.random.seed(args.seed)
         
         self.trace_file_path = self.output_dir / "trace.json"
-        self.report_file_path = self.output_dir / "report.json"
+        self.report_file_path = self.output_dir / f"report_{self.run_id}.json"
         
         self.trace = None
         self.events = None
         self.results = None
+
+        self._sweep_runs = []
 
     def trace_forward_pass_for_encoder(self, inputs: Dict[str, torch.Tensor]) -> str:
         """
@@ -181,7 +212,11 @@ class SodaProfiler:
             for _ in range(5):
                 self.model_handler.pytorch_model(**inputs)
         
-        # Profiled run
+        # Synchronize before timing
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        # Profiled run with explicit timing
         with torch.no_grad():
             with profile(
                 activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
@@ -189,7 +224,15 @@ class SodaProfiler:
                 with_flops=True,
                 profile_memory=True,
             ) as prof:
+                start_time = torch.cuda.Event(enable_timing=True)
+                end_time = torch.cuda.Event(enable_timing=True)
+                
+                start_time.record()
                 self.model_handler.pytorch_model(**inputs)
+                end_time.record()
+                
+                torch.cuda.synchronize()
+                self.measured_inference_time_ms = start_time.elapsed_time(end_time)
 
         prof.export_chrome_trace(str(self.trace_file_path))
         
@@ -240,6 +283,10 @@ class SodaProfiler:
             for _ in range(5):
                 self.model_handler.pytorch_model.generate(**inputs, max_new_tokens=1, do_sample=False, pad_token_id=self.model_handler.tokenizer.pad_token_id)
 
+        # Synchronize before timing
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
         # Profiled run
         with torch.no_grad():
             with profile(
@@ -248,15 +295,58 @@ class SodaProfiler:
                 with_flops=True,
                 profile_memory=True,
             ) as prof:
-                self.model_handler.pytorch_model.generate(**inputs, max_new_tokens=1, do_sample=False, pad_token_id=self.model_handler.tokenizer.pad_token_id)
+                start_time = torch.cuda.Event(enable_timing=True)
+                end_time = torch.cuda.Event(enable_timing=True)
+                
+                start_time.record()
+                self.model_handler.pytorch_model.generate(
+                    **inputs, max_new_tokens=1, do_sample=False, 
+                    pad_token_id=self.model_handler.tokenizer.pad_token_id
+                )
+                end_time.record()
+                
+                torch.cuda.synchronize()
+                self.measured_inference_time_ms = start_time.elapsed_time(end_time)
         
         prof.export_chrome_trace(str(self.trace_file_path))
-        
-        # Load trace data into memory immediately
         self.trace = SodaProfiler.load_json(self.trace_file_path)
         
         self.logger.info(f"* Chrome trace file generated at: {self.trace_file_path}")
         return str(self.trace_file_path)
+    
+    def calculate_profiler_wall_clock_time(self) -> float:
+        """
+        Calculates wall-clock time from PyTorch profiler trace events.
+        
+        This measures the time span from the first to last trace event,
+        which includes profiler overhead. Useful for comparison with
+        CUDA event timing.
+        
+        Uses self.trace
+            
+        Returns:
+            Wall-clock time in microseconds.
+        """
+        if isinstance(self.trace, list):
+            trace_events = self.trace
+        else:
+            trace_events = self.trace.get("traceEvents", [])
+        
+        all_timestamps = []
+        for event in trace_events:
+            if event.get("ph") == "X":  # Complete events only
+                start_time = float(event.get("ts", 0))
+                duration = float(event.get("dur", 0))
+                end_time = start_time + duration
+                all_timestamps.append((start_time, end_time))
+        
+        if not all_timestamps:
+            return 0.0
+        
+        min_start = min(start_time for start_time, _ in all_timestamps)
+        max_end = max(end_time for _, end_time in all_timestamps)
+        
+        return max_end - min_start
 
     @staticmethod
     def get_path(env_var: str) -> Path:
@@ -294,8 +384,13 @@ class SodaProfiler:
             Total inference time in microseconds (max_end - min_start).
         """
         all_timestamps = []
+
+        if isinstance(self.trace, list):
+            trace_events = self.trace
+        else:
+            trace_events = self.trace.get("traceEvents", [])
         
-        for event in self.trace.get("traceEvents", []):
+        for event in trace_events:
             if event.get("ph") == "X":  # Only complete events (excludes flow markers)
                 start_time = float(event.get("ts"))
                 duration = float(event.get("dur", 0))
@@ -551,11 +646,18 @@ class SodaProfiler:
         """
         op_events_by_ext_id = {}
         cuda_launch_events_by_corr = {}
+        cuda_launch_events_by_ext_id = defaultdict(list) # New: fallback lookup
         kernel_events = []
         gpu_mem_events = []
+
+        if isinstance(trace, list):
+            trace_events = trace
+        else:
+            trace_events = trace.get("traceEvents", [])
         
-        for event in trace.get("traceEvents", []):
+        for event in trace_events:
             cat = event.get("cat")
+            name = event.get("name", "")
             args = event.get("args", {})
             external_id = args.get("External id")
             correlation = args.get("correlation")
@@ -563,7 +665,7 @@ class SodaProfiler:
             if cat == "cpu_op" and external_id is not None:
                 op_events_by_ext_id[external_id] = {
                     "type": "cpu_op",
-                    "name": event.get("name", ""),
+                    "name": name,
                     "external_id": external_id,
                     "input_dims": args.get("Input Dims", []),
                     "input_strides": args.get("Input Strides", []),
@@ -572,41 +674,48 @@ class SodaProfiler:
                     "ts": event.get("ts"),
                     "dur": event.get("dur")
                 }
-            elif cat == "cuda_runtime" and event.get("name") == "cudaLaunchKernel":
-                if external_id is not None and correlation is not None:
-                    cuda_launch_events_by_corr[correlation] = {
-                        "type": "cuda_launch",
-                        "name": event.get("name", ""),
-                        "external_id": external_id,
-                        "correlation": correlation,
-                        "ts": event.get("ts"),
-                        "dur": event.get("dur"),
-                        "cbid": args.get("cbid")
-                    }
-            elif cat == "kernel" and external_id is not None and correlation is not None:
-                kernel_events.append({
-                    "type": "kernel",
-                    "name": SodaProfiler.get_clean_kernel_name(event.get("name", "")),
+            elif (cat == "cuda_runtime" or cat == "Runtime") and ("LaunchKernel" in name or "Launch" in name):
+                launch_event = {
+                    "type": "cuda_launch",
+                    "name": name,
                     "external_id": external_id,
                     "correlation": correlation,
-                    "grid": args.get("grid"),
-                    "block": args.get("block"),
-                    "shared_memory": args.get("shared memory"),
-                    "registers_per_thread": args.get("registers per thread"),
-                    "blocks_per_SM": args.get("blocks per SM"),
-                    "warps_per_SM": args.get("warps per SM"),
-                    "occupancy": args.get("est. achieved occupancy %"),
-                    "stream": args.get("stream"),
-                    "device": args.get("device"),
-                    "context": args.get("context"),
-                    "queued": args.get("queued"),
+                    "ts": event.get("ts"),
                     "dur": event.get("dur"),
-                    "ts": event.get("ts")
-                })
+                    "cbid": args.get("cbid")
+                }
+                if correlation is not None:
+                    cuda_launch_events_by_corr[correlation] = launch_event
+                
+                # Index by external ID (fallback)
+                if external_id is not None:
+                    cuda_launch_events_by_ext_id[external_id].append(launch_event)
+
+            elif cat == "kernel":
+                if external_id is not None or correlation is not None:
+                    kernel_events.append({
+                        "type": "kernel",
+                        "name": SodaProfiler.get_clean_kernel_name(name),
+                        "external_id": external_id,
+                        "correlation": correlation,
+                        "grid": args.get("grid"),
+                        "block": args.get("block"),
+                        "shared_memory": args.get("shared memory"),
+                        "registers_per_thread": args.get("registers per thread"),
+                        "blocks_per_SM": args.get("blocks per SM"),
+                        "warps_per_SM": args.get("warps per SM"),
+                        "occupancy": args.get("est. achieved occupancy %"),
+                        "stream": args.get("stream"),
+                        "device": args.get("device"),
+                        "context": args.get("context"),
+                        "queued": args.get("queued"),
+                        "dur": event.get("dur"),
+                        "ts": event.get("ts")
+                    })
             elif cat == "gpu_memcpy" or cat == "gpu_memset":
                 gpu_mem_events.append({
                     "type": cat,
-                    "name": event.get("name", ""),
+                    "name": name,
                     "correlation": correlation,
                     "stream": args.get("stream"),
                     "device": args.get("device"),
@@ -617,11 +726,11 @@ class SodaProfiler:
                     "memory_bandwidth_gbs": args.get("memory bandwidth (GB/s)") if cat == "gpu_memcpy" else None
                 })
         
-        # Create hierarchical structure
-        events = {
+        return {
             "cpu": {
                 "ops": op_events_by_ext_id,
-                "launches": cuda_launch_events_by_corr
+                "launches": cuda_launch_events_by_corr,
+                "launches_by_ext_id": cuda_launch_events_by_ext_id
             },
             "gpu": {
                 "kernels": kernel_events,
@@ -629,7 +738,6 @@ class SodaProfiler:
                 "all": kernel_events + gpu_mem_events
             }
         }
-        return events
 
     @staticmethod
     def get_linked_event_sequences(events: Dict[str, Any]) -> List[Dict]:
@@ -645,14 +753,31 @@ class SodaProfiler:
         gpu_events = events["gpu"]
         cpu_ops = events["cpu"]["ops"]
         cuda_launches = events["cpu"]["launches"]
+        cuda_launches_by_ext_id = events["cpu"].get("launches_by_ext_id", {})
         kernel_events = gpu_events["kernels"]
 
         event_sequences = []
+        launch_usage_by_ext_id = defaultdict(int)
+
         for kernel in kernel_events:
             external_id = kernel.get("external_id")
             correlation = kernel.get("correlation")
+            
             cpu_op = cpu_ops.get(external_id) if external_id is not None else None
             cuda_launch = cuda_launches.get(correlation) if correlation is not None else None
+
+            if cuda_launch is None and external_id is not None:
+                launches = cuda_launches_by_ext_id.get(external_id)
+                if launches:
+                    # Simple heuristic: map i-th kernel to i-th launch for this ID
+                    # This assumes kernels appear in trace in same order as launches
+                    idx = launch_usage_by_ext_id[external_id]
+                    if idx < len(launches):
+                        cuda_launch = launches[idx]
+                        launch_usage_by_ext_id[external_id] += 1
+                    else:
+                        # If we ran out of launches, use the last one as fallback
+                        cuda_launch = launches[-1]
             
             event_sequences.append({
                 "kernel": kernel,
@@ -663,7 +788,7 @@ class SodaProfiler:
         return event_sequences
 
     @staticmethod
-    def calculate_per_seq_launch_tax(event_sequences: List[Dict]) -> List[Dict]:
+    def calculate_per_seq_tklqt(event_sequences: List[Dict]) -> List[Dict]:
         """
         Calculates launch tax for each sequence and adds it to the sequence dict.
 
@@ -673,19 +798,34 @@ class SodaProfiler:
         Returns:
             Modified event sequences with "kernel_tax" key added to each.
         """
+
         for seq in event_sequences:
             kernel = seq.get("kernel")
             cuda_launch = seq.get("cuda_launch")
-            if kernel and cuda_launch and kernel.get("ts") is not None and cuda_launch.get("ts") is not None:
-                launch_tax = kernel["ts"] - cuda_launch["ts"]
-                assert launch_tax >= 0, f"Negative launch tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={cuda_launch['ts']}, tax={launch_tax}"
-                seq["kernel_tax"] = launch_tax
+            
+            if kernel is None or cuda_launch is None:
+                seq["tklqt_us"] = 0.0
+                continue
+
+            cuda_launch_start = float(cuda_launch.get("ts", 0))
+            kernel_start = float(kernel.get("ts", 0))
+
+            # TKLQT = Kernel Start (GPU) - Launch Start (CPU)
+            val = kernel_start - cuda_launch_start
+
+            if val < 0:
+                # Kernel started before launch? Event correlation error
+                seq["tklqt_us"] = 0.0
+            elif val > 5000000:  # > 5 seconds is likely an artifact
+                seq["tklqt_us"] = 0.0
             else:
-                seq["kernel_tax"] = None
+                seq["tklqt_us"] = val
+        
         return event_sequences
 
+
     @staticmethod
-    def calculate_total_launch_tax(event_sequences: List[Dict]) -> float:
+    def calculate_total_tklqt(event_sequences: List[Dict]) -> float:
         """
         Calculates total launch tax across all sequences.
 
@@ -695,15 +835,13 @@ class SodaProfiler:
         Returns:
             Total launch tax in microseconds.
         """
-        total_tax = 0.0
+        total = 0.0
         for seq in event_sequences:
-            kernel_tax = seq.get("kernel_tax")
-            if kernel_tax is not None:
-                total_tax += kernel_tax
-        return total_tax
+            total += seq.get("launch_tax_us", 0.0)
+        return total
 
     @staticmethod
-    def calculate_avg_launch_tax(event_sequences: List[Dict]) -> float:
+    def calculate_avg_tklqt(event_sequences: List[Dict]) -> float:
         """
         Calculates average launch tax across all sequences.
 
@@ -713,12 +851,11 @@ class SodaProfiler:
         Returns:
             Average launch tax in microseconds.
         """
-        if not event_sequences:
+        valid_sequences = [seq for seq in event_sequences if seq.get("launch_tax_us", 0.0) > 0]
+        if not valid_sequences:
             return 0.0
-        
-        total_tax = SodaProfiler.calculate_total_launch_tax(event_sequences)
-        num_kernels = len(event_sequences)
-        return total_tax / num_kernels if num_kernels > 0 else 0.0
+        total = sum(seq.get("launch_tax_us", 0.0) for seq in valid_sequences)
+        return total / len(valid_sequences)
     
     def get_average_kernel_duration(self) -> Dict[str, float]:
         """
@@ -748,6 +885,39 @@ class SodaProfiler:
                 avg_durations[name] = 0.0
         
         return avg_durations
+    
+    def calculate_framework_overhead(self) -> Dict[str, float]:
+        """
+        Calculate framework overhead - the CPU-side time not spent on GPU computation.
+        """
+        if hasattr(self, 'measured_inference_time_ms') and self.measured_inference_time_ms is not None:
+            total_inference_us = self.measured_inference_time_ms * 1000
+        else:
+            total_inference_us = self.calculate_profiler_wall_clock_time()
+        
+        gpu_active_time_us = self.calculate_true_gpu_busy_time()
+        
+        # Framework overhead = everything except GPU compute
+        framework_tax_us = max(0.0, total_inference_us - gpu_active_time_us)
+
+        is_framework_bound = framework_tax_us > gpu_active_time_us
+        
+        # Calculate percentages
+        if total_inference_us > 0:
+            tax_percent = (framework_tax_us / total_inference_us) * 100
+            compute_percent = (gpu_active_time_us / total_inference_us) * 100
+        else:
+            tax_percent = 0.0
+            compute_percent = 0.0
+        
+        return {
+            "framework_tax_ms": us_to_ms(framework_tax_us),
+            "framework_tax_percent": tax_percent,
+            "gpu_active_time_ms": us_to_ms(gpu_active_time_us),
+            "gpu_active_time_percent": compute_percent,
+            "is_framework_bound": is_framework_bound,
+            "bound_state": "Framework-Bound" if is_framework_bound else "Compute-Bound"
+        }
 
     def get_top_k_kernels(self, k: int = 3) -> Dict[str, List[Tuple[str, Dict]]]:
         """
@@ -910,13 +1080,25 @@ class SodaProfiler:
         self.events = SodaProfiler.collect_events_from_trace(self.trace)
         self.logger.info(f"Analyzing {len(self.events['gpu']['kernels'])} kernel events from profiled run...")
         event_sequences = SodaProfiler.get_linked_event_sequences(self.events)
-        event_sequences = SodaProfiler.calculate_per_seq_launch_tax(event_sequences)
+        # Calculate TKLQT (Launch + Queue Time)
+        event_sequences = SodaProfiler.calculate_per_seq_tklqt(event_sequences)
         
+
         # Analyze per-stream metrics
         stream_info = self.analyze_per_stream()
         
-        # General metrics
-        total_inference_time = self.calculate_total_inference_time()
+        # Inference time metrics
+        # Primary: CUDA event timing (most accurate)
+        if hasattr(self, 'measured_inference_time_ms') and self.measured_inference_time_ms is not None:
+            cuda_event_time_us = self.measured_inference_time_ms * 1000  # Convert ms to us
+        else:
+            cuda_event_time_us = None
+        
+        # Secondary: PyTorch profiler wall-clock (includes overhead)
+        profiler_wall_clock_us = self.calculate_profiler_wall_clock_time()
+        
+        # Use CUDA event time if available, otherwise fall back to profiler wall-clock
+        total_inference_time = cuda_event_time_us if cuda_event_time_us is not None else profiler_wall_clock_us
         
         # GPU metrics
         total_gpu_time_span = self.calculate_total_gpu_time_span()
@@ -925,9 +1107,12 @@ class SodaProfiler:
         
         # Kernel metrics
         kernel_exec_time = self.calculate_kernel_exec_time()
-        total_tax = SodaProfiler.calculate_total_launch_tax(event_sequences)
-        avg_tax = SodaProfiler.calculate_avg_launch_tax(event_sequences)
-        launch_tax = {"total": total_tax, "avg": avg_tax}
+        
+        # TKLQT Metrics
+        total_tklqt = SodaProfiler.calculate_total_tklqt(event_sequences)
+        avg_tklqt = SodaProfiler.calculate_avg_tklqt(event_sequences)
+        tklqt_metrics = {"total": total_tklqt, "avg": avg_tklqt}
+        
         avg_kernel_dur = self.get_average_kernel_duration()
         top_k_kernels = self.get_top_k_kernels(k=3)
         
@@ -938,11 +1123,25 @@ class SodaProfiler:
             fusion_results = {}
             for f in self.args.fusion:
                 fusion_results[f] = self.kernelchains(event_sequences, f, self.args.prox_score)
+
+        framework_overhead = self.calculate_framework_overhead()
         
         # Build metrics dictionary 
         metrics = {
-            # General metrics
-            "inference_runtime_ms": us_to_ms(total_inference_time),
+            # Inference timing (primary metric)
+            "inference_time_ms": us_to_ms(total_inference_time),
+            
+            # Timing breakdown
+            "timing": {
+                "cuda_event_ms": self.measured_inference_time_ms if hasattr(self, 'measured_inference_time_ms') and self.measured_inference_time_ms is not None else None,
+                "profiler_wall_clock_ms": us_to_ms(profiler_wall_clock_us),
+                "profiler_overhead_ms": us_to_ms(profiler_wall_clock_us - total_inference_time) if cuda_event_time_us is not None else None,
+            },
+            
+            # Framework overhead (CPU-side latency)
+            "framework_overhead": framework_overhead,
+            
+            # Stream info
             "active_streams": len(stream_info),
 
             # GPU metrics
@@ -955,8 +1154,10 @@ class SodaProfiler:
             "total_kernel_exec_time_ms": us_to_ms(kernel_exec_time["total"]),
             "num_total_kernels": len(self.events["gpu"]["kernels"]),
             "avg_kernel_exec_time_ms": us_to_ms(kernel_exec_time["avg"]),
-            "total_kernel_launch_tax_ms": us_to_ms(launch_tax["total"]),
-            "avg_kernel_launch_tax_ms": us_to_ms(launch_tax["avg"]),
+            
+            # TKLQT Metrics
+            "total_tklqt_ms": us_to_ms(tklqt_metrics["total"]),
+            "avg_tklqt_ms": us_to_ms(tklqt_metrics["avg"]),
         }
         
         self.results = {
@@ -971,31 +1172,46 @@ class SodaProfiler:
         return self.results
     
     def report(self) -> None:
-        """
-        Prints performance metrics, stream analysis, and top-k kernels.
-        Uses results stored in self.results from analyze().
-        """
-        if self.results is None:
-            raise ValueError("No analysis results available. Call analyze() first.")
         
         metrics = self.results["metrics"]
         stream_info = self.results["stream_info"]
         top_k_kernels = self.results["top_k_kernels"]
+        timing = metrics.get("timing", {})
+        framework = metrics.get("framework_overhead", {})
         
         # --- Enhanced Reporting ---
         self.logger.info("")
         self.logger.info("=== Performance Metrics ===")
-        self.logger.info(f"\t* Inference runtime (ms): {metrics['inference_runtime_ms']:.4f}")
+        self.logger.info(f"\t* Inference time (ms): {metrics['inference_time_ms']:.4f}")
+
+        self.logger.info("")
+        self.logger.info("=== Framework Tax Analysis ===")
+        self.logger.info(f"\t* Workload State: {framework.get('bound_state', 'Unknown')}")
+        self.logger.info(f"\t* Framework Tax (Exposed CPU Overhead): {framework.get('framework_tax_ms', 0):.4f} ms ({framework.get('framework_tax_percent', 0):.1f}%)")
+        self.logger.info(f"\t* GPU Active Time (Compute): {framework.get('gpu_active_time_ms', 0):.4f} ms ({framework.get('gpu_active_time_percent', 0):.1f}%)")
+        
+        # Timing breakdown
+        if timing.get("cuda_event_ms") is not None:
+            self.logger.info(f"\t  - CUDA event timing (ms): {timing['cuda_event_ms']:.4f}")
+            self.logger.info(f"\t  - Profiler wall-clock (ms): {timing['profiler_wall_clock_ms']:.4f}")
+            if timing.get("profiler_overhead_ms") is not None:
+                self.logger.info(f"\t  - Profiler overhead (ms): {timing['profiler_overhead_ms']:.4f}")
+        
+        # Framework overhead breakdown
+        self.logger.info("")
+        self.logger.info("=== GPU Metrics ===")
         self.logger.info(f"\t* Total kernel execution time (ms): {metrics['total_kernel_exec_time_ms']:.4f}")
         self.logger.info(f"\t* GPU busy time (concurrent-aware) (ms): {metrics['gpu_busy_time_ms']:.4f}")
         self.logger.info(f"\t* GPU idle time (ms): {metrics['gpu_idle_time_ms']:.4f}")
         self.logger.info(f"\t* GPU utilization: {metrics['gpu_utilization_percent']:.2f}%")
-        self.logger.info(f"\t* Total kernel launch tax (TKLQT) (ms): {metrics['total_kernel_launch_tax_ms']:.4f}")
         self.logger.info(f"\t* Number of kernels: {metrics['num_total_kernels']}")
         self.logger.info(f"\t* Active streams: {metrics['active_streams']}")
         
+        self.logger.info("")
+        self.logger.info("=== Launch & Queue Latency (TKLQT) ===")
+        self.logger.info(f"\t* Total TKLQT (ms): {metrics['total_tklqt_ms']:.4f}")
         if metrics['num_total_kernels'] > 0:
-            self.logger.info(f"\t* Avg. kernel launch tax per kernel (ms): {metrics['avg_kernel_launch_tax_ms']:.4f}")
+            self.logger.info(f"\t* Avg. TKLQT per kernel (ms): {metrics['avg_tklqt_ms']:.4f}")
             self.logger.info(f"\t* Avg. execution time per kernel (ms): {metrics['avg_kernel_exec_time_ms']:.4f}")
         
         self.logger.info("")
@@ -1027,12 +1243,25 @@ class SodaProfiler:
                     f"(Total Duration: {us_to_ms(data['duration']):.4f} ms, "
                     f"Frequency: {int(data['frequency'])})"
                 )
+            
+            self.logger.info("")
+            self.logger.info("=== Top-3 Kernels by Duration ===")
+            for i, (name, data) in enumerate(top_k_kernels["by_duration"], 1):
+                self.logger.info(
+                    f"\t* #{i}: {name} "
+                    f"(Total Duration: {us_to_ms(data['duration']):.4f} ms, "
+                    f"Frequency: {int(data['frequency'])})"
+                )
     
-    def save(self) -> str:
+    def save(self, batch_size: int = None, seq_len: int = None) -> str:
         """
         Saves analysis results to JSON file.
         Uses results stored in self.results from analyze().
         Generates model_name and config from self.args.
+        
+        Args:
+            batch_size: The batch size used for this run.
+            seq_len: The sequence length used for this run.
             
         Returns:
             Path to the saved report file.
@@ -1049,16 +1278,23 @@ class SodaProfiler:
         
         # Generate model_name and config from args
         model_name = self.args.model
+
+        current_batch_size = batch_size if batch_size is not None else (
+            self.args.batch_size[0] if isinstance(self.args.batch_size, list) else self.args.batch_size)
+        
+        current_seq_len = seq_len if seq_len is not None else (
+            self.args.seq_len[0] if isinstance(self.args.seq_len, list) else self.args.seq_len)
+        
         config = {
-            "batch_size": self.args.batch_size,
-            "seq_len": self.args.seq_len,
+            "batch_size": current_batch_size,
+            "seq_len": current_seq_len,
             "precision": self.args.precision,
             "compile_type": self.args.compile_type,
             "device": self.args.device,
         }
         
         # Build output structure
-        output = {
+        run_result = {
             "metadata": {
                 "model_name": model_name,
                 "timestamp": datetime.now().isoformat(),
@@ -1098,9 +1334,33 @@ class SodaProfiler:
         
         # Add fusion results if available
         if fusion_results is not None:
-            output["fusion_analysis"] = fusion_results
+            run_result["fusion_analysis"] = fusion_results
         
-        # Save to file
+        # Accumulate runs for sweep mode
+        self._sweep_runs.append(run_result)
+        
+        batch_sizes = self.args.batch_size if isinstance(self.args.batch_size, list) else [self.args.batch_size]
+        seq_lens = self.args.seq_len if isinstance(self.args.seq_len, list) else [self.args.seq_len]
+        is_sweep = len(batch_sizes) > 1 or len(seq_lens) > 1
+        
+        if is_sweep:
+            # Sweep mode: wrap all accumulated runs in sweep structure
+            output = {
+                "sweep_info": {
+                    "run_id": self.run_id,
+                    "model_name": model_name,
+                    "batch_sizes": batch_sizes,
+                    "seq_lens": seq_lens,
+                    "precision": self.args.precision,
+                    "compile_type": self.args.compile_type,
+                },
+                "runs": self._sweep_runs
+            }
+        else:
+            # Single run: use simple format (no sweep wrapper)
+            output = run_result
+        
+        # Save to file (overwrites each time with accumulated data)
         with open(self.report_file_path, "w", encoding="utf-8") as f:
             json.dump(output, f, indent=2, ensure_ascii=False)
         
@@ -1177,17 +1437,35 @@ class ModelHandler:
             model_name: The name of the model from Hugging Face Hub.
             device: The device to load the model onto ('cpu' or 'cuda').
             compile_type: The compilation mode ('eager', 'torch.compile', 'flash-attention').
-            precision: The desired data type ('float32', 'float16', 'bfloat16').
+            precision: The desired data type ('float32', 'float16', 'bfloat16', 'float8_e4m3fn').
         """
         self.model_name = model_name
         self.device = torch.device(device)
         self.compile_type = compile_type
+        self.precision_str = precision
+        
+        # FP8 requires special handling
+        self.is_fp8 = precision == "float8_e4m3fn"
+        
+        # Map for loading precision (FP8 loads as bfloat16, then converts)
+        self.load_precision_map = {
+            "float32": torch.float32,
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "float8_e4m3fn": torch.bfloat16,  # Load in bf16, convert later
+        }
+        
         self.precision_map = {
             "float32": torch.float32,
             "float16": torch.float16,
             "bfloat16": torch.bfloat16,
         }
+
+        if hasattr(torch, 'float8_e4m3fn'):
+            self.precision_map["float8_e4m3fn"] = torch.float8_e4m3fn
+
         self.precision = self.precision_map[precision]
+        self.load_precision = self.load_precision_map[precision]
         
         # Determine if model is decoder or encoder
         self.is_decoder = not ("bert" in model_name.lower() or "roberta" in model_name.lower())
@@ -1199,10 +1477,35 @@ class ModelHandler:
 
     def get_kwargs(self) -> Dict[str, Any]:
         """Returns common kwargs for model loading."""
-        return {
-            "dtype": self.precision,
+        kwargs = {
+            "torch_dtype": self.load_precision,  # Use load_precision, not target precision
             "device_map": self.device if self.device.type == 'cuda' else 'cpu',
         }
+        
+        # FP8 Config Support
+        if self.is_fp8 and FP8_CONFIG_AVAILABLE:
+            # Use quantization_config if available for E4M3
+            kwargs["quantization_config"] = FP8Config(fp8_format="e4m3")
+            
+        return kwargs
+    
+    def _convert_to_fp8(self, model: transformers.PreTrainedModel) -> transformers.PreTrainedModel:
+        """
+        Convert model linear layer weights to FP8 E4M3 format for inference.
+        """
+        print("Converting linear layer weights to float8_e4m3fn...")
+        
+        converted_count = 0
+        for name, module in model.named_modules():
+            if isinstance(module, torch.nn.Linear):
+                with torch.no_grad():
+                    # FP8 E4M3 has range ~±448, clamp to avoid overflow
+                    weight_clamped = module.weight.data.clamp(-448.0, 448.0)
+                    module.weight.data = weight_clamped.to(torch.float8_e4m3fn)
+                    converted_count += 1
+        
+        print(f"Converted {converted_count} linear layers to FP8 E4M3.")
+        return model
 
     def load_encoder(self) -> Tuple[transformers.PreTrainedModel, transformers.PreTrainedTokenizer]:
         """Loads an encoder-only model (e.g., BERT)."""
@@ -1229,6 +1532,10 @@ class ModelHandler:
                 self.model_name, **kwargs
             ).eval()
         
+        # Convert to FP8 if requested AND NOT using quantization_config
+        if self.is_fp8 and "quantization_config" not in kwargs:
+            model = self._convert_to_fp8(model)
+        
         if hasattr(model, 'generation_config') and model.generation_config.pad_token_id is None:
             model.generation_config.pad_token_id = tokenizer.eos_token_id
         
@@ -1236,6 +1543,7 @@ class ModelHandler:
         self.pytorch_model = model
         self.tokenizer = tokenizer
         return model, tokenizer
+
 
     def load_decoder(self) -> Tuple[transformers.PreTrainedModel, transformers.PreTrainedTokenizer]:
         """Loads a decoder-only model (e.g., Llama)."""
@@ -1267,6 +1575,11 @@ class ModelHandler:
             model = transformers.AutoModelForCausalLM.from_pretrained(
                 self.model_name, config=config, **kwargs
             ).eval()
+        
+
+        # Convert to FP8 if requested AND NOT using quantization_config
+        if self.is_fp8 and "quantization_config" not in kwargs:
+            model = self._convert_to_fp8(model)
         
         # Store model and tokenizer
         self.pytorch_model = model
@@ -1311,7 +1624,6 @@ def main() -> int:
     
     # Check if env.sh has been sourced and loaded
     if not os.environ.get("SODA_ENV_LOADED"):
-        # Use stderr for early errors before logger is set up
         print("Error: SODA environment not loaded.", file=sys.stderr)
         print("Please run: source env.sh", file=sys.stderr)
         sys.exit(1)
@@ -1328,24 +1640,69 @@ def main() -> int:
             compile_type=args.compile_type,
             precision=args.precision,
         )
+
+        # Get sweep parameters
+        batch_sizes = args.batch_size if isinstance(args.batch_size, list) else [args.batch_size]
+        seq_lens = args.seq_len if isinstance(args.seq_len, list) else [args.seq_len]
+        is_sweep = len(batch_sizes) > 1 or len(seq_lens) > 1
         
-        # Generate synthetic inputs
-        print(f"Generating synthetic input: batch_size={args.batch_size}, seq_len={args.seq_len}")
-        model_inputs = model_handler.generate_synthetic_inputs(
-            args.batch_size, args.seq_len
-        )
+        # Calculate total runs for sweep
+        total_runs = len(batch_sizes) * len(seq_lens)
+        
+        if is_sweep:
+            print(f"Running sweep: batch_sizes={batch_sizes}, seq_lens={seq_lens} ({total_runs} runs)")
 
         # Initialize profiler 
         profiler = SodaProfiler(model_handler=model_handler, args=args, log_console=True, log_file=True)
 
-        # Profile forward pass and analyze 
-        profiler.profile_forward_pass(model_inputs)
-        profiler.analyze()
+        print("Performing global warmup to stabilize profiler...")
+        warmup_bs = batch_sizes[0]
+        warmup_sl = seq_lens[0]
+        warmup_inputs = model_handler.generate_synthetic_inputs(warmup_bs, warmup_sl)
+        
+        # We use a temporary trace file for warmup to avoid overwriting real results
+        original_trace_path = profiler.trace_file_path
+        profiler.trace_file_path = profiler.output_dir / "warmup_trace.json"
+        
+        # Run profile but don't analyze/save
+        try:
+            # Just run forward pass, no profiling overhead if possible, but we need to warm up profiler too
+            # So we run the full profile method
+            profiler.profile_forward_pass(warmup_inputs, batch_size=warmup_bs, seq_len=warmup_sl)
+        except Exception as e:
+            print(f"Warmup warning: {e}")
+        
+        # Restore path
+        profiler.trace_file_path = original_trace_path
+        print("Global warmup complete.")
+        # --------------------------
 
-        # Report and save results
-        profiler.report()
-        profiler.save()
+        
+        run_idx = 0
+        for bs in batch_sizes:
+            for sl in seq_lens:
+                run_idx += 1
+                
+                if is_sweep:
+                    profiler.logger.info(f"\n{'='*60}")
+                    profiler.logger.info(f"=== Sweep Run {run_idx}/{total_runs}: bs={bs}, sl={sl} ===")
+                    profiler.logger.info(f"{'='*60}")
 
+                print(f"Generating synthetic input: batch_size={bs}, seq_len={sl}")
+                model_inputs = model_handler.generate_synthetic_inputs(bs, sl)
+
+                # Update trace file path for this run (separate traces per config)
+                if is_sweep:
+                    profiler.trace_file_path = profiler.output_dir / f"trace_bs{bs}_sl{sl}.json"
+
+                # Profile forward pass and analyze 
+                profiler.profile_forward_pass(model_inputs, batch_size=bs, seq_len=sl)
+                profiler.analyze()
+
+                # Report and save results
+                profiler.report()
+                profiler.save(batch_size=bs, seq_len=sl)
+        
         # Cleanup and exit
         profiler.exit()
         
