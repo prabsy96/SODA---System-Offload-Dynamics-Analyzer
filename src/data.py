@@ -543,7 +543,7 @@ class Sequence:
         return f"{self.cpu_op.name} -> {clean_kernel_name(self.kernel.name)}"
     
     @classmethod
-    def from_dict(cls, sequence_dict: Dict[str, Any]) -> 'Sequence':
+    def from_dict(cls, sequence_dict: Optional[Dict[str, Any]]) -> Optional['Sequence']:
         """Create Sequence from dictionary."""
         if not sequence_dict:
             return None

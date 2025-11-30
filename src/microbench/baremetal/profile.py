@@ -14,6 +14,7 @@ import json
 import sys
 import subprocess
 import re
+from typing import Dict, Any
 from microbench.baremetal.utils import build_binary, build_base_args, nsys_profile_to_sql, extract_kernels_from_trace, extract_launches_from_trace
 
 from soda import utils
@@ -167,9 +168,12 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
     # Format: {meta: {avg_kernel_tax, ...}, kernel: {...}, cuda_launch: {...}, cpu_op: {...}}
     return aggregated_sequences[0]
 
-def profile_baremetal_gemm_kernels():
+def profile_baremetal_gemm_kernels() -> Dict[str, Any]:
     """
     Profile baremetal GEMM kernels for all jobs using matched algorithms.
+    
+    Returns:
+        Dictionary with profiled baremetal GEMM sequences data (same format as saved JSON).
     """ 
 
     # Load jobs
@@ -200,6 +204,7 @@ def profile_baremetal_gemm_kernels():
         # Skip batched GEMMs for now due to non-contiguous layout issue
         if "batch" in job and job["batch"] > 1:
             print(f"Skipping job {job['id']} (FIXME batched GEMM)")
+            sequences.append(None)  # Append None to maintain alignment
             continue
         
         trace_file_sql = run_job(job)
@@ -221,24 +226,28 @@ def profile_baremetal_gemm_kernels():
         
         sequences.append(sequence)
     
-    # Write output in PyTorch-compatible format
-    output_data = {
+    baremetal_gemm_sequences_file = utils.get_path("BAREMETAL_GEMM_KERNELS")
+    baremetal_gemm_sequences_data = {
         "summary": {"count": len(sequences)},
         "sequences": sequences,
     }
-
-    output_file = utils.get_path("BAREMETAL_GEMM_KERNELS")
-    utils.save_json(output_file, output_data)
-    
-    print(f"\nCompleted {len(sequences)} jobs -> {output_file}")
+    utils.save_json(baremetal_gemm_sequences_file, baremetal_gemm_sequences_data)
+    print(f"Saved {baremetal_gemm_sequences_data['summary']['count']} baremetal GEMM sequences to {baremetal_gemm_sequences_file}")
     
     # Print a summary table with % delta over null kernel 
     print_summary(sequences, null_kernel_tax)
+    
+    return baremetal_gemm_sequences_data
 
 def print_summary(sequences, null_kernel_tax=None):
     """Print a compact table summary of profiled sequences, with % delta over null kernel."""
     table_data = []
     for sequence in sequences:
+
+        # Skip None entries (skipped baremetal jobs)
+        if sequence is None:
+            continue
+
         avg = sequence["meta"]["avg_kernel_tax"]
         delta_pct = (
             (avg - null_kernel_tax) / null_kernel_tax * 100

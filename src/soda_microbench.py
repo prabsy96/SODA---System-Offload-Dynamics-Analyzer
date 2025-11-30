@@ -14,7 +14,7 @@ from data import Sequence
 from microbench.baremetal.generate import generate_jobs
 from microbench.baremetal.search import search_cublas_algos_offline
 from microbench.baremetal.profile import profile_baremetal_gemm_kernels
-from microbench.baremetal.report import compare
+from microbench.baremetal.report import report
 
 class SodaMicrobench:
     
@@ -77,7 +77,7 @@ class SodaMicrobench:
         target_gemm_sequences = self.extract_unique_gemm_sequences()
 
         # Benchmark pytorch performance
-        section = "Profile PyTorch GEMM Kernels"  
+        section = "Profile PyTorch GEMM Kernels"
         print_utils.section_start(section)
         pytorch_gemm_sequences = profile_pytorch_gemm_sequences(
             target_gemm_sequences,
@@ -91,7 +91,7 @@ class SodaMicrobench:
         # Convert dict sequences to Sequence objects
         target_seq_objects = [Sequence.from_dict(seq_dict) for seq_dict in target_gemm_sequences["sequences"]]
         pytorch_seq_objects = [Sequence.from_dict(seq_dict) for seq_dict in pytorch_gemm_sequences["sequences"]]
-        compare_sequences(target_seq_objects, pytorch_seq_objects)
+        compare_sequences(target_seq_objects, pytorch_seq_objects, title="Pytorch vs Target")
         plot_pytorch_gemm_sequences(pytorch_gemm_sequences)
         print_utils.section_end(section)
 
@@ -101,7 +101,7 @@ class SodaMicrobench:
         generate_jobs(target_gemm_sequences, warmup=self.warmup, runs=self.runs)
         print_utils.section_end(section)
 
-        # # Search for cuBLASLt algorithms
+        # Search for cuBLASLt algorithms
         section = "Offline Search for cuBLASLt Algorithms"
         print_utils.section_start(section)
         search_cublas_algos_offline()
@@ -111,11 +111,21 @@ class SodaMicrobench:
         section = "Profile Baremetal GEMM Kernels"
         print_utils.section_start(section)
         print("This will run nsys profiling for multiple jobs, may take several minutes")
-        profile_baremetal_gemm_kernels()
+        baremetal_gemm_sequences = profile_baremetal_gemm_kernels()
+        print_utils.section_end(section)
+        
+        # Verify baremetal sequences
+        section = "Verify Baremetal GEMM Sequences"
+        print_utils.section_start(section)
+        # Align: target[i] -> baremetal[i+1] (skip null kernel at index 0)
+        # Convert to Sequence objects (None stays None for skipped jobs)
+        baremetal_seq_objects = [Sequence.from_dict(seq_dict) 
+                                for seq_dict in baremetal_gemm_sequences["sequences"][1:]]  # Skip null kernel
+        compare_sequences(target_seq_objects, baremetal_seq_objects, title="Baremetal vs Target", full=False)
         print_utils.section_end(section)
         
         # Compare PyTorch vs Baremetal
-        section = "Compare PyTorch vs Baremetal"
+        section = "Report PyTorch vs Baremetal"
         print_utils.section_start(section)
-        compare()
+        report()
         print_utils.section_end(section)

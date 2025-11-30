@@ -356,6 +356,7 @@ class ModelTracer:
 
         # Setup deterministic mode for microbench
         if bool(getattr(args, "microbench", False)):
+            print("Setting up deterministic mode for microbench")
             utils.setup_deterministic_mode()
         
         # Store run parameters

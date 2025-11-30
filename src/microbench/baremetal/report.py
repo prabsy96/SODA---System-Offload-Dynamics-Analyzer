@@ -75,6 +75,10 @@ def load_baremetal_results(baremetal_file):
     results = {}
     
     for sequence in sequences:
+        # Skip None entries (e.g., skipped batched GEMM jobs)
+        if sequence is None:
+            continue
+
         job_id = sequence["meta"]["job_id"]
         # Skip null kernel job (0000) from comparison results
         if sequence["kernel"]["name"] == "__null__":
@@ -187,16 +191,15 @@ def print_summary(matches, baseline_tax=None):
     """Print comparison summary as compact tables."""
     per_kernel_rows = []
     for match in matches:
-        name_match = "✓" if match["match_status"]["name_match"] else "✗"
-        config_match = "✓" if match["match_status"]["config_match"] else "✗"
         kernel_name = match["kernel"]["name"]
+        match_status = [match["match_status"]["name_match"], match["match_status"]["config_match"]]
         per_kernel_rows.append([
             match["job_id"],
             kernel_name,
             f"{match['framework']['avg_kernel_tax']:.2f}",
             f"{match['baremetal']['avg_kernel_tax']:.2f}",
             f"{match['delta_pct']:.1f}",
-            f"{name_match}{config_match}",
+            match_status,
         ])
 
     if per_kernel_rows:
@@ -224,7 +227,7 @@ def print_summary(matches, baseline_tax=None):
     )
 
 
-def compare():
+def report():
     """
     Main comparison function.
     """
@@ -248,6 +251,11 @@ def compare():
 
     baremetal_data = utils.load_json(baremetal_file)
     for sequence in baremetal_data["sequences"]:
+        # Skip None entries (e.g., skipped batched GEMM jobs)
+        if sequence is None:
+            continue
+        
+        # Extract null kernel tax for baseline
         if sequence["kernel"]["name"] == "__null__":
             null_kernel_tax = sequence["meta"]["avg_kernel_tax"]
             break
