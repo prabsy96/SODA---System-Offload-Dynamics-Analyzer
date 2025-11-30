@@ -308,7 +308,7 @@ class Kernel:
         
         results["match"] = match
         
-        if show_table:
+        if show_table or not match:
             outcome = "[green]SUCCESS[/green]" if match else "[red]FAILURE[/red]"
             print_utils.comp_table(f"{title} {outcome}", ["Field", "Actual", "Target", "Match"], table_data)
         
@@ -502,7 +502,7 @@ class CPUOp:
             match = match and concrete_match
             table_data.append(["concrete_inputs", self.concrete_inputs, other.concrete_inputs, concrete_match])
         
-        if show_table:
+        if show_table or not match:
             outcome = "[green]SUCCESS[/green]" if match else "[red]FAILURE[/red]"
             print_utils.comp_table(f"{title} {outcome}", ["Field", "Actual", "Target", "Match"], table_data)
         

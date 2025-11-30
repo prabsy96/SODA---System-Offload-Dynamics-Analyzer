@@ -80,47 +80,17 @@ def load_baremetal_results(baremetal_file):
             continue
 
         job_id = sequence["meta"]["job_id"]
+
         # Skip null kernel job (0000) from comparison results
         if sequence["kernel"]["name"] == "__null__":
             continue
+
         results[job_id] = {
             "kernel": sequence["kernel"],
             "stats": sequence["meta"],  # meta contains all the stats fields
         }
     
     return results
-
-
-def compare_kernels(pytorch_kernel, baremetal_kernel):
-    """
-    Verify that kernels match by name and optionally by config.
-    Uses Kernel.compare() for normalized comparison.
-    
-    Returns: (name_match, config_match)
-    """
-    pytorch_kernel = Kernel.from_dict(pytorch_kernel)
-    baremetal_kernel = Kernel.from_dict(baremetal_kernel)
-
-    if not (pytorch_kernel and baremetal_kernel):
-        return False, False
-
-    compare_result = pytorch_kernel.compare(
-        baremetal_kernel, show_table=False, full=False
-    )
-
-    name_match = compare_result["name"]
-    grid_match = compare_result["grid"]
-    block_match = compare_result["block"]
-    shared_match = compare_result["shared_memory"]
-    config_match = bool(
-        grid_match and 
-        all(grid_match) and 
-        block_match and 
-        all(block_match) and 
-        shared_match
-    )
-
-    return name_match, config_match
 
 
 def compare_results(pytorch_results, baremetal_results):
@@ -138,9 +108,6 @@ def compare_results(pytorch_results, baremetal_results):
         
         pytorch = pytorch_results[job_id]
         baremetal = baremetal_results[job_id]
-        
-        # Verify kernel match
-        name_match, config_match = compare_kernels(pytorch["kernel"], baremetal["kernel"])
         
         # Compute deltas (all values in microseconds)
         fw_avg = pytorch["stats"]["avg_kernel_tax"]
@@ -160,10 +127,6 @@ def compare_results(pytorch_results, baremetal_results):
                 "grid": pytorch["kernel"]["grid"],
                 "block": pytorch["kernel"]["block"],
                 "shared_memory": pytorch["kernel"]["shared_memory"],
-            },
-            "match_status": {
-                "name_match": name_match,
-                "config_match": config_match,
             },
             "framework": {
                 "avg_kernel_tax": fw_avg,
@@ -192,39 +155,21 @@ def print_summary(matches, baseline_tax=None):
     per_kernel_rows = []
     for match in matches:
         kernel_name = match["kernel"]["name"]
-        match_status = [match["match_status"]["name_match"], match["match_status"]["config_match"]]
         per_kernel_rows.append([
             match["job_id"],
             kernel_name,
             f"{match['framework']['avg_kernel_tax']:.2f}",
             f"{match['baremetal']['avg_kernel_tax']:.2f}",
             f"{match['delta_pct']:.1f}",
-            match_status,
         ])
 
     if per_kernel_rows:
         title_suffix = f" | Baseline (null kernel): {baseline_tax:.2f} μs" if baseline_tax is not None else ""
         print_utils.comp_table(
             title=f"Per-Kernel Results ({len(per_kernel_rows)} kernels){title_suffix}",
-            headers=["ID", "Kernel", "FW(μs)", "BM(μs)", "Δ(%)", "Match"],
+            headers=["ID", "Kernel", "Framework (μs)", "Baremetal (μs)", "Δ(%)"],
             data=per_kernel_rows,
         )
-
-    name_matches = sum(1 for m in matches if m["match_status"]["name_match"])
-    config_matches = sum(1 for m in matches if m["match_status"]["config_match"])
-    exact_matches = sum(
-        1 for m in matches if m["match_status"]["name_match"] and m["match_status"]["config_match"]
-    )
-    stats_rows = [
-        ["Exact matches (name+config)", f"{exact_matches}/{len(matches)}"],
-        ["Name matches", f"{name_matches}/{len(matches)}"],
-        ["Config matches", f"{config_matches}/{len(matches)}"],
-    ]
-    print_utils.comp_table(
-        title="Match Statistics",
-        headers=["Metric", "Count"],
-        data=stats_rows,
-    )
 
 
 def report():
@@ -270,8 +215,6 @@ def report():
     output_data = {
         "summary": {
             "total_kernels": len(matches),
-            "exact_matches": sum(1 for m in matches if m["match_status"]["name_match"] and m["match_status"]["config_match"]),
-            "name_matches": sum(1 for m in matches if m["match_status"]["name_match"]),
         },
         "matches": matches,
     }

@@ -43,12 +43,12 @@ def compare_sequences(target_sequences: list, actual_sequences: list, title: str
         
         # Compare cpu_op input conditions 
         assert actual_cpu_op is not None and target_cpu_op is not None, "Missing cpu_op in sequence"
-        cpu_op_match = actual_cpu_op.compare(target_cpu_op, show_table=True, title=f"{title} CPU op")
+        cpu_op_match = actual_cpu_op.compare(target_cpu_op, show_table=False, title=f"{title} CPU op")
         assert cpu_op_match, f"CPU op mismatch: target={target_cpu_op.name}, actual={actual_cpu_op.name}"
         
         # Compare kernels
         assert actual_kernel is not None and target_kernel is not None, "Missing kernel in sequence"
-        results = actual_kernel.compare(target_kernel, show_table=True, title=f"{title} kernel", full=full)
+        results = actual_kernel.compare(target_kernel, show_table=False, title=f"{title} kernel", full=full)
         kernel_match = results["match"]
         assert kernel_match, f"Kernel mismatch: target={target_kernel.name}, actual={actual_kernel.name}"
         
