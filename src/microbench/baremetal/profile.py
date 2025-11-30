@@ -71,10 +71,10 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
     Parse nsys sqlite trace and compute kernel launch tax statistics.
     
     Uses same event linking and aggregation logic as PyTorch pipeline:
-    - Find cudaLaunchKernel events (cuda_runtime)
+    - Find cu(da)LaunchKernel events
     - Find kernel events (kernel category)
     - Link via correlation ID (utils.link_sequences)
-    - Compute kernel_tax = kernel.ts - cudaLaunchKernel.ts (utils.calculate_per_seq_launch_tax)
+    - Compute kernel_tax = kernel.ts - cu(da)LaunchKernel.ts (utils.calculate_per_seq_launch_tax)
     - Aggregate multiple runs (utils.deduplicate_and_aggregate)
     
     Args:
@@ -85,7 +85,7 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
     
     Returns: Aggregated sequence dict with keys: kernel, meta, cuda_launch, cpu_op
     """
-    # Extract cuda runtime and kernel events
+    # Extract CUDA launch events and kernel events
     cuda_launches = extract_launches_from_trace(trace_file_sql)
     kernels = extract_kernels_from_trace(trace_file_sql, cleanup=False)
 

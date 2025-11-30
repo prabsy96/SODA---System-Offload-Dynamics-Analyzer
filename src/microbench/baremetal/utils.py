@@ -184,7 +184,7 @@ def extract_launches_from_trace(trace_file_sql):
             
         conn.close()
     except Exception as e:
-        print(f"Warning: Could not query CUDA runtime events: {e}", file=sys.stderr)
+        print(f"Warning: Could not query CUDA launch events: {e}", file=sys.stderr)
         return {}
         
     return cuda_launches

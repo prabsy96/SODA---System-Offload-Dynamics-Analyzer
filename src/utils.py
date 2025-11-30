@@ -731,7 +731,7 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
         Dictionary with hierarchical structure:
         - cpu: Dict with keys:
             - ops: Dict[external_id, cpu_op_dict] - CPU operations
-            - launches: Dict[correlation_id, cuda_launch_dict] - CUDA runtime launches
+            - launches: Dict[correlation_id, cuda_launch_dict] - CUDA launch events (cu(da)LaunchKernel)
         - gpu: Dict with keys:
             - kernels: List of kernel events
             - memory: List of memcpy/memset events
@@ -761,7 +761,8 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
                 "ts": event["ts"],
                 "dur": event["dur"]
             }
-        elif cat == "cuda_runtime" and event["name"] == "cudaLaunchKernel":
+        elif (cat == "cuda_runtime" and event["name"] == "cudaLaunchKernel") or \
+             (cat == "cuda_driver" and event["name"] == "cuLaunchKernel"):
             if external_id is not None and correlation is not None:
                 cuda_launch_events_by_corr[correlation] = {
                     "type": "cuda_launch",
@@ -770,7 +771,7 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
                     "correlation": correlation,
                     "ts": event["ts"],
                     "dur": event["dur"],
-                    "cbid": args["cbid"]
+                    "cbid": args.get("cbid")  # Driver API may not have cbid
                 }
         elif cat == "kernel" and external_id is not None and correlation is not None:
             kernel_events.append({
@@ -869,7 +870,7 @@ def calculate_per_seq_launch_tax(sequences: List[Dict]) -> List[Dict]:
         kernel = seq["kernel"]
         cuda_launch = seq["cuda_launch"]
         launch_tax = kernel["ts"] - cuda_launch["ts"]
-        assert launch_tax >= 0, f"Negative launch tax detected: kernel.ts={kernel['ts']}, cudaLaunchKernel.ts={cuda_launch['ts']}, tax={launch_tax}"
+        assert launch_tax >= 0, f"Negative launch tax detected: kernel.ts={kernel['ts']}, cu(da)LaunchKernel.ts={cuda_launch['ts']}, tax={launch_tax}"
         seq["kernel_tax"] = launch_tax
 
     return sequences
@@ -1006,7 +1007,7 @@ def calculate_total_inference_time(trace: Dict[str, Any]) -> float:
     """
     Calculates total wall-clock inference time from ALL trace events.
     
-    Includes CPU ops, CUDA runtime calls, and GPU execution.
+    Includes CPU ops, CUDA launch events, and GPU execution.
     Only considers complete events (ph="X") with timestamps and durations.
     Excludes flow markers, metadata, and instant events.
         
@@ -1039,7 +1040,7 @@ def calculate_total_gpu_time_span(events: Dict[str, Any]) -> float:
     across GPU execution events (kernel, gpu_memcpy, gpu_memset).
     
     Measures the extreme time window of GPU execution (from first to last GPU event).
-    Excludes cuda_runtime (CPU-side calls).
+    Excludes cu(da)LaunchKernel (CPU-side calls).
         
     Args:
         events: Dictionary with hierarchical structure from collect_events.
