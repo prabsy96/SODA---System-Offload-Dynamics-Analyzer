@@ -531,12 +531,12 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-p",
         "--precision",
-        default="float16",
+        default="bfloat16",
         choices=["float32", "float16", "bfloat16"],
         help="Precision for model weights and operations",
     )
     parser.add_argument(
-        "-sl", "--seq-len", dest="seq_len", type=int, default=512, 
+        "-sl", "--seq-len", dest="seq_len", type=int, default=128, 
         help="Sequence length for synthetic input."
     )
     parser.add_argument(
