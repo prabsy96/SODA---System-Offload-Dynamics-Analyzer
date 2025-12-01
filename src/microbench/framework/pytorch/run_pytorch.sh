@@ -1,6 +1,5 @@
 #!/bin/bash
-# Framework (PyTorch) GEMM profiling microbenchmark
-# Profiles PyTorch model, extracts GEMM kernels, replays, verifies, and plots
+# Run the PyTorch profiling and analysis pipeline
 
 set -e
 
@@ -11,25 +10,23 @@ if [ -z "$SODA_ENV_LOADED" ]; then
     exit 1
 fi
 
-# Get script directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Activate virtual environment
-if [ ! -d "$PYTHON_VENV" ]; then
-    echo "Error: Virtual environment not found at $PYTHON_VENV"
-    echo "Create it with: python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
+# Activate Python environment (supports both conda and venv)
+if [ -n "$CONDA_DEFAULT_ENV" ] && [ "$CONDA_DEFAULT_ENV" != "base" ]; then
+    echo "Using conda environment: $CONDA_DEFAULT_ENV"
+elif [ -d "$PYTHON_VENV" ]; then
+    echo "Activating virtual environment at $PYTHON_VENV"
+    source "$PYTHON_VENV/bin/activate"
+elif [ -n "$CONDA_DEFAULT_ENV" ]; then
+    echo "Using conda base environment"
+elif command -v python &> /dev/null; then
+    echo "Using system Python"
+else
+    echo "Error: No Python environment found."
     exit 1
 fi
 
-source "$PYTHON_VENV/bin/activate"
-
-echo "=============================================="
-echo "PyTorch GEMM Profiling"
-echo "=============================================="
-echo "Using Python: $(which python)"
-echo "Python version: $(python --version)"
-echo ""
-
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # HuggingFace cache is already set in env.sh
@@ -68,4 +65,3 @@ echo "=============================================="
 echo "Done! Check results in:"
 echo "  $PYTORCH_OUTPUT"
 echo "=============================================="
-

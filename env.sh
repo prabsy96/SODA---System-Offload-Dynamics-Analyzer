@@ -77,6 +77,20 @@ activate_venv() {
     fi
 }
 
+activate_python_env() {
+    if [ -n "$CONDA_DEFAULT_ENV" ]; then
+        echo "Using conda environment: $CONDA_DEFAULT_ENV"
+    elif [ -d "$PYTHON_VENV" ]; then
+        echo "Activating venv at $PYTHON_VENV"
+        source "$PYTHON_VENV/bin/activate"
+    else
+        echo "Warning: No virtual environment found. Using system Python."
+    fi
+}
+
+# Alias for convenience
+alias activate_venv='activate_python_env'
+
 # Helper function to print all paths (for debugging)
 print_soda_env() {
     echo "=== SODA Environment Variables ==="
