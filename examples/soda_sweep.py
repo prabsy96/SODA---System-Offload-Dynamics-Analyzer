@@ -39,31 +39,8 @@ def main() -> None:
             "--model", model,
             "--batch-size", str(bs),
             "--seq-len", str(sl),
-            "--precision", "bfloat16",
-            "--compile-type", "eager",
-            "--device", "cuda",
-            "--output-dir", os.environ.get("SODA_OUTPUT", "."),
         ]
         args = utils.parse_and_validate_args(cli_args)
-
-        # If you want to bypass CLI parsing, uncomment and edit the namespace
-        # below. All supported args are mentioned below.
-        #
-        # args = Namespace(
-        #     model=model,
-        #     output_dir=Path(os.environ.get("SODA_OUTPUT", ".")),
-        #     compile_type="eager",
-        #     device="cuda",
-        #     precision="bfloat16",
-        #     seq_len=sl,
-        #     batch_size=bs,
-        #     fusion=None,
-        #     prox_score=1.0,
-        #     seed=42,
-        #     microbench=False,
-        #     runs=5,
-        #     warmup=10,
-        # )
 
         tracer = ModelTracer(args=args)
         SodaLogger(tracer.output_dir, is_console=True, is_file=True)

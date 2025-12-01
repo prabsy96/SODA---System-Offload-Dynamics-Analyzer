@@ -32,8 +32,8 @@ def main() -> None:
     model = "meta-llama/Llama-3.2-3B"
     batch_sizes = [1]
     seq_lens = [128, 256]
-    warmup = 1000
-    runs = 5000
+    warmup = 1
+    runs = 1
 
     for bs, sl in product(batch_sizes, seq_lens):
         print(f"\n=== Microbench sweep point: batch_size={bs}, seq_len={sl} ===")

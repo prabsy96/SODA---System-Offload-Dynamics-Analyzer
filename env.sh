@@ -72,16 +72,23 @@ export HF_HOME="/scratch/$USER/hf_cache"
 # Python path setup for imports
 export PYTHONPATH="$SODA_SRC:$PYTHONPATH"
 
-# Helper function to activate virtual environment
-activate_venv() {
-    if [ -d "$PYTHON_VENV" ]; then
+# Helper function to activate Python environment (supports conda or venv)
+activate_python_env() {
+    if [ -n "$CONDA_DEFAULT_ENV" ] && [ "$CONDA_DEFAULT_ENV" != "base" ]; then
+        echo "Using conda environment: $CONDA_DEFAULT_ENV"
+    elif [ -d "$PYTHON_VENV" ]; then
+        echo "Activating venv at $PYTHON_VENV"
         source "$PYTHON_VENV/bin/activate"
-        echo "Virtual environment activated: $PYTHON_VENV"
+    elif [ -n "$CONDA_DEFAULT_ENV" ]; then
+        echo "Using conda base environment"
     else
-        echo "Warning: Virtual environment not found at $PYTHON_VENV"
+        echo "Warning: No virtual environment found. Using system Python."
         return 1
     fi
 }
+
+# Backward-compatible alias
+alias activate_venv='activate_python_env'
 
 # Helper function to print all paths (for debugging)
 print_soda_env() {
