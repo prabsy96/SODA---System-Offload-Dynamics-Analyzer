@@ -518,7 +518,7 @@ class ModelTracer:
         if self.is_decoder:
             self.trace_forward_pass_for_decoder()
         else:
-            self.trace_forward_pass_for_encoder
+            self.trace_forward_pass_for_encoder()
         
         # Load trace data into memory immediately
         self.trace_data = utils.load_json(self.trace_file)
