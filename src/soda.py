@@ -606,7 +606,7 @@ class ModelTracer:
                 end_time.record()
                 
                 torch.cuda.synchronize()
-                self.measured_inference_time_us = utils.ms_to_us(start_time.elapsed_time(end_time))
+                self.torch_measured_inference_time_us = utils.ms_to_us(start_time.elapsed_time(end_time))
 
         prof.export_chrome_trace(str(self.trace_file))
 
