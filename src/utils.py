@@ -130,6 +130,18 @@ def get_sequence_str(sequence: Dict[str, Any]) -> str:
     kernel = sequence['kernel']
     return f"{cpu_op['name']} -> {kernel['name']}"
 
+def ms_to_us(milliseconds: float) -> float:
+    """
+    Convert a duration from milliseconds to microseconds.
+    
+    Args:
+        milliseconds: Duration in milliseconds.
+    
+    Returns:
+        Duration in microseconds.
+    """
+    return milliseconds * 1000.0
+
 def us_to_ms(microseconds: float) -> float:
     """
     Convert a duration from microseconds to milliseconds.

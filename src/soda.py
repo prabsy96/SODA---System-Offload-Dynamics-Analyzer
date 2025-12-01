@@ -81,7 +81,7 @@ class SodaAnalyzer:
         stream_info = utils.analyze_per_stream(self.events)
         
         # General metrics
-        total_inference_time = utils.calculate_total_inference_time(self.trace)
+        trace_calculated_inference_time = utils.calculate_total_inference_time(self.trace)
         
         # GPU metrics
         total_gpu_time_span = utils.calculate_total_gpu_time_span(self.events)
@@ -105,8 +105,15 @@ class SodaAnalyzer:
         
         # Build metrics dictionary 
         metrics = {
-            # General metrics
-            "inference_runtime_ms": utils.us_to_ms(total_inference_time),
+            # Inference time 
+            "inference_time_ms": utils.us_to_ms(self.tracer.torch_measured_inference_time_us),
+            # Inference time breakdown
+            "inference_time_breakdown": {
+                "torch_measured_inference_time_ms": utils.us_to_ms(self.tracer.torch_measured_inference_time_us),
+                "trace_calculated_inference_time_ms": utils.us_to_ms(trace_calculated_inference_time),
+                "profiler_overhead_ms": utils.us_to_ms(trace_calculated_inference_time - self.tracer.torch_measured_inference_time_us),
+            },
+            
             "active_streams": len(stream_info),
 
             # GPU metrics
@@ -149,7 +156,7 @@ class SodaAnalyzer:
         # --- Enhanced Reporting ---
         LOGGER.info("")
         LOGGER.info("=== Performance Metrics ===")
-        LOGGER.info(f"\t* Inference runtime (ms): {metrics['inference_runtime_ms']:.4f}")
+        LOGGER.info(f"\t* Inference runtime (ms): {metrics['inference_time_ms']:.4f}")
         LOGGER.info(f"\t* Total kernel execution time (ms): {metrics['total_kernel_exec_time_ms']:.4f}")
         LOGGER.info(f"\t* GPU busy time (concurrent-aware) (ms): {metrics['gpu_busy_time_ms']:.4f}")
         LOGGER.info(f"\t* GPU idle time (ms): {metrics['gpu_idle_time_ms']:.4f}")
@@ -400,6 +407,7 @@ class ModelTracer:
         self.trace_data = None
         self.events = None
         self.sequences = None
+        self.torch_measured_inference_time_us = None
     
     def setup(self) -> None:
         """
@@ -538,7 +546,11 @@ class ModelTracer:
             for _ in range(5):
                 self.model.generate(**self.model_inputs, max_new_tokens=1, do_sample=False, pad_token_id=self.tokenizer.pad_token_id)
 
-        # Profiled run
+        # Synchronize before timing
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        # Profiled run 
         with torch.no_grad():
             with profile(
                 activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
@@ -547,7 +559,15 @@ class ModelTracer:
                 profile_memory=True,
                 record_shapes=True,
             ) as prof:
+                start_time = torch.cuda.Event(enable_timing=True)
+                end_time = torch.cuda.Event(enable_timing=True)
+                
+                start_time.record()
                 self.model.generate(**self.model_inputs, max_new_tokens=1, do_sample=False, pad_token_id=self.tokenizer.pad_token_id)
+                end_time.record()
+                
+                torch.cuda.synchronize()
+                self.torch_measured_inference_time_us = utils.ms_to_us(start_time.elapsed_time(end_time))
         
         prof.export_chrome_trace(str(self.trace_file))
 
@@ -565,7 +585,11 @@ class ModelTracer:
             for _ in range(5):
                 self.model(**self.model_inputs)
         
-        # Profiled run
+        # Synchronize before timing
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        # Profiled run 
         with torch.no_grad():
             with profile(
                 activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
@@ -574,7 +598,15 @@ class ModelTracer:
                 profile_memory=True,
                 record_shapes=True,
             ) as prof:
+                start_time = torch.cuda.Event(enable_timing=True)
+                end_time = torch.cuda.Event(enable_timing=True)
+                
+                start_time.record()
                 self.model(**self.model_inputs)
+                end_time.record()
+                
+                torch.cuda.synchronize()
+                self.measured_inference_time_us = utils.ms_to_us(start_time.elapsed_time(end_time))
 
         prof.export_chrome_trace(str(self.trace_file))
 
