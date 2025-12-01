@@ -628,199 +628,122 @@ class SodaProfiler:
 
     @staticmethod
     def collect_events_from_trace(trace: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Collects all events from trace organized by category.
-        
-        Args:
-            trace: Chrome trace format dictionary with "traceEvents" key.
-        
-        Returns:
-            Dictionary with hierarchical structure:
-            - cpu: Dict with keys:
-                - ops: Dict[external_id, cpu_op_dict] - CPU operations
-                - launches: Dict[correlation_id, cuda_launch_dict] - CUDA runtime launches
-            - gpu: Dict with keys:
-                - kernels: List of kernel events
-                - memory: List of memcpy/memset events
-                - all: List of all GPU events
-        """
-        op_events_by_ext_id = {}
         cuda_launch_events_by_corr = {}
-        cuda_launch_events_by_ext_id = defaultdict(list) # New: fallback lookup
         kernel_events = []
         gpu_mem_events = []
-
-        if isinstance(trace, list):
-            trace_events = trace
-        else:
-            trace_events = trace.get("traceEvents", [])
+        
+        trace_events = trace.get("traceEvents", []) if isinstance(trace, dict) else trace
         
         for event in trace_events:
-            cat = event.get("cat")
+            if event.get("ph") == "M": continue
+            
+            cat = event.get("cat", "")
             name = event.get("name", "")
             args = event.get("args", {})
-            external_id = args.get("External id")
-            correlation = args.get("correlation")
+            ts = event.get("ts", 0)
+            dur = event.get("dur", 0)
             
-            if cat == "cpu_op" and external_id is not None:
-                op_events_by_ext_id[external_id] = {
-                    "type": "cpu_op",
-                    "name": name,
-                    "external_id": external_id,
-                    "input_dims": args.get("Input Dims", []),
-                    "input_strides": args.get("Input Strides", []),
-                    "input_type": args.get("Input type", []),
-                    "concrete_inputs": args.get("Concrete Inputs", []),
-                    "ts": event.get("ts"),
-                    "dur": event.get("dur")
-                }
-            elif (cat == "cuda_runtime" or cat == "Runtime") and ("LaunchKernel" in name or "Launch" in name):
-                launch_event = {
-                    "type": "cuda_launch",
-                    "name": name,
-                    "external_id": external_id,
-                    "correlation": correlation,
-                    "ts": event.get("ts"),
-                    "dur": event.get("dur"),
-                    "cbid": args.get("cbid")
-                }
-                if correlation is not None:
-                    cuda_launch_events_by_corr[correlation] = launch_event
-                
-                # Index by external ID (fallback)
-                if external_id is not None:
-                    cuda_launch_events_by_ext_id[external_id].append(launch_event)
+            # Robust ID extraction: try common keys and normalize to int
+            corr_id = (
+                args.get("correlation")
+                or args.get("correlation_id")
+                or args.get("External id")
+                or args.get("external_id")
+            )
+            try:
+                corr_id = int(corr_id) if corr_id is not None else None
+            except (ValueError, TypeError):
+                corr_id = None
 
-            elif cat == "kernel":
-                if external_id is not None or correlation is not None:
-                    kernel_events.append({
-                        "type": "kernel",
-                        "name": SodaProfiler.get_clean_kernel_name(name),
-                        "external_id": external_id,
-                        "correlation": correlation,
-                        "grid": args.get("grid"),
-                        "block": args.get("block"),
-                        "shared_memory": args.get("shared memory"),
-                        "registers_per_thread": args.get("registers per thread"),
-                        "blocks_per_SM": args.get("blocks per SM"),
-                        "warps_per_SM": args.get("warps per SM"),
-                        "occupancy": args.get("est. achieved occupancy %"),
-                        "stream": args.get("stream"),
-                        "device": args.get("device"),
-                        "context": args.get("context"),
-                        "queued": args.get("queued"),
-                        "dur": event.get("dur"),
-                        "ts": event.get("ts")
-                    })
-            elif cat == "gpu_memcpy" or cat == "gpu_memset":
-                gpu_mem_events.append({
-                    "type": cat,
+            # 1. CPU Launch Events (cuda_runtime side)
+            # PyTorch Chrome trace uses cat="cuda_runtime" and name like "cudaLaunchKernel"
+            if cat == "cuda_runtime" and "cudaLaunchKernel" in name and corr_id is not None:
+                # keep the full event; we use ts/dur directly later
+                cuda_launch_events_by_corr[corr_id] = {
+                    "ts": ts,
+                    "dur": dur,
                     "name": name,
-                    "correlation": correlation,
+                    "args": args,
+                    "cat": cat,
+                    "correlation": corr_id,
+                }
+
+            # 2. GPU Kernels
+            if cat == "kernel":
+                kernel_data = {
+                    "name": name,
+                    "ts": ts,
+                    "dur": dur,
+                    "correlation": corr_id,
+                    "args": args,
+                    "grid": args.get("grid"),
+                    "block": args.get("block"),
                     "stream": args.get("stream"),
                     "device": args.get("device"),
                     "context": args.get("context"),
-                    "ts": event.get("ts"),
-                    "dur": event.get("dur"),
+                }
+                kernel_events.append(kernel_data)
+                
+            # 3. GPU Memory
+            elif cat in ["gpu_memcpy", "gpu_memset"]:
+                mem_data = {
+                    "name": name,
+                    "ts": ts,
+                    "dur": dur,
+                    "correlation": corr_id,
+                    "type": cat,
                     "bytes": args.get("bytes"),
-                    "memory_bandwidth_gbs": args.get("memory bandwidth (GB/s)") if cat == "gpu_memcpy" else None
-                })
-        
+                    "stream": args.get("stream"),
+                }
+                gpu_mem_events.append(mem_data)
+
         return {
             "cpu": {
-                "ops": op_events_by_ext_id,
-                "launches": cuda_launch_events_by_corr,
-                "launches_by_ext_id": cuda_launch_events_by_ext_id
+                "launches": cuda_launch_events_by_corr
             },
             "gpu": {
                 "kernels": kernel_events,
-                "memory": gpu_mem_events,
                 "all": kernel_events + gpu_mem_events
             }
         }
 
     @staticmethod
     def get_linked_event_sequences(events: Dict[str, Any]) -> List[Dict]:
-        """
-        Get event sequences linking CPU operations, CUDA launches, and kernels.
+        sequences = []
+        cpu_launches = events["cpu"]["launches"]
         
-        Args:
-            events: Dictionary with hierarchical structure from collect_events_from_trace.
-
-        Returns:
-            List of event sequence dictionaries with keys: kernel, cuda_launch, cpu_op.
-        """
-        gpu_events = events["gpu"]
-        cpu_ops = events["cpu"]["ops"]
-        cuda_launches = events["cpu"]["launches"]
-        cuda_launches_by_ext_id = events["cpu"].get("launches_by_ext_id", {})
-        kernel_events = gpu_events["kernels"]
-
-        event_sequences = []
-        launch_usage_by_ext_id = defaultdict(int)
-
-        for kernel in kernel_events:
-            external_id = kernel.get("external_id")
-            correlation = kernel.get("correlation")
+        for kernel in events["gpu"]["kernels"]:
+            corr_id = kernel.get("correlation")
             
-            cpu_op = cpu_ops.get(external_id) if external_id is not None else None
-            cuda_launch = cuda_launches.get(correlation) if correlation is not None else None
-
-            if cuda_launch is None and external_id is not None:
-                launches = cuda_launches_by_ext_id.get(external_id)
-                if launches:
-                    # Simple heuristic: map i-th kernel to i-th launch for this ID
-                    # This assumes kernels appear in trace in same order as launches
-                    idx = launch_usage_by_ext_id[external_id]
-                    if idx < len(launches):
-                        cuda_launch = launches[idx]
-                        launch_usage_by_ext_id[external_id] += 1
-                    else:
-                        # If we ran out of launches, use the last one as fallback
-                        cuda_launch = launches[-1]
-            
-            event_sequences.append({
-                "kernel": kernel,
-                "cuda_launch": cuda_launch,
-                "cpu_op": cpu_op,
-            })
-        
-        return event_sequences
+            if corr_id is not None and corr_id in cpu_launches:
+                cpu_launch = cpu_launches[corr_id]
+                sequences.append({
+                    "cpu_launch": cpu_launch,
+                    "gpu_kernel": kernel,
+                    "correlation_id": corr_id
+                })
+        return sequences
 
     @staticmethod
     def calculate_per_seq_tklqt(event_sequences: List[Dict]) -> List[Dict]:
-        """
-        Calculates launch tax for each sequence and adds it to the sequence dict.
-
-        Args:
-            event_sequences: List of event sequence dictionaries.
-
-        Returns:
-            Modified event sequences with "kernel_tax" key added to each.
-        """
-
         for seq in event_sequences:
-            kernel = seq.get("kernel")
-            cuda_launch = seq.get("cuda_launch")
+            cpu_launch = seq["cpu_launch"]
+            gpu_kernel = seq["gpu_kernel"]
             
-            if kernel is None or cuda_launch is None:
-                seq["tklqt_us"] = 0.0
-                continue
-
-            cuda_launch_start = float(cuda_launch.get("ts", 0))
-            kernel_start = float(kernel.get("ts", 0))
-
-            # TKLQT = Kernel Start (GPU) - Launch Start (CPU)
-            val = kernel_start - cuda_launch_start
-
-            if val < 0:
-                # Kernel started before launch? Event correlation error
-                seq["tklqt_us"] = 0.0
-            elif val > 5000000:  # > 5 seconds is likely an artifact
-                seq["tklqt_us"] = 0.0
-            else:
-                seq["tklqt_us"] = val
-        
+            # Timestamps are in microseconds
+            cpu_start = float(cpu_launch.get("ts", 0.0))
+            cpu_dur = float(cpu_launch.get("dur", 0.0))
+            cpu_end = cpu_start + cpu_dur
+            
+            gpu_start = float(gpu_kernel.get("ts", 0.0))
+            
+            # TKLQT = GPU Start - CPU Launch End
+            # Represents the time the operation sat in the GPU queue after being submitted by CPU
+            tklqt_us = max(0.0, gpu_start - cpu_end)
+            
+            seq["tklqt"] = tklqt_us
+            seq["launch_tax_us"] = tklqt_us
+            
         return event_sequences
 
 
@@ -835,10 +758,7 @@ class SodaProfiler:
         Returns:
             Total launch tax in microseconds.
         """
-        total = 0.0
-        for seq in event_sequences:
-            total += seq.get("launch_tax_us", 0.0)
-        return total
+        return sum(float(seq.get("launch_tax_us", 0.0)) for seq in event_sequences)
 
     @staticmethod
     def calculate_avg_tklqt(event_sequences: List[Dict]) -> float:
@@ -851,10 +771,10 @@ class SodaProfiler:
         Returns:
             Average launch tax in microseconds.
         """
-        valid_sequences = [seq for seq in event_sequences if seq.get("launch_tax_us", 0.0) > 0]
+        valid_sequences = [seq for seq in event_sequences if float(seq.get("launch_tax_us", 0.0)) > 0.0]
         if not valid_sequences:
             return 0.0
-        total = sum(seq.get("launch_tax_us", 0.0) for seq in valid_sequences)
+        total = sum(float(seq.get("launch_tax_us", 0.0)) for seq in valid_sequences)
         return total / len(valid_sequences)
     
     def get_average_kernel_duration(self) -> Dict[str, float]:
