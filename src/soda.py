@@ -739,7 +739,7 @@ class SodaProfiler:
             
             # TKLQT = GPU Start - CPU Launch End
             # Represents the time the operation sat in the GPU queue after being submitted by CPU
-            tklqt_us = max(0.0, gpu_start - cpu_end)
+            tklqt_us = max(0.0, gpu_start - cpu_start)
             
             seq["tklqt"] = tklqt_us
             seq["launch_tax_us"] = tklqt_us
