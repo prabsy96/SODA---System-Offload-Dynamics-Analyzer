@@ -29,8 +29,8 @@ def main() -> None:
     ensure_env_loaded()
 
     model = "meta-llama/Llama-3.2-3B"
-    batch_sizes = [1]
-    seq_lens = [1, 2, 4, 8, 16, 32]
+    batch_sizes = [1, 2, 4, 8, 16, 32]
+    seq_lens = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 
     for bs, sl in product(batch_sizes, seq_lens):
         print(f"\n=== Running sweep point: batch_size={bs}, seq_len={sl} ===")
@@ -39,6 +39,11 @@ def main() -> None:
             "--model", model,
             "--batch-size", str(bs),
             "--seq-len", str(sl),
+            "--precision", "bfloat16",
+            "--compile-type", "eager",
+            "--device", "cuda",
+            "--warmup", "1000",
+            "--runs", "5000",
         ]
         args = utils.parse_and_validate_args(cli_args)
 
