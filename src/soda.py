@@ -17,6 +17,14 @@ from collections import defaultdict, deque
 from torch.profiler import ProfilerActivity, profile
 from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple
 
+# for fp8 e4m3 format support
+try:
+    from transformers.utils.quantization_config import FP8Config
+    FP8_CONFIG_AVAILABLE = True
+except ImportError:
+    FP8Config = None
+    FP8_CONFIG_AVAILABLE = False
+
 # Import and expose utils module for 'from soda import utils'
 import utils
 
@@ -166,18 +174,17 @@ class SodaAnalyzer:
         LOGGER.info(f"\t* Inference runtime (ms): {metrics['inference_time_ms']:.4f}")
         
         # Framework Tax Analysis
-        framework = metrics.get("framework_overhead", {})
-        timing = metrics.get("inference_time_breakdown", {})
+        framework = metrics["framework_overhead"]
+        timing = metrics["inference_time_breakdown"]
         LOGGER.info("")
         LOGGER.info("=== Framework Tax Analysis ===")
-        LOGGER.info(f"\t* Framework Tax (Exposed CPU Overhead): {framework.get('framework_tax_ms', 0):.4f} ms ({framework.get('framework_tax_percent', 0):.1f}%)")
-        LOGGER.info(f"\t* GPU Active Time (Compute): {metrics.get('gpu_busy_time_ms', 0):.4f} ms ({framework.get('gpu_busy_time_percent', 0):.1f}%)")
+        LOGGER.info(f"\t* Framework Tax (Exposed CPU Overhead): {framework['framework_tax_ms']:.4f} ms ({framework['framework_tax_percent']:.1f}%)")
+        LOGGER.info(f"\t* GPU Active Time (Compute): {metrics['gpu_busy_time_ms']:.4f} ms ({framework['gpu_busy_time_percent']:.1f}%)")
         
         # Timing breakdown
-        if timing.get("torch_measured_inference_time_ms") is not None:
-            LOGGER.info(f"\t  - Torch measured inference time (ms): {timing['torch_measured_inference_time_ms']:.4f}")
-            LOGGER.info(f"\t  - Trace calculated inference time (ms): {timing['trace_calculated_inference_time_ms']:.4f}")
-            LOGGER.info(f"\t  - Profiler overhead (ms): {timing['profiler_overhead_ms']:.4f}")
+        LOGGER.info(f"\t  - Torch measured inference time (ms): {timing['torch_measured_inference_time_ms']:.4f}")
+        LOGGER.info(f"\t  - Trace calculated inference time (ms): {timing['trace_calculated_inference_time_ms']:.4f}")
+        LOGGER.info(f"\t  - Profiler overhead (ms): {timing['profiler_overhead_ms']:.4f}")
         
         LOGGER.info("")
         LOGGER.info("=== GPU Metrics ===")
@@ -379,7 +386,9 @@ class ModelTracer:
         self.model_name = args.model
         self.device = torch.device(args.device)
         self.compile_type = args.compile_type
+        self.is_fp8 = args.precision == "float8_e4m3fn"
         self.precision = utils.parse_dtype_to_torch(args.precision)
+        self.load_precision = torch.bfloat16 if self.is_fp8 else self.precision
 
         # Set random seeds
         torch.manual_seed(args.seed)
@@ -453,11 +462,34 @@ class ModelTracer:
 
     def get_kwargs(self) -> Dict[str, Any]:
         """Returns common kwargs for model loading."""
-        return {
-            "dtype": self.precision,
+        kwargs = {
+            "torch_dtype": self.load_precision,
             "device_map": self.device if self.device.type == 'cuda' else 'cpu',
             "trust_remote_code": True,
         }
+        
+        if self.is_fp8 and FP8_CONFIG_AVAILABLE:
+            kwargs["quantization_config"] = FP8Config(fp8_format="e4m3")
+
+        return kwargs
+
+    def _convert_to_fp8(self, model: transformers.PreTrainedModel) -> transformers.PreTrainedModel:
+        """
+        Convert Linear layer weights to FP8 E4M3 for inference if quantization config is unavailable.
+        """
+        LOGGER.info("Converting linear layer weights to float8_e4m3fn...")
+
+        converted_count = 0
+        for _, module in model.named_modules():
+            if isinstance(module, torch.nn.Linear):
+                with torch.no_grad():
+                    # Clamp to avoid overflow in FP8 E4M3 range before conversion
+                    clamped = module.weight.data.clamp(-448.0, 448.0)
+                    module.weight.data = clamped.to(torch.float8_e4m3fn)
+                    converted_count += 1
+
+        LOGGER.info(f"Converted {converted_count} linear layers to FP8 E4M3.")
+        return model
 
     def load_encoder(self) -> Tuple[transformers.PreTrainedModel, transformers.PreTrainedTokenizer]:
         """Loads an encoder-only model (e.g., BERT)."""
@@ -472,17 +504,23 @@ class ModelTracer:
             model = transformers.AutoModelForSequenceClassification.from_pretrained(
                 self.model_name, **kwargs
             ).eval()
+            if self.is_fp8 and "quantization_config" not in kwargs:
+                model = self._convert_to_fp8(model)
             model.forward = torch.compile(model.forward, mode="reduce-overhead", backend="inductor")
         elif self.compile_type == "flash-attention":
             kwargs.update({"attn_implementation": "flash_attention_2"})
             model = transformers.AutoModelForSequenceClassification.from_pretrained(
                 self.model_name, **kwargs
             ).eval()
+            if self.is_fp8 and "quantization_config" not in kwargs:
+                model = self._convert_to_fp8(model)
         else:  # eager
             kwargs.update({"attn_implementation": "eager"})
             model = transformers.AutoModelForSequenceClassification.from_pretrained(
                 self.model_name, **kwargs
             ).eval()
+            if self.is_fp8 and "quantization_config" not in kwargs:
+                model = self._convert_to_fp8(model)
         
         generation_config = getattr(model, "generation_config", None)
         if generation_config is not None: 
@@ -511,17 +549,23 @@ class ModelTracer:
                 self.model_name, config=config, **kwargs
             ).eval()
             model.generation_config.cache_implementation = "static"
+            if self.is_fp8 and "quantization_config" not in kwargs:
+                model = self._convert_to_fp8(model)
             model.forward = torch.compile(model.forward, mode="reduce-overhead", backend="inductor")
         elif self.compile_type == "flash-attention":
             kwargs.update({"attn_implementation": "flash_attention_2"})
             model = transformers.AutoModelForCausalLM.from_pretrained(
                 self.model_name, config=config, **kwargs
             ).eval()
+            if self.is_fp8 and "quantization_config" not in kwargs:
+                model = self._convert_to_fp8(model)
         else:  # eager
             kwargs.update({"attn_implementation": "eager"})
             model = transformers.AutoModelForCausalLM.from_pretrained(
                 self.model_name, config=config, **kwargs
             ).eval()
+            if self.is_fp8 and "quantization_config" not in kwargs:
+                model = self._convert_to_fp8(model)
         
         return model, tokenizer
     

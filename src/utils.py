@@ -75,6 +75,7 @@ def parse_dtype_to_cublaslt(dtype_str: str) -> str:
         "bfloat16": "bf16",
         "double": "f64",
         "float64": "f64",
+        "float8_e4m3fn": "f8",
     }
 
     # FIXME: Hack for c10::BFloat16 type strings
@@ -107,6 +108,12 @@ def parse_dtype_to_torch(dtype_str: str):
         "int64": torch.int64,
         "long": torch.int64,
     }
+
+    # Add FP8 E4M3 mapping if available in this torch build
+    if hasattr(torch, "float8_e4m3fn"):
+        dtype_map["float8_e4m3fn"] = torch.float8_e4m3fn
+    elif dtype_str.replace("c10::", "").lower() == "float8_e4m3fn":
+        raise ValueError("Unsupported data type: 'float8_e4m3fn'. Please upgrade to PyTorch 2.1+ for FP8 support.")
     
     # FIXME: Hack for c10::BFloat16 type strings
     dtype_str = dtype_str.replace("c10::", "").lower()
@@ -532,7 +539,7 @@ def get_args_parser() -> argparse.ArgumentParser:
         "-p",
         "--precision",
         default="bfloat16",
-        choices=["float32", "float16", "bfloat16"],
+        choices=["float32", "float16", "bfloat16", "float8_e4m3fn"],
         help="Precision for model weights and operations",
     )
     parser.add_argument(
@@ -590,13 +597,24 @@ def parse_and_validate_args(args=None) -> argparse.Namespace:
     parsed_args = parser.parse_args(args)
     
     # Validate arguments
-    if parsed_args.device == "cpu" and parsed_args.precision == "float16":
-        print("Warning: float16 is not supported on CPU. Forcing float32.")
+    if parsed_args.device == "cpu" and parsed_args.precision in ["float16", "float8_e4m3fn", "float8_e5m2", "bfloat16"]:
+        print(f"Warning: {parsed_args.precision} is not supported on CPU. Forcing float32.")
         parsed_args.precision = "float32"
 
     if not torch.cuda.is_available() and parsed_args.device == "cuda":
         print("Error: CUDA is not available. Please select --device cpu.", file=sys.stderr)
         sys.exit(1)
+
+    if parsed_args.precision == "float8_e4m3fn":
+        if not hasattr(torch, "float8_e4m3fn"):
+            print("Error: FP8 requires PyTorch 2.1+ with float8 support.", file=sys.stderr)
+            sys.exit(1)
+
+        if parsed_args.device == "cuda":
+            capability = torch.cuda.get_device_capability()
+            if capability[0] < 9 and not (capability[0] == 8 and capability[1] >= 9):
+                print(f"Warning: FP8 typically requires SM89+ (Ada/Hopper). Detected SM{capability[0]}{capability[1]}.", file=sys.stderr)
+                print("FP8 may not be hardware-accelerated on this device.", file=sys.stderr)
     
     return parsed_args
 
@@ -855,8 +873,8 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
     for kernel in kernel_events:
         external_id = kernel["external_id"]
         correlation = kernel["correlation"]
-        cpu_op = cpu_ops.get(external_id) 
-        cuda_launch = cuda_launches.get(correlation) 
+        cpu_op = cpu_ops[external_id] 
+        cuda_launch = cuda_launches[correlation] 
         
         sequences.append({
             "kernel": kernel,
@@ -1393,4 +1411,3 @@ def generate_synthetic_inputs(tokenizer, device: torch.device, batch_size: int, 
             batch_size, seq_len, device=device
         ),
     }
-
