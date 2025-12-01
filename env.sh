@@ -83,7 +83,6 @@ activate_python_env() {
         echo "Using conda base environment"
     else
         echo "Warning: No virtual environment found. Using system Python."
-        return 1
     fi
 }
 
