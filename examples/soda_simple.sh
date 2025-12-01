@@ -24,11 +24,10 @@ fi
 source "$PYTHON_VENV/bin/activate"
 
 # Run SODA using CLI command
-soda-cli \
-  --model gpt2 \
+soda-cli --model "meta-llama/Llama-3.2-3B" \
   --output-dir "$SODA_OUTPUT" \
   --batch-size 1 \
-  --seq-len 128 \
+  --seq-len 512 \
   --fusion 2 3 \
   --prox-score 1.0
 
