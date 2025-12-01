@@ -1177,6 +1177,44 @@ def calculate_gpu_utilization(events: Dict[str, Any]) -> float:
 
     return gpu_utilization
 
+def calculate_framework_tax(
+    inference_time_us: float,
+    gpu_busy_time_us: float
+) -> Dict[str, float]:
+    """
+    Calculate framework tax - the CPU-side time not spent on GPU computation.
+    
+    Args:
+        inference_time_us: Total inference time in microseconds.
+        gpu_busy_time_us: GPU busy time in microseconds.
+    
+    Returns:
+        Dictionary containing:
+        - framework_tax_ms: Framework tax in milliseconds
+        - framework_tax_percent: Framework tax as percentage of inference time
+        - gpu_busy_time_percent: GPU busy time as percentage of inference time
+        - is_framework_bound: Flag indicating if the framework is bound by CPU-side latency
+    """
+    # Framework tax = everything except GPU compute
+    framework_tax_us = max(0.0, inference_time_us - gpu_busy_time_us)
+
+    is_framework_bound = framework_tax_us > gpu_busy_time_us
+    
+    # Calculate percentages
+    if inference_time_us > 0:
+        framework_tax_percent = (framework_tax_us / inference_time_us) * 100
+        gpu_busy_time_percent = (gpu_busy_time_us / inference_time_us) * 100
+    else:
+        framework_tax_percent = 0.0
+        gpu_busy_time_percent = 0.0
+    
+    return {
+        "framework_tax_ms": us_to_ms(framework_tax_us),
+        "framework_tax_percent": framework_tax_percent,
+        "gpu_busy_time_percent": gpu_busy_time_percent,
+        "is_framework_bound": is_framework_bound,
+    }
+
 def analyze_per_stream(events: Dict[str, Any]) -> Dict:
     """
     Analyzes GPU events grouped by stream.

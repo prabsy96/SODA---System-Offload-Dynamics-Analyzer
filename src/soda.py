@@ -82,6 +82,7 @@ class SodaAnalyzer:
         
         # General metrics
         trace_calculated_inference_time = utils.calculate_total_inference_time(self.trace)
+        inference_time = self.tracer.torch_measured_inference_time_us
         
         # GPU metrics
         total_gpu_time_span = utils.calculate_total_gpu_time_span(self.events)
@@ -102,18 +103,24 @@ class SodaAnalyzer:
             fusion_results = {}
             for f in self.args.fusion:
                 fusion_results[f] = utils.analyze_kernel_fusion_candidates(sequences, f, self.args.prox_score, logger=LOGGER)
+
+        # Framework overhead (CPU-side latency)
+        framework_overhead = utils.calculate_framework_tax(
+            inference_time,
+            true_gpu_busy_time
+        )
         
         # Build metrics dictionary 
         metrics = {
             # Inference time 
-            "inference_time_ms": utils.us_to_ms(self.tracer.torch_measured_inference_time_us),
+            "inference_time_ms": utils.us_to_ms(inference_time),
             # Inference time breakdown
             "inference_time_breakdown": {
                 "torch_measured_inference_time_ms": utils.us_to_ms(self.tracer.torch_measured_inference_time_us),
                 "trace_calculated_inference_time_ms": utils.us_to_ms(trace_calculated_inference_time),
                 "profiler_overhead_ms": utils.us_to_ms(trace_calculated_inference_time - self.tracer.torch_measured_inference_time_us),
             },
-            
+            "framework_overhead": framework_overhead,
             "active_streams": len(stream_info),
 
             # GPU metrics
