@@ -109,7 +109,7 @@ class SodaAnalyzer:
             inference_time,
             true_gpu_busy_time
         )
-        
+
         # Build metrics dictionary 
         metrics = {
             # Inference time 
@@ -164,16 +164,35 @@ class SodaAnalyzer:
         LOGGER.info("")
         LOGGER.info("=== Performance Metrics ===")
         LOGGER.info(f"\t* Inference runtime (ms): {metrics['inference_time_ms']:.4f}")
+        
+        # Framework Tax Analysis
+        framework = metrics.get("framework_overhead", {})
+        timing = metrics.get("inference_time_breakdown", {})
+        LOGGER.info("")
+        LOGGER.info("=== Framework Tax Analysis ===")
+        LOGGER.info(f"\t* Framework Tax (Exposed CPU Overhead): {framework.get('framework_tax_ms', 0):.4f} ms ({framework.get('framework_tax_percent', 0):.1f}%)")
+        LOGGER.info(f"\t* GPU Active Time (Compute): {metrics.get('gpu_busy_time_ms', 0):.4f} ms ({framework.get('gpu_busy_time_percent', 0):.1f}%)")
+        
+        # Timing breakdown
+        if timing.get("torch_measured_inference_time_ms") is not None:
+            LOGGER.info(f"\t  - Torch measured inference time (ms): {timing['torch_measured_inference_time_ms']:.4f}")
+            LOGGER.info(f"\t  - Trace calculated inference time (ms): {timing['trace_calculated_inference_time_ms']:.4f}")
+            LOGGER.info(f"\t  - Profiler overhead (ms): {timing['profiler_overhead_ms']:.4f}")
+        
+        LOGGER.info("")
+        LOGGER.info("=== GPU Metrics ===")
         LOGGER.info(f"\t* Total kernel execution time (ms): {metrics['total_kernel_exec_time_ms']:.4f}")
         LOGGER.info(f"\t* GPU busy time (concurrent-aware) (ms): {metrics['gpu_busy_time_ms']:.4f}")
         LOGGER.info(f"\t* GPU idle time (ms): {metrics['gpu_idle_time_ms']:.4f}")
         LOGGER.info(f"\t* GPU utilization: {metrics['gpu_utilization_percent']:.2f}%")
-        LOGGER.info(f"\t* Total kernel launch tax (TKLQT) (ms): {metrics['total_kernel_launch_tax_ms']:.4f}")
         LOGGER.info(f"\t* Number of kernels: {metrics['num_total_kernels']}")
         LOGGER.info(f"\t* Active streams: {metrics['active_streams']}")
         
+        LOGGER.info("")
+        LOGGER.info("=== Launch & Queue Latency (TKLQT) ===")
+        LOGGER.info(f"\t* Total TKLQT (ms): {metrics['total_kernel_launch_tax_ms']:.4f}")
         if metrics['num_total_kernels'] > 0:
-            LOGGER.info(f"\t* Avg. kernel launch tax per kernel (ms): {metrics['avg_kernel_launch_tax_ms']:.4f}")
+            LOGGER.info(f"\t* Avg. TKLQT per kernel (ms): {metrics['avg_kernel_launch_tax_ms']:.4f}")
             LOGGER.info(f"\t* Avg. execution time per kernel (ms): {metrics['avg_kernel_exec_time_ms']:.4f}")
         
         LOGGER.info("")
