@@ -1,20 +1,17 @@
 from typing import Dict, Any
-from common import utils
-import sys
-from pathlib import Path
-# Add src to path for common imports
-sys.path.insert(0, str(Path(__file__).parent))
-from common import print_utils
 
-from microbench.framework.pytorch.profile import profile_pytorch_gemm_sequences
-from microbench.framework.pytorch.plot import plot_pytorch_gemm_sequences
-from microbench.framework.pytorch.verify import compare_sequences
-from common.data import Sequence
+from soda.common import utils
+from soda.common import print_utils
+from soda.common.data import Sequence
 
-from microbench.baremetal.generate import generate_jobs
-from microbench.baremetal.search import search_cublas_algos_offline
-from microbench.baremetal.profile import profile_baremetal_gemm_kernels
-from microbench.baremetal.report import report
+from soda.microbench.framework.pytorch.profile import profile_pytorch_gemm_sequences
+from soda.microbench.framework.pytorch.plot import plot_pytorch_gemm_sequences
+from soda.microbench.framework.pytorch.verify import compare_sequences
+
+from soda.microbench.baremetal.generate import generate_jobs
+from soda.microbench.baremetal.search import search_cublas_algos_offline
+from soda.microbench.baremetal.profile import profile_baremetal_gemm_kernels
+from soda.microbench.baremetal.report import report
 
 class SodaMicrobench:
     

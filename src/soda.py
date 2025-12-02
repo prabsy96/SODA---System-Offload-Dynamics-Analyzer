@@ -17,6 +17,13 @@ from collections import defaultdict, deque
 from torch.profiler import ProfilerActivity, profile
 from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple
 
+# Treat this module as the root of the soda package so submodules like
+# soda.common.* resolve to the sibling directories under src/.
+_PACKAGE_ROOT = Path(__file__).resolve().parent
+__path__ = [str(_PACKAGE_ROOT)]
+if __spec__ is not None:
+    __spec__.submodule_search_locations = __path__
+
 # for fp8 e4m3 format support
 try:
     from transformers.utils.quantization_config import FP8Config
@@ -25,8 +32,8 @@ except ImportError:
     FP8Config = None
     FP8_CONFIG_AVAILABLE = False
 
-# Import utilities from the common package (new canonical location).
-from common import utils
+# Import utilities from the common subpackage.
+from soda.common import utils
 
 # Global logger reference
 LOGGER = logging.getLogger("soda")
@@ -723,7 +730,7 @@ def main() -> int:
 
         if args.microbench:
             # Microbench mode: extract -> replay -> verify -> plot
-            from soda_microbench import SodaMicrobench
+            from soda.microbench.microbench import SodaMicrobench
             microbench = SodaMicrobench(tracer=tracer, args=args)
             microbench.run()
             return 0

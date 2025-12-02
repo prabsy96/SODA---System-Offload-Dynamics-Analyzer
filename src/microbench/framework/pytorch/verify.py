@@ -1,14 +1,10 @@
 import json
 import os
 import re
-import sys
-from pathlib import Path
 from typing import Dict, Any
-from common import utils
-# Add src to path for common imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-from common import print_utils
-from common.data import Sequence
+from soda.common import utils
+from soda.common import print_utils
+from soda.common.data import Sequence
 
 def compare_sequences(target_sequences: list, actual_sequences: list, title: str = "Actual vs Target", full: bool = True):
     """Compare each sequence (assumes 1:1 mapping by index).

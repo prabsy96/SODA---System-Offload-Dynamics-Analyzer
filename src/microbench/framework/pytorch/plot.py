@@ -3,7 +3,7 @@ from typing import Dict, Any, List
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from common import utils
+from soda.common import utils
 
 def plot_pytorch_gemm_sequences(pytorch_gemm_sequences: Dict[str, Any]) -> None:
     """

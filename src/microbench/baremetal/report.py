@@ -11,12 +11,9 @@ baremetal/output/bm_vs_framework_report.json.
 import json
 import os
 import sys
-from pathlib import Path
 
-from common import utils, print_utils
-# Add src to path for direct imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-from common.data import CPUOp, Kernel
+from soda.common import utils, print_utils
+from soda.common.data import CPUOp, Kernel
 
 def load_pytorch_results(pytorch_file):
     """

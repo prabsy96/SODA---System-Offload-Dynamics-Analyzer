@@ -9,7 +9,7 @@ each GEMM in baremetal cuBLASLt.
 
 import sys
 from pathlib import Path
-from common import utils
+from soda.common import utils
 
 
 

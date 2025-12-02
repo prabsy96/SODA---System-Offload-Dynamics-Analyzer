@@ -5,15 +5,10 @@ Utilities for baremetal microbenchmarking: nsys profiling, trace extraction, and
 
 import subprocess
 import sqlite3
-import sys
-from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any
 
-# Add project root to path to allow imports from soda and data
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-
-from common import utils
-from common.data import Kernel
+from soda.common import utils
+from soda.common.data import Kernel
 
 def nsys_profile_to_sql(
     trace_file_name: str,

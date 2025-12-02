@@ -11,16 +11,14 @@ This is an offline process that can be run separately from profiling.
 
 import json
 import os
-import sys
 import subprocess
 import re
 import sqlite3
-from pathlib import Path
-from common import utils, print_utils
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-from common.data import Kernel
 from typing import Optional, Tuple, List
-from microbench.baremetal.utils import (
+
+from soda.common import utils, print_utils
+from soda.common.data import Kernel
+from soda.microbench.baremetal.utils import (
     nsys_profile_to_sql, 
     extract_kernels_from_trace, 
     extract_launches_from_trace,
