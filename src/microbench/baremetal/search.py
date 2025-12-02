@@ -16,10 +16,9 @@ import subprocess
 import re
 import sqlite3
 from pathlib import Path
-from soda import utils
+from common import utils, print_utils
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-from common import print_utils
-from data import Kernel
+from common.data import Kernel
 from typing import Optional, Tuple, List
 from microbench.baremetal.utils import (
     nsys_profile_to_sql, 

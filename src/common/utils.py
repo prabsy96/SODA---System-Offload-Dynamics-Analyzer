@@ -14,8 +14,8 @@ from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple
 from collections import defaultdict, deque
 import numpy as np
 import shutil
-from common import print_utils
-from data import Kernel, CPUOp, Sequence, clean_kernel_name
+from . import print_utils
+from .data import Kernel, CPUOp, Sequence, clean_kernel_name
 
 def calculate_avg_min_max(values, base_name=None):
     """

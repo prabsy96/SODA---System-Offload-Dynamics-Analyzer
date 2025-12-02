@@ -25,14 +25,14 @@ except ImportError:
     FP8Config = None
     FP8_CONFIG_AVAILABLE = False
 
-# Import and expose utils module for 'from soda import utils'
-import utils
+# Import utilities from the common package (new canonical location).
+from common import utils
 
 # Global logger reference
 LOGGER = logging.getLogger("soda")
 
-# Make utils accessible as soda.utils
-__all__ = ['ModelTracer', 'SodaAnalyzer', 'SodaLogger', 'utils', 'LOGGER']
+# Public API
+__all__ = ['ModelTracer', 'SodaAnalyzer', 'SodaLogger', 'LOGGER']
 
 class SodaAnalyzer:
     """

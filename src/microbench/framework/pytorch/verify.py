@@ -4,11 +4,11 @@ import re
 import sys
 from pathlib import Path
 from typing import Dict, Any
-from soda import utils
+from common import utils
 # Add src to path for common imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 from common import print_utils
-from data import Sequence
+from common.data import Sequence
 
 def compare_sequences(target_sequences: list, actual_sequences: list, title: str = "Actual vs Target", full: bool = True):
     """Compare each sequence (assumes 1:1 mapping by index).

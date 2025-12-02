@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 import torch
 from torch.profiler import profile, ProfilerActivity
-from soda import utils
+from common import utils
 
 # Helper functions
 def create_input_tensors(cpu_op: Dict[str, Any]) -> List[torch.Tensor]:

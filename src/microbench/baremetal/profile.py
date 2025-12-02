@@ -17,9 +17,8 @@ import re
 from typing import Dict, Any
 from microbench.baremetal.utils import build_binary, build_base_args, nsys_profile_to_sql, extract_kernels_from_trace, extract_launches_from_trace
 
-from soda import utils
-from common import print_utils
-from data import CPUOp
+from common import utils, print_utils
+from common.data import CPUOp
 
 
 def run_job(job):

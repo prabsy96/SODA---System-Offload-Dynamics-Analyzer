@@ -1,5 +1,5 @@
 from typing import Dict, Any
-from soda import utils
+from common import utils
 import sys
 from pathlib import Path
 # Add src to path for common imports
@@ -9,7 +9,7 @@ from common import print_utils
 from microbench.framework.pytorch.profile import profile_pytorch_gemm_sequences
 from microbench.framework.pytorch.plot import plot_pytorch_gemm_sequences
 from microbench.framework.pytorch.verify import compare_sequences
-from data import Sequence
+from common.data import Sequence
 
 from microbench.baremetal.generate import generate_jobs
 from microbench.baremetal.search import search_cublas_algos_offline

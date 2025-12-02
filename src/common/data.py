@@ -3,7 +3,7 @@ Data structures for SODA kernel configurations and sequences.
 """
 
 from typing import Optional, List, Tuple, Any, Dict
-from common import print_utils
+from . import print_utils
 
 
 # Utility functions (moved here to avoid circular import with utils.py)
@@ -551,4 +551,3 @@ class Sequence:
         cpu_op = CPUOp.from_dict(sequence_dict.get("cpu_op"))
         kernel = Kernel.from_dict(sequence_dict.get("kernel"))
         return cls(cpu_op=cpu_op, kernel=kernel)
-

@@ -13,11 +13,10 @@ import os
 import sys
 from pathlib import Path
 
-from soda import utils
-from common import print_utils
+from common import utils, print_utils
 # Add src to path for direct imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
-from data import CPUOp, Kernel
+from common.data import CPUOp, Kernel
 
 def load_pytorch_results(pytorch_file):
     """

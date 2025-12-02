@@ -12,8 +12,8 @@ from typing import Optional, Tuple, List, Dict, Any
 # Add project root to path to allow imports from soda and data
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from soda import utils
-from data import Kernel
+from common import utils
+from common.data import Kernel
 
 def nsys_profile_to_sql(
     trace_file_name: str,
