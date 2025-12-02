@@ -547,6 +547,13 @@ def get_args_parser() -> argparse.ArgumentParser:
         help="Sequence length for synthetic input."
     )
     parser.add_argument(
+        "--max-new-tokens",
+        dest="max_new_tokens",
+        type=int,
+        default=1,
+        help="Number of new tokens to generate during decoder profiling.",
+    )
+    parser.add_argument(
         "-bs", "--batch-size", dest="batch_size", type=int, default=1, 
         help="Batch size for synthetic input."
     )
@@ -603,6 +610,10 @@ def parse_and_validate_args(args=None) -> argparse.Namespace:
 
     if not torch.cuda.is_available() and parsed_args.device == "cuda":
         print("Error: CUDA is not available. Please select --device cpu.", file=sys.stderr)
+        sys.exit(1)
+
+    if parsed_args.max_new_tokens < 1:
+        print("Error: --max-new-tokens must be >= 1.", file=sys.stderr)
         sys.exit(1)
 
     if parsed_args.precision == "float8_e4m3fn":
@@ -1017,20 +1028,32 @@ def get_top_k_kernels(events: Dict[str, Any], k: int = 3) -> Dict[str, List[Tupl
         "by_duration": top_k_by_dur
     }
 
-def generate_experiment_name(model: str, compile_type: str, batch_size: int, seq_len: int) -> str:
+def generate_experiment_name(
+    model: str,
+    compile_type: str,
+    precision: str,
+    batch_size: int,
+    seq_len: int,
+    max_new_tokens: int,
+) -> str:
     """
     Generates a unique experiment directory name from arguments.
     
     Args:
         model: Model name (e.g., "gpt2" or "meta-llama/Llama-3.2-3B").
         compile_type: Compilation type (e.g., "eager", "torch.compile").
+        precision: Precision string (e.g., "bfloat16", "float16").
         batch_size: Batch size.
         seq_len: Sequence length.
+        max_new_tokens: Number of new tokens generated during tracing.
         
     Returns:
         Experiment directory name string.
     """
-    return f"{model.replace('/', '_')}_{compile_type}_bs{batch_size}_sl{seq_len}"
+    return (
+        f"{model.replace('/', '_')}_{compile_type}_{precision}"
+        f"_bs{batch_size}_sl{seq_len}_mt{max_new_tokens}"
+    )
 
 
 def calculate_total_inference_time(trace: Dict[str, Any]) -> float:

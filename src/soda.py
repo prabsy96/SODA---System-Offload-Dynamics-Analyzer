@@ -255,6 +255,7 @@ class SodaAnalyzer:
         config = {
             "batch_size": self.args.batch_size,
             "seq_len": self.args.seq_len,
+            "max_new_tokens": getattr(self.args, "max_new_tokens", None),
             "precision": self.args.precision,
             "compile_type": self.args.compile_type,
             "device": self.args.device,
@@ -404,6 +405,7 @@ class ModelTracer:
         # Store run parameters
         self.batch_size = args.batch_size
         self.seq_len = args.seq_len
+        self.max_new_tokens = args.max_new_tokens
         
         # Determine if model is decoder or encoder
         encoder_models = ["bert", "roberta"]
@@ -414,7 +416,12 @@ class ModelTracer:
 
         # Derive experiment/output paths
         self.experiment_name = utils.generate_experiment_name(
-            self.model_name, self.compile_type, self.batch_size, self.seq_len
+            self.model_name,
+            self.compile_type,
+            args.precision,
+            self.batch_size,
+            self.seq_len,
+            self.max_new_tokens,
         )
 
         # Output directory for trace: <output_dir>/<experiment_name>
@@ -613,8 +620,13 @@ class ModelTracer:
         
         # Warm-up runs
         with torch.no_grad():
-            for _ in range(5):
-                self.model.generate(**self.model_inputs, max_new_tokens=1, do_sample=False, pad_token_id=self.tokenizer.pad_token_id)
+            for _ in range(max(0, self.args.warmup)):
+                self.model.generate(
+                    **self.model_inputs,
+                    max_new_tokens=self.max_new_tokens,
+                    do_sample=False,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
 
         # Synchronize before timing
         if torch.cuda.is_available():
@@ -633,7 +645,12 @@ class ModelTracer:
                 end_time = torch.cuda.Event(enable_timing=True)
                 
                 start_time.record()
-                self.model.generate(**self.model_inputs, max_new_tokens=1, do_sample=False, pad_token_id=self.tokenizer.pad_token_id)
+                self.model.generate(
+                    **self.model_inputs,
+                    max_new_tokens=self.max_new_tokens,
+                    do_sample=False,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
                 end_time.record()
                 
                 torch.cuda.synchronize()
@@ -652,7 +669,7 @@ class ModelTracer:
         
         # Warm-up runs
         with torch.no_grad():
-            for _ in range(5):
+            for _ in range(max(0, self.args.warmup)):
                 self.model(**self.model_inputs)
         
         # Synchronize before timing
