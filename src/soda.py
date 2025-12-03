@@ -8,12 +8,13 @@ import json
 import logging
 import os
 import sys
-import torch
-import traceback
+from datetime import datetime
+
 import numpy as np
+import torch
 import transformers
-from pathlib import Path
 from collections import defaultdict, deque
+from pathlib import Path
 from torch.profiler import ProfilerActivity, profile
 from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple
 
@@ -32,8 +33,9 @@ except ImportError:
     FP8Config = None
     FP8_CONFIG_AVAILABLE = False
 
-# Import utilities from the common subpackage.
+# Import utilities and microbenchmark pipeline components.
 from soda.common import utils
+from soda.microbench.microbench import SodaMicrobench
 
 # Global logger reference
 LOGGER = logging.getLogger("soda")
@@ -250,8 +252,6 @@ class SodaAnalyzer:
         """
         if self.results is None:
             raise ValueError("No analysis results available. Call analyze() first.")
-        
-        from datetime import datetime
         
         metrics = self.results["metrics"]
         stream_info = self.results["stream_info"]
@@ -730,7 +730,6 @@ def main() -> int:
 
         if args.microbench:
             # Microbench mode: extract -> replay -> verify -> plot
-            from soda.microbench.microbench import SodaMicrobench
             microbench = SodaMicrobench(tracer=tracer, args=args)
             microbench.run()
             return 0
