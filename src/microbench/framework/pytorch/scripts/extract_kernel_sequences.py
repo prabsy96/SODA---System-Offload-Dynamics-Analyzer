@@ -11,8 +11,11 @@ from torch.profiler import profile, ProfilerActivity
 from soda import ModelHandler, SodaProfiler
 
 # GEMM operations to extract
-GEMM_OPS = ['aten::addmm', 'aten::mm', 'aten::bmm']
-
+GEMM_OPS = [
+    'aten::addmm', 'aten::mm', 'aten::bmm', 
+    'aten::linear', 'aten::matmul', 'aten::baddbmm',
+    'aten::addmm_', 'aten::baddbmm_'
+]
 
 def collect_env_metadata():
     """
@@ -258,12 +261,24 @@ def aggregate_execution_metrics(instances):
 def filter_gemm_sequences(event_sequences):
     """Filter for GEMM kernels only."""
     gemm_sequences = []
+    seen_ops = set()
+    
     for e in event_sequences:
+        cpu_op = e.get('cpu_op')
+        if cpu_op:
+            seen_ops.add(cpu_op['name'])
+        
         # Must be from a GEMM operation
-        if e.get('cpu_op') and e['cpu_op']['name'] in GEMM_OPS:
+        if cpu_op and cpu_op['name'] in GEMM_OPS:
             # Kernel name must contain 'gemm' (eg: volta_sgemm_64x32_sliced1x4_nn)
-            if 'gemm' in e.get('kernel', {}).get('name', '').lower():
+            kernel_name = e.get('kernel', {}).get('name', '').lower()
+            if 'gemm' in kernel_name:
                 gemm_sequences.append(copy.deepcopy(e))
+    
+    if not gemm_sequences:
+        print(f"WARNING: No GEMM sequences found! Seen CPU ops: {list(seen_ops)}")
+        print("Check if GEMM_OPS list needs to be expanded or if kernel names don't contain 'gemm'.")
+        
     return gemm_sequences
 
 def save_output(file_path, data, env_metadata, summary=None):
@@ -343,7 +358,7 @@ def run_extraction_pipeline(trace_file):
     trace = SodaProfiler.load_json(trace_file)
     events = SodaProfiler.collect_events_from_trace(trace)
     event_sequences = SodaProfiler.get_linked_event_sequences(events)
-    event_sequences = SodaProfiler.calculate_per_seq_launch_tax(event_sequences)
+    event_sequences = SodaProfiler.calculate_per_seq_tklqt(event_sequences)
     save_output(SodaProfiler.get_path("PYTORCH_ALL_KERNELS"), event_sequences, env_metadata)
     
     # Step 2: Filter GEMM event sequences

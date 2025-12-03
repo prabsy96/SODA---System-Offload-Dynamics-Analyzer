@@ -173,7 +173,7 @@ def replay_kernel_from_cpu_op(cpu_op, exp_kernel_name, metadata, kernel_idx, run
     trace = SodaProfiler.load_json(trace_file)
     events = SodaProfiler.collect_events_from_trace(trace)
     event_sequences = SodaProfiler.get_linked_event_sequences(events)
-    event_sequences = SodaProfiler.calculate_per_seq_launch_tax(event_sequences)
+    event_sequences = SodaProfiler.calculate_per_seq_tklqt(event_sequences)
     
     # Aggregate statistics across N runs
     agg_sequences = aggregate_replayed_sequences(event_sequences, runs)

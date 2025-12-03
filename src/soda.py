@@ -1529,13 +1529,28 @@ class ModelHandler:
         Returns:
             Dictionary with 'input_ids' and 'attention_mask' tensors.
         """
+        if isinstance(batch_size, list):
+            batch_size = batch_size[0]
+        if isinstance(seq_len, list):
+            seq_len = seq_len[0]
+
+        # Create tensors on CPU first to avoid device binding ambiguity in PyTorch 2.9
+        # Pass size as a tuple of integers positionally
+        input_ids = torch.randint(
+            1,
+            self.tokenizer.vocab_size,
+            (batch_size, seq_len),
+            dtype=torch.long
+        ).to(self.device)
+        
+        attention_mask = torch.ones(
+            (batch_size, seq_len),
+            dtype=torch.long
+        ).to(self.device)
+        
         return {
-            "input_ids": torch.randint(
-                1, self.tokenizer.vocab_size, size=(batch_size, seq_len), device=self.device
-            ),
-            "attention_mask": torch.ones(
-                batch_size, seq_len, device=self.device
-            ),
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
         }
 
 
