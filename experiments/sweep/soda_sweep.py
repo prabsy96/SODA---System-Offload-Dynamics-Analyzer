@@ -16,6 +16,7 @@ import torch
 
 from soda import ModelTracer, SodaAnalyzer, SodaLogger
 from soda.common import utils
+from experiments.sweep.summarize_soda_sweep import summarize as summarize_soda_sweep
 
 # Each config declares the model to test and the BS/SL sweeps to run.
 CONFIGS = {
@@ -23,14 +24,18 @@ CONFIGS = {
         "model_name": "gpt2",
         # "batch_sizes": sorted([1, 2, 4, 8], reverse=True),
         # "seq_lens": sorted([128, 256, 512, 1024], reverse=True),
+        # FIXME: DEBUG ONLY
         "batch_sizes": sorted([1, 2], reverse=True),
         "seq_lens": sorted([128, 256], reverse=True),
         "max_new_toks": [1],
     },
     "llama_3.2_1b_short_ctx": {
         "model_name": "meta-llama/Llama-3.2-1B",
-        "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
-        "seq_lens": sorted([128, 256, 512, 1024, 2048], reverse=True),
+        # FIXME: DEBUG ONLY
+        # "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
+        # "seq_lens": sorted([128, 256, 512, 1024, 2048], reverse=True),
+        "batch_sizes": sorted([1, 2, 4, 8], reverse=True),
+        "seq_lens": sorted([512, 1024, 2048], reverse=True),
         "max_new_toks": [1],
     },
     # "tinyllama_1.1b": {
@@ -55,6 +60,7 @@ def main() -> None:
 
     compile_type = "eager"
     precision = "bfloat16"
+    sweep_roots = set()
 
     for config_name, cfg in CONFIGS.items():
         model = cfg["model_name"]
@@ -64,6 +70,7 @@ def main() -> None:
 
         # Group sweep outputs under a common prefix (model + compile_type + precision)
         sweep_root = Path(os.environ.get("SODA_OUTPUT", "output")) / f"{model.replace('/', '_')}_{compile_type}_{precision}"
+        sweep_roots.add(sweep_root)
         print(f"\n=== Running config: {config_name} ({model}) ===")
 
         for bs, sl, max_new_tokens in product(batch_sizes, seq_lens, max_new_toks):
@@ -104,6 +111,17 @@ def main() -> None:
                         torch.cuda.empty_cache()
                     continue
                 raise
+
+    if sweep_roots:
+        print("\n=== Summarizing completed sweep directories ===")
+        for root in sorted(sweep_roots, key=lambda p: str(p)):
+            if not root.exists():
+                print(f"Skipping summary for {root}: path does not exist", file=sys.stderr)
+                continue
+            try:
+                summarize_soda_sweep(root)
+            except RuntimeError as exc:
+                print(f"Failed to summarize {root}: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":

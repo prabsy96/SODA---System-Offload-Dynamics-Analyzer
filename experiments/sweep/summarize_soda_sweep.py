@@ -3,8 +3,8 @@
 Summarize a sweep directory by producing table pivots and heatmaps.
 
 Usage:
-    python -m experiments.sweep.summarize_sweep output/<sweep_dir>
-    python experiments/sweep/summarize_sweep.py output/<sweep_dir>
+    python -m experiments.sweep.summarize_soda_sweep output/<sweep_dir>
+    python experiments/sweep/summarize_soda_sweep.py output/<sweep_dir>
 
 Creates <sweep_dir>/summary containing one CSV pivot and one heatmap per
 model/compile/precision group detected under the provided root.
@@ -20,6 +20,10 @@ from typing import Dict, List, Optional, Tuple, Set
 
 import matplotlib.pyplot as plt
 import numpy as np
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+
+METRIC_LABEL = "inference time (ms)"
 
 
 def parse_args() -> argparse.Namespace:
@@ -201,6 +205,13 @@ def slugify(text: str) -> str:
     )
 
 
+def short_model_name(name: Optional[str]) -> str:
+    if not name:
+        return "unknown_model"
+    tokens = [part for part in name.split("/") if part]
+    return tokens[-1] if tokens else name
+
+
 def write_pivot(section: Dict, out_csv: Path) -> None:
     with out_csv.open("w", newline="") as f:
         writer = csv.writer(f)
@@ -222,40 +233,114 @@ def write_pivot(section: Dict, out_csv: Path) -> None:
             writer.writerow(row)
 
 
-def plot_heatmap(section: Dict, out_path: Path) -> None:
+def transpose_grid(grid: List[List]) -> List[List]:
+    if not grid:
+        return []
+    return [list(row) for row in zip(*grid)]
+
+
+def prepare_grids(section: Dict) -> Tuple[bool, List, List, List[List], List[List]]:
     bs = section["batch_sizes"]
     sl = section["seq_lens"]
+    rotate_axes = len(bs) != len(sl)
+    if rotate_axes:
+        x_labels = sl
+        y_labels = bs
+        value_grid = transpose_grid(section["values"])
+        status_grid = transpose_grid(section["statuses"])
+    else:
+        x_labels = bs
+        y_labels = sl
+        value_grid = section["values"]
+        status_grid = section["statuses"]
+    return rotate_axes, x_labels, y_labels, value_grid, status_grid
+
+
+def compute_figsize(x_labels: List, y_labels: List, rotate_axes: bool) -> Tuple[float, float]:
+    x_tile = 0.6
+    y_tile = 0.6
+    min_height = 1.8 if rotate_axes else 4
+    min_width = 4
+    max_tiles = max(len(x_labels), len(y_labels), 1)
+    base_dim = max(min_width, min_height, max_tiles * max(x_tile, y_tile))
+    fig_width = max(min_width, base_dim * (len(x_labels) / max_tiles if max_tiles else 1), len(x_labels) * x_tile + 1.2)
+    fig_height = max(min_height, base_dim * (len(y_labels) / max_tiles if max_tiles else 1), len(y_labels) * y_tile + 1.0)
+    return fig_width, fig_height
+
+
+def format_model_label(name: Optional[str]) -> str:
+    clean = short_model_name(name)
+    return clean.replace("-", " ")
+
+
+def apply_colorbar(fig, ax, im, data: np.ndarray) -> None:
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="5%", pad=0.15)
+    cbar = fig.colorbar(im, cax=cax)
+    finite_values = data[np.isfinite(data)]
+    if finite_values.size:
+        vmin = float(finite_values.min())
+        vmax = float(finite_values.max())
+        im.set_clim(vmin=vmin, vmax=vmax)
+        if vmin == vmax:
+            cbar.set_ticks([vmin])
+        else:
+            cbar.set_ticks([vmin, vmax])
+
+
+def annotate_cells(ax, x_labels: List, y_labels: List, value_grid: List[List], status_grid: List[List]) -> None:
+    for i, _ in enumerate(y_labels):
+        for j, _ in enumerate(x_labels):
+            status = status_grid[i][j]
+            value = value_grid[i][j]
+            is_number = value is not None and not (isinstance(value, float) and np.isnan(value))
+            if status == "oom":
+                ax.text(j, i, "OOM", ha="center", va="center", color="red", fontsize=8, fontweight="bold")
+            elif is_number:
+                ax.text(j, i, f"{float(value):.0f}", ha="center", va="center", color="white", fontsize=8)
+            else:
+                ax.text(j, i, "DNH", ha="center", va="center", color="#9e9e9e", fontsize=8, fontweight="bold")
+
+
+def plot_heatmap(section: Dict, out_paths: List[Path]) -> None:
+    rotate_axes, x_labels, y_labels, value_grid, status_grid = prepare_grids(section)
     data = np.array(
         [
             [np.nan if v is None else v for v in row]
-            for row in section["values"]
+            for row in value_grid
         ],
         dtype=float,
     )
 
-    fig, ax = plt.subplots(figsize=(max(4, len(bs) * 0.6), max(4, len(sl) * 0.6)))
-    im = ax.imshow(data, aspect="auto", cmap="viridis")
-    ax.set_xticks(range(len(bs)))
-    ax.set_xticklabels(bs)
-    ax.set_yticks(range(len(sl)))
-    ax.set_yticklabels(sl)
-    ax.set_xlabel("batch_size")
-    ax.set_ylabel("seq_len")
-    ax.set_title(f"{section['model_name']} | {section['compile_type']} | {section['precision']}")
+    fig_width, fig_height = compute_figsize(x_labels, y_labels, rotate_axes)
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    im = ax.imshow(data, aspect="equal", cmap="viridis")
+    ax.set_xticks(range(len(x_labels)))
+    ax.set_xticklabels(x_labels)
+    ax.set_yticks(range(len(y_labels)))
+    ax.set_yticklabels(y_labels)
+    if x_labels and y_labels:
+        ax.set_box_aspect(len(y_labels) / len(x_labels))
+    if rotate_axes:
+        ax.set_xlabel("sequence length")
+        ax.set_ylabel("batch size")
+    else:
+        ax.set_xlabel("batch size")
+        ax.set_ylabel("sequence length")
+    metric_title = METRIC_LABEL[:1].upper() + METRIC_LABEL[1:]
+    model_label = format_model_label(section.get("model_name"))
+    precision_label = section.get("precision") or "unknown_precision"
+    ax.set_title(f"{metric_title}\n{model_label}, {precision_label}")
 
-    cbar = fig.colorbar(im, ax=ax, label="inference_time_ms")
-
-    for i, seq in enumerate(sl):
-        for j, batch in enumerate(bs):
-            status = section["statuses"][i][j]
-            value = section["values"][i][j]
-            if status == "oom":
-                ax.text(j, i, "OOM", ha="center", va="center", color="red", fontsize=8, fontweight="bold")
-            elif value is not None and not np.isnan(value):
-                ax.text(j, i, f"{value:.0f}", ha="center", va="center", color="white", fontsize=8)
+    apply_colorbar(fig, ax, im, data)
+    annotate_cells(ax, x_labels, y_labels, value_grid, status_grid)
 
     fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
+
+    for out_path in out_paths:
+        suffix = out_path.suffix.lower()
+        save_kwargs = {"dpi": 150} if suffix in {".png", ".jpg", ".jpeg"} else {}
+        fig.savefig(out_path, **save_kwargs)
     plt.close(fig)
 
 
@@ -272,11 +357,13 @@ def summarize(root: Path) -> None:
         slug = slugify(f"{section['model_name']}_{section['compile_type']}_{section['precision']}")
         csv_path = summary_dir / f"{slug}_pivot.csv"
         png_path = summary_dir / f"{slug}_heatmap.png"
+        pdf_path = summary_dir / f"{slug}_heatmap.pdf"
         write_pivot(section, csv_path)
-        plot_heatmap(section, png_path)
+        plot_heatmap(section, [png_path, pdf_path])
         print("Wrote")
         print(f"* Summary to {csv_path}")
         print(f"* Heatmap to {png_path}")
+        print(f"* Heatmap to {pdf_path}")
 
 
 def main() -> int:
