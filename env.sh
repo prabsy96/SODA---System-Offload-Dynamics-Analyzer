@@ -10,7 +10,7 @@ export SODA_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Flag to indicate env.sh has been sourced
 export SODA_ENV_LOADED=1
-export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+export PYTORCH_ALLOC_CONF="expandable_segments:True"
 
 # Core directory structure
 export SODA_SRC="$SODA_ROOT/src"
@@ -73,7 +73,7 @@ export HF_HOME="/scratch/$USER/hf_cache"
 export PYTHONPATH="$SODA_SRC:$PYTHONPATH"
 
 # Helper function to activate Python environment (supports conda or venv)
-activate_python_env() {
+activate_env() {
     if [ -n "$CONDA_DEFAULT_ENV" ] && [ "$CONDA_DEFAULT_ENV" != "base" ]; then
         echo "Using conda environment: $CONDA_DEFAULT_ENV"
     elif [ -d "$PYTHON_VENV" ]; then
@@ -84,35 +84,6 @@ activate_python_env() {
     else
         echo "Warning: No virtual environment found. Using system Python."
     fi
-}
-
-# Backward-compatible alias
-alias activate_venv='activate_python_env'
-
-# Helper function to print all paths (for debugging)
-print_soda_env() {
-    echo "=== SODA Environment Variables ==="
-    echo "SODA_ROOT: $SODA_ROOT"
-    echo "SODA_SRC: $SODA_SRC"
-    echo "SODA_EXAMPLES: $SODA_EXAMPLES"
-    echo "SODA_OUTPUT: $SODA_OUTPUT"
-    echo "PYTHON_VENV: $PYTHON_VENV"
-    echo ""
-    echo "=== Microbenchmark Directories ==="
-    echo "MICROBENCH_DIR: $MICROBENCH_DIR"
-    echo "BAREMETAL_MICROBENCH_DIR: $BAREMETAL_MICROBENCH_DIR"
-    echo "PYTORCH_MICROBENCH_DIR: $PYTORCH_MICROBENCH_DIR"
-    echo ""
-    echo "=== Output Directories ==="
-    echo "BAREMETAL_OUTPUT_DIR: $BAREMETAL_OUTPUT_DIR"
-    echo "PYTORCH_OUTPUT_DIR: $PYTORCH_OUTPUT_DIR"
-    echo ""
-    echo "=== Key Files ==="
-    echo "UNIQUE_GEMM_SEQUENCES: $UNIQUE_GEMM_SEQUENCES"
-    echo "BAREMETAL_JOBS: $BAREMETAL_JOBS"
-    echo "BAREMETAL_GEMM_KERNELS: $BAREMETAL_GEMM_KERNELS"
-    echo "FINAL_REPORT: $FINAL_REPORT"
-    echo "=================================="
 }
 
 # Helper function to cleanup output directory
@@ -184,7 +155,7 @@ if [ -z "${SODA_ENV_QUIET:-}" ]; then
     echo ""
     echo "Get started:"
     echo "  * print_soda_env    - Show all environment variables and paths"
-    echo "  * activate_venv     - Activate Python virtual environment"
+    echo "  * activate_env     - Activate Python virtual environment"
     echo "  * cleanup           - Delete output directory ($SODA_OUTPUT)"
     echo "  * reinstall    - Reinstall the soda package (use after making changes)"
     echo ""

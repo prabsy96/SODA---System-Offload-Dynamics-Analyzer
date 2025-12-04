@@ -9,7 +9,7 @@ import logging
 import os
 import sys
 from datetime import datetime
-
+import traceback
 import numpy as np
 import torch
 import transformers
@@ -477,7 +477,7 @@ class ModelTracer:
     def get_kwargs(self) -> Dict[str, Any]:
         """Returns common kwargs for model loading."""
         kwargs = {
-            "torch_dtype": self.load_precision,
+            "dtype": self.load_precision,
             "device_map": self.device if self.device.type == 'cuda' else 'cpu',
             "trust_remote_code": True,
         }
