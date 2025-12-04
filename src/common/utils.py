@@ -894,15 +894,33 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
     Returns:
         List of event sequence dictionaries with keys: kernel, cuda_launch, cpu_op.
     """
+
+    import logging
+    logger = logging.getLogger("soda")
+
+    
     gpu_events = events["gpu"]
     cpu_ops = events["cpu"]["ops"]
     cuda_launches = events["cpu"]["launches"]
     kernel_events = gpu_events["kernels"]
 
     sequences = []
+    skipped_kernels = []
+
     for kernel in kernel_events:
         external_id = kernel["external_id"]
         correlation = kernel["correlation"]
+
+        # Skip kernels without matching CPU op
+        if external_id not in cpu_ops:
+            skipped_kernels.append((kernel["name"], f"missing cpu_op (external_id={external_id})"))
+            continue
+        
+        # Skip kernels without matching CUDA launch event
+        if correlation not in cuda_launches:
+            skipped_kernels.append((kernel["name"], f"missing cuda_launch (correlation={correlation})"))
+            continue
+        
         cpu_op = cpu_ops[external_id] 
         cuda_launch = cuda_launches[correlation] 
         
@@ -911,7 +929,11 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
             "cuda_launch": cuda_launch,
             "cpu_op": cpu_op,
         })
-    
+    if skipped_kernels:
+        logger.debug(
+            f"Skipped {len(skipped_kernels)} kernels with unmatched events: "
+            f"{skipped_kernels[:5]}{'...' if len(skipped_kernels) > 5 else ''}"
+        )
     validate_sequences(sequences)
     return sequences
 
