@@ -1,6 +1,6 @@
 #!/bin/bash
 # Microbenchmark example script
-# Runs the complete microbenchmark suite: framework + baremetal
+# Runs microbenchmark for a single point (bs=1, sl=128, max_new_tokens=1)
 
 set -e
 
@@ -32,44 +32,28 @@ else
     exit 1
 fi
 
-echo "=============================================="
-echo "Kernel Launch Tax Microbenchmark Suite"
-echo "=============================================="
 echo "Using Python: $(which python)"
 echo "Python version: $(python --version)"
 echo ""
 
-# HuggingFace cache is already set in env.sh
-mkdir -p "$HF_HOME"
-
 # Configuration 
 # MODEL="gpt2"
 # MODEL="meta-llama/Meta-Llama-3-8B"
-# MODEL="mistralai/Mixtral-8x7B-Instruct-v0.1"
 MODEL="meta-llama/Llama-3.2-3B"
 BATCH_SIZE="1"
-SEQ_LEN="16"
-# PRECISION="float32"
+SEQ_LEN="128"
 PRECISION="bfloat16"
-# PRECISION="float16"
 COMPILE_TYPE="eager"
-WARMUP="1000"
-RUNS="5000"
-# WARMUP="1"
-# RUNS="1"
+WARMUP="1"
+RUNS="1"
+MAX_NEW_TOKENS="1"
 
-echo "=== Microbenchmarking GEMM Kernels via SodaMicrobench ==="
 python -m soda \
   --model "$MODEL" \
   --batch-size "$BATCH_SIZE" \
   --seq-len "$SEQ_LEN" \
+  --max-new-tokens "$MAX_NEW_TOKENS" \
   --precision "$PRECISION" \
   --compile-type "$COMPILE_TYPE" \
-  --microbench \
   --warmup "$WARMUP" \
-  --runs "$RUNS"
-
-echo ""
-echo "=============================================="
-echo "Done! Check results in the experiment output directory."
-echo "=============================================="
+  --runs "$RUNS" --microbench

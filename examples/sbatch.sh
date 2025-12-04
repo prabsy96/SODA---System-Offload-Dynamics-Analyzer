@@ -73,6 +73,7 @@
 #   --output-dir "$SODA_OUTPUT" \
 #   --batch-size 1 \
 #   --seq-len 128 \
+#   --max-new-tokens 1 \
 #   --fusion 2 3 \
 #   --prox-score 1.0
 # echo "Job finished."
@@ -187,6 +188,6 @@ cd "$SODA_ROOT"
 # Run your script
 echo "Running SODA analysis..."
 # @prabhu did this 
-# soda-cli --model gpt2 -bs 1 2 4 8 16 -sl 1024
+# soda-cli --model gpt2 -bs 1 2 4 8 16 -sl 1024 --max-new-tokens 1
 # @shreesh did this 
 python examples/soda_sweep.py

@@ -40,6 +40,7 @@ soda-cli --model "meta-llama/Llama-3.2-3B" \
   --output-dir "$SODA_OUTPUT" \
   --batch-size 1 \
   --seq-len 512 \
+  --max-new-tokens 1 \
   --fusion 2 3 \
   --prox-score 1.0
 
@@ -49,6 +50,7 @@ soda-cli --model "meta-llama/Llama-3.2-3B" \
 #   --output-dir "$SODA_OUTPUT" \
 #   --batch-size 1 \
 #   --seq-len 128 \
+#   --max-new-tokens 1 \
 #   --fusion 2 3 \
 #   --prox-score 1.0
 
@@ -58,5 +60,6 @@ soda-cli --model "meta-llama/Llama-3.2-3B" \
 #   --output-dir "$SODA_OUTPUT" \
 #   --batch-size 1 \
 #   --seq-len 128 \
+#   --max-new-tokens 1 \
 #   --fusion 2 3 \
 #   --prox-score 1.0
