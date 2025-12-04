@@ -596,9 +596,6 @@ class ModelTracer:
         """
         Profiles the forward pass of the model (encoder or decoder).
         """
-        # FIXME: Check with prabhu
-        # self.trace_forward_pass_for_encoder()
-
         if self.is_decoder:
             self.trace_forward_pass_for_decoder()
         else:

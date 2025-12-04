@@ -202,7 +202,7 @@ def profile_baremetal_gemm_kernels() -> Dict[str, Any]:
 
         # Skip batched GEMMs for now due to non-contiguous layout issue
         if "batch" in job and job["batch"] > 1:
-            print(f"Skipping job {job['id']} (FIXME batched GEMM)")
+            print(f"Skipping job {job['id']} (TODO: batched GEMM)")
             sequences.append(None)  # Append None to maintain alignment
             continue
         

@@ -78,7 +78,7 @@ def parse_dtype_to_cublaslt(dtype_str: str) -> str:
         "float8_e4m3fn": "f8",
     }
 
-    # FIXME: Hack for c10::BFloat16 type strings
+    # NOTE: Hack for c10::BFloat16 type strings
     dtype_str = dtype_str.replace("c10::", "").lower()
 
     if dtype_str not in dtype_map:
@@ -115,7 +115,7 @@ def parse_dtype_to_torch(dtype_str: str):
     elif dtype_str.replace("c10::", "").lower() == "float8_e4m3fn":
         raise ValueError("Unsupported data type: 'float8_e4m3fn'. Please upgrade to PyTorch 2.1+ for FP8 support.")
     
-    # FIXME: Hack for c10::BFloat16 type strings
+    # NOTE: Hack for c10::BFloat16 type strings
     dtype_str = dtype_str.replace("c10::", "").lower()
     
     if dtype_str not in dtype_map:
@@ -638,9 +638,18 @@ def setup_deterministic_mode():
     torch.backends.cudnn.benchmark = False  # Disable autotuner
     torch.backends.cudnn.deterministic = True  # Force deterministic algos
     
-    # Disable TF32 for bitwise reproducibility
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
+    # Toggle TF32 via whichever API the current torch build exposes.
+    cuda_matmul_backend = torch.backends.cuda.matmul
+    if hasattr(cuda_matmul_backend, "fp32_precision"):
+        cuda_matmul_backend.fp32_precision = "ieee"
+    elif hasattr(cuda_matmul_backend, "allow_tf32"):
+        cuda_matmul_backend.allow_tf32 = False
+
+    cudnn_backend = torch.backends.cudnn
+    if hasattr(cudnn_backend, "conv") and hasattr(cudnn_backend.conv, "fp32_precision"):
+        cudnn_backend.conv.fp32_precision = "ieee"
+    elif hasattr(cudnn_backend, "allow_tf32"):
+        cudnn_backend.allow_tf32 = False
     
     # Set matmul precision
     try:
@@ -655,11 +664,7 @@ def setup_deterministic_mode():
         # Some ops don't have deterministic variants, continue anyway
         pass
     
-    # Disable FP16 reduced precision reduction
-    try:
-        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-    except AttributeError:
-        pass
+    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
     
     # Set environment variables for deterministic behavior
     os.environ["PYTORCH_JIT"] = "0"  # Disable JIT fusion randomness
@@ -716,9 +721,15 @@ def collect_env_metadata():
     metadata["cudnn"] = {
         "benchmark": torch.backends.cudnn.benchmark,
         "deterministic": torch.backends.cudnn.deterministic,
-        "allow_tf32": torch.backends.cudnn.allow_tf32,
         "algo_finder": os.environ.get("CUDNN_FIND_MODE", "DEFAULT"),
     }
+    cudnn_backend = torch.backends.cudnn
+    if hasattr(cudnn_backend, "conv") and hasattr(cudnn_backend.conv, "fp32_precision"):
+        metadata["cudnn"]["conv_fp32_precision"] = cudnn_backend.conv.fp32_precision
+    elif hasattr(cudnn_backend, "allow_tf32"):
+        metadata["cudnn"]["allow_tf32"] = cudnn_backend.allow_tf32
+    else:
+        metadata["cudnn"]["conv_fp32_precision"] = None
     
     # Matmul precision (affects kernel selection)
     try:
@@ -727,10 +738,13 @@ def collect_env_metadata():
         metadata["matmul_precision"] = None
     
     # Matmul TF32 setting (critical for GEMM kernel selection on Ampere+)
-    try:
-        metadata["matmul_allow_tf32"] = torch.backends.cuda.matmul.allow_tf32
-    except AttributeError:
-        metadata["matmul_allow_tf32"] = None
+    cuda_matmul_backend = torch.backends.cuda.matmul
+    if hasattr(cuda_matmul_backend, "fp32_precision"):
+        metadata["matmul_fp32_precision"] = cuda_matmul_backend.fp32_precision
+    elif hasattr(cuda_matmul_backend, "allow_tf32"):
+        metadata["matmul_allow_tf32"] = cuda_matmul_backend.allow_tf32
+    else:
+        metadata["matmul_fp32_precision"] = None
     
     # cuBLAS/cuBLASLt configuration (affects kernel selection)
     metadata["blas"] = {
@@ -1426,11 +1440,18 @@ def generate_synthetic_inputs(tokenizer, device: torch.device, batch_size: int, 
     Returns:
         Dictionary with 'input_ids' and 'attention_mask' tensors.
     """
+    input_ids = torch.randint(
+        1, 
+        tokenizer.vocab_size, 
+        size=(batch_size, seq_len), 
+        device=device,
+    )
+    atten_mask = torch.ones(
+        batch_size, 
+        seq_len, 
+        device=device,
+    )
     return {
-        "input_ids": torch.randint(
-            1, tokenizer.vocab_size, size=(batch_size, seq_len), device=device
-        ),
-        "attention_mask": torch.ones(
-            batch_size, seq_len, device=device
-        ),
+        "input_ids": input_ids,
+        "attention_mask": atten_mask,
     }
