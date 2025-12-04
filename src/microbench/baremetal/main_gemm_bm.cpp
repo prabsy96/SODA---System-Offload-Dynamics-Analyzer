@@ -229,7 +229,14 @@ void run_gemm(const GemmParams& params) {
         run_null_kernel(params);
         return;
     }
-    
+
+    // === Input tensor setup & staging ===
+    // High-level flow here:
+    //   1. Unpack job metadata (dims, strides, dtype, batch).
+    //   2. Size device buffers for A/B/C based on layout hints.
+    //   3. Allocate and zero the buffers so cuBLASLt sees deterministic inputs.
+    // The next section configures cuBLASLt descriptors/preference knobs around these pointers.
+
     std::cout << "Running GEMM: M=" << params.m << " N=" << params.n << " K=" << params.k 
               << " order_a=" << params.order_a << " order_b=" << params.order_b
               << " trans_a=" << params.trans_a << " trans_b=" << params.trans_b
@@ -273,7 +280,13 @@ void run_gemm(const GemmParams& params) {
     CHECK_CUDA(cudaMemset(d_A, 0, size_A));
     CHECK_CUDA(cudaMemset(d_B, 0, size_B));
     CHECK_CUDA(cudaMemset(d_C, 0, size_C));
-    
+
+    // === cuBLASLt descriptor & preference setup ===
+    // Outline:
+    //   1. Create handle + matrix layouts mirroring PyTorch (transposes, batch strides, row/col order).
+    //   2. Configure matmul descriptor and execution preference (workspace budget, pointer alignment).
+    //   3. Allocate workspace buffer that matches the preferred size.
+
     // Create cuBLASLt handle
     cublasLtHandle_t handle;
     CHECK_CUBLASLT(cublasLtCreate(&handle));
@@ -490,7 +503,11 @@ void run_gemm(const GemmParams& params) {
     
     void* workspace = nullptr;
     CHECK_CUDA(cudaMalloc(&workspace, workspace_size));
-    
+
+    // === Algorithm selection ===
+    // Bind a specific cuBLASLt plan either via explicit algo_id/algo_index or by querying
+    // heuristics (PyTorch-style) and choosing index 0 when no override is provided.
+
     // Select algorithm: either use direct ID or from heuristic results
     cublasLtMatmulAlgo_t selected_algo;
     
@@ -601,6 +618,7 @@ void run_gemm(const GemmParams& params) {
     float alpha = params.alpha;
     float beta = params.beta;
     
+    // === Execution loops (warmup + measurement) ===
     // Warmup runs
     for (int i = 0; i < params.warmup; i++) {
         CHECK_CUBLASLT(cublasLtMatmul(handle, matmul_desc,
