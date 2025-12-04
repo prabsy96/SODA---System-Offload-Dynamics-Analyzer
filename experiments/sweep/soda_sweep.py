@@ -9,7 +9,6 @@ below to try different shapes or precisions.
 
 import os
 import sys
-from argparse import Namespace
 from itertools import product
 from pathlib import Path
 
@@ -79,8 +78,14 @@ def main() -> None:
                 "--precision", precision,
                 "--compile-type", compile_type,
                 "--device", "cuda",
-                "--warmup", "5",
-                # "--runs", "5000",
+                # Extra parser knobs (fusion + microbench) left at defaults:
+                # "--fusion", "2",
+                # "--prox-score", "1.0",
+                # "--seed", "42",
+                # "--microbench",
+                # "--warmup", "10",
+                # "--runs", "5",
+                # "--version",
             ]
             args = utils.parse_and_validate_args(cli_args)
 
