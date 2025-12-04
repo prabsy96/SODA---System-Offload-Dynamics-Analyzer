@@ -18,13 +18,12 @@ classifiers = [
   "Operating System :: POSIX :: Linux"
 ]
 dependencies = [
-  # Installed via pip in slurm_run.sh
-  "transformers",
   "accelerate",
-  "vllm",
-  "flashinfer-python",
-  # NOTE: PyTorch + CUDA are installed via conda:
-  # pytorch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 pytorch-cuda=12.1
+  "matplotlib",
+  "numpy",
+  "rich",
+  "torch",
+  "transformers",
 ]
 
 [project.urls]

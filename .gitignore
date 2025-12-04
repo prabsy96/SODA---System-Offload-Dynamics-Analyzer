@@ -4,10 +4,7 @@ __pycache__/
 *$py.class
 
 # Virtual Environments
-.venv/
-venv/
-ENV/
-env/
+*env*
 
 # Build artifacts
 build/
@@ -49,5 +46,5 @@ results
 *.nvvp
 traces/
 *.tmp
-temp_*.json
+*.json
 *dev*
