@@ -255,9 +255,6 @@ def save_json(file_path: str | Path, data: Dict[str, Any], indent: int = 2) -> N
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=indent, ensure_ascii=False)
 
-# GEMM operations to extract
-GEMM_OPS = ['aten::addmm', 'aten::mm', 'aten::bmm']
-
 def _parse_scalar(value, default):
     if value is None or value == '':
         return default
@@ -342,13 +339,21 @@ def validate_static_props(sequences: List[Dict[str, Any]]) -> None:
 
 def filter_gemm_sequences(sequences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Filter for GEMM kernels only."""
+    # GEMM operations to extract
+    gemm_ops = ['aten::addmm', 'aten::mm', 'aten::bmm']
+
     gemm_sequences = []
     for seq in sequences:
         cpu_op_name = seq['cpu_op']['name']
         kernel_name = seq['kernel']['name']
+        # FIXME: Clean up
+        # if cpu_op_name in gemm_ops and 'gemm' in kernel_name.lower():
+        # Identifying gemm kernels is enough
+        # Its tedious to identify all aten ops that will produce a gemm kernel
+        # if cpu_op_name in gemm_ops and 'gemm' in kernel_name.lower():
+        # Alternatively, just check if the kernel name contains 'mm' in aten op name
         # Must be from a GEMM operation
-        # Kernel name must contain 'gemm'
-        if cpu_op_name in GEMM_OPS and 'gemm' in kernel_name.lower():
+        if 'gemm' in kernel_name.lower():
             gemm_sequences.append(copy.deepcopy(seq))
                 
     validate_sequences(gemm_sequences)
@@ -1440,17 +1445,33 @@ def generate_synthetic_inputs(tokenizer, device: torch.device, batch_size: int, 
     Returns:
         Dictionary with 'input_ids' and 'attention_mask' tensors.
     """
+    # FIXME: Stale code; explained below
+    # input_ids = torch.randint(
+    #     1, 
+    #     tokenizer.vocab_size, 
+    #     size=(batch_size, seq_len), 
+    #     device=device,
+    # )
+    # atten_mask = torch.ones(
+    #     batch_size, 
+    #     seq_len, 
+    #     device=device,
+    # )
+
+    # Build tensors on CPU, then move them, so TorchScript/ONNX traces don't "lock" a device
+    # Pass the shape positionally as a tuple of ints to avoid dtype/device parsing quirks
     input_ids = torch.randint(
-        1, 
-        tokenizer.vocab_size, 
-        size=(batch_size, seq_len), 
-        device=device,
-    )
+        1,
+        tokenizer.vocab_size,
+        (batch_size, seq_len),
+        dtype=torch.long
+    ).to(device)
+
     atten_mask = torch.ones(
-        batch_size, 
-        seq_len, 
-        device=device,
-    )
+        (batch_size, seq_len),
+        dtype=torch.long
+    ).to(device)
+
     return {
         "input_ids": input_ids,
         "attention_mask": atten_mask,

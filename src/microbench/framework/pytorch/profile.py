@@ -42,8 +42,9 @@ def create_tensor(
     
     # Map dtype strings to torch dtypes
     dtype = utils.parse_dtype_to_torch(dtype_str)
-    tensor = torch.randn(*dims, dtype=dtype, device=device)
-    
+    target_device = torch.device(device)
+    tensor = torch.randn(*dims, dtype=dtype)
+
     if strides and len(strides) == len(dims):
         default_strides = []
         stride = 1
@@ -53,10 +54,12 @@ def create_tensor(
         
         if strides != default_strides:
             max_size = max(s * d for s, d in zip(strides, dims) if d > 0)
-            storage = torch.empty(max_size + 100, dtype=dtype, device=device)
+            storage = torch.empty(max_size + 100, dtype=dtype)
             tensor = torch.as_strided(storage, dims, strides)
-            source = torch.randn(*dims, dtype=dtype, device=device)
+            source = torch.randn(*dims, dtype=dtype)
             tensor.copy_(source)
+    
+    tensor = tensor.to(target_device)
     
     return tensor
 
