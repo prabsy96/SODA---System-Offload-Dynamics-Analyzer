@@ -1,6 +1,5 @@
 #!/bin/bash
-# Microbenchmark example script
-# Runs the complete microbenchmark suite
+# SODA example run script
 
 # Check running from root directory
 if [ ! -f "pyproject.toml" ]; then
@@ -15,6 +14,7 @@ if [ -z "$SODA_ENV_LOADED" ]; then
     exit 1
 fi
 
+# Activate Python environment (supports conda or venv)
 if [ -n "$CONDA_DEFAULT_ENV" ] && [ "$CONDA_DEFAULT_ENV" != "base" ]; then
     echo "Using conda environment: $CONDA_DEFAULT_ENV"
 elif [ -d "$PYTHON_VENV" ]; then
@@ -35,6 +35,31 @@ if ! command -v soda-cli &> /dev/null; then
     pip install -e "$SODA_ROOT" --quiet
 fi
 
-# Run the microbenchmark suite
-"$MICROBENCH_DIR/run_suite.sh"
+# Run SODA using CLI command
+soda-cli --model "meta-llama/Llama-3.2-3B" \
+  --output-dir "$SODA_OUTPUT" \
+  --batch-size 1 \
+  --seq-len 512 \
+  --max-new-tokens 1 \
+  --fusion 2 3 \
+  --prox-score 1.0
 
+# # Alternative: Run SODA using Python directly
+# python src/soda.py \
+#   --model gpt2 \
+#   --output-dir "$SODA_OUTPUT" \
+#   --batch-size 1 \
+#   --seq-len 128 \
+#   --max-new-tokens 1 \
+#   --fusion 2 3 \
+#   --prox-score 1.0
+
+# # Alternative: Run SODA using Python module format
+# python -m soda \
+#   --model gpt2 \
+#   --output-dir "$SODA_OUTPUT" \
+#   --batch-size 1 \
+#   --seq-len 128 \
+#   --max-new-tokens 1 \
+#   --fusion 2 3 \
+#   --prox-score 1.0

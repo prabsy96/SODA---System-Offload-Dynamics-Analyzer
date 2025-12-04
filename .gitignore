@@ -4,10 +4,7 @@ __pycache__/
 *$py.class
 
 # Virtual Environments
-.venv/
-venv/
-ENV/
-env/
+*env*
 
 # Build artifacts
 build/
@@ -27,9 +24,11 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# SODA-specific output files
+# Output directories
 soda_results/
-graph.png
+*.png
+*output*
+*results*
 
 # Log and output files
 *.log
@@ -47,5 +46,5 @@ results
 *.nvvp
 traces/
 *.tmp
-temp_*.json
+*.json
 *dev*

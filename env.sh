@@ -10,6 +10,7 @@ export SODA_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Flag to indicate env.sh has been sourced
 export SODA_ENV_LOADED=1
+export PYTORCH_ALLOC_CONF="expandable_segments:True"
 
 # Core directory structure
 export SODA_SRC="$SODA_ROOT/src"
@@ -23,8 +24,8 @@ export FRAMEWORK_DIR="$MICROBENCH_DIR/framework"
 export PYTORCH_MICROBENCH_DIR="$FRAMEWORK_DIR/pytorch"
 
 # Microbenchmark output directories
-export BAREMETAL_OUTPUT="$SODA_OUTPUT/microbench/baremetal"
-export PYTORCH_OUTPUT="$SODA_OUTPUT/microbench/framework/pytorch"
+export BAREMETAL_OUTPUT_DIR="microbench/baremetal"
+export PYTORCH_OUTPUT_DIR="microbench/framework/pytorch"
 
 # Microbenchmark script directories
 export BAREMETAL_SCRIPTS="$BAREMETAL_MICROBENCH_DIR/scripts"
@@ -32,89 +33,57 @@ export PYTORCH_SCRIPTS="$PYTORCH_MICROBENCH_DIR/scripts"
 
 # Build directories
 export BAREMETAL_BUILD="$BAREMETAL_MICROBENCH_DIR/build"
+export BAREMETAL_BINARY="$BAREMETAL_BUILD/main_gemm_bm"
 
 # Virtual environment
 export PYTHON_VENV="$SODA_ROOT/.venv"
 
-# Common data files referenced across scripts
-export PYTORCH_UNIQUE_KERNELS="$PYTORCH_OUTPUT/unique_gemm_kernel_sequences.json"
-export PYTORCH_ALL_KERNELS="$PYTORCH_OUTPUT/all_kernel_sequences.json"
-export PYTORCH_GEMM_KERNELS="$PYTORCH_OUTPUT/gemm_kernel_sequences.json"
-export PYTORCH_REPLAYED_KERNELS="$PYTORCH_OUTPUT/replayed_gemm_kernel_sequences.json"
+# Environment metadata file
+export ENV_METADATA="env_metadata.json"
 
-export BAREMETAL_JOBS="$BAREMETAL_OUTPUT/jobs.json"
-export BAREMETAL_RUNS="$BAREMETAL_OUTPUT/baremetal_gemm_runs.json"
-export BAREMETAL_REPORT="$BAREMETAL_OUTPUT/bm_vs_framework_report.json"
+# Experiment directory (set by tracer, do not set manually)
+export EXPERIMENT_DIR=""
 
-# Trace directories
-export BAREMETAL_TRACES="$BAREMETAL_OUTPUT/traces"
-export PYTORCH_TRACES="$PYTORCH_OUTPUT/traces"
-export PYTORCH_MODEL_TRACE_DIR="$PYTORCH_TRACES/model_trace"
-export PYTORCH_KERNEL_TRACES_DIR="$PYTORCH_TRACES/kernel_traces"
-export PYTORCH_MODEL_TRACE_FILE="$PYTORCH_MODEL_TRACE_DIR/model_trace.json"
+# Common data files referenced across scripts (relative to experiment directory)
+export ALL_SEQUENCES="sequences/all_sequences.json"
+export ALL_GEMM_SEQUENCES="sequences/all_gemm_sequences.json"
+export UNIQUE_GEMM_SEQUENCES="sequences/unique_gemm_sequences.json"
 
-# Graphs output
-export PYTORCH_GRAPHS="$PYTORCH_OUTPUT/graphs"
-export PYTORCH_KERNEL_TAX_GRAPHS="$PYTORCH_GRAPHS/kernel_tax"
+# Framework/pytorch
+export PYTORCH_GEMM_SEQUENCES="$PYTORCH_OUTPUT_DIR/pytorch_gemm_profile.json"
+export PYTORCH_TRACES="$PYTORCH_OUTPUT_DIR/traces"
+export PYTORCH_KERNEL_TAX_GRAPHS="$PYTORCH_OUTPUT_DIR/graphs/kernel_tax"
 
-# Log files
-export PYTORCH_VERIFY_LOG="$PYTORCH_OUTPUT/verify_replayed_kernels.log"
+# Baremetal
+export BAREMETAL_JOBS="$BAREMETAL_OUTPUT_DIR/jobs.json"
+export BAREMETAL_GEMM_KERNELS="$BAREMETAL_OUTPUT_DIR/baremetal_gemm_profile.json"
+export BAREMETAL_TRACES="$BAREMETAL_OUTPUT_DIR/traces"
+
+export FINAL_REPORT="microbench/bm_vs_pytorch_report.json"
+# Graphs output (relative to experiment directory)
+
+# Log files (relative to experiment directory)
+export PYTORCH_VERIFY_LOG="$PYTORCH_OUTPUT_DIR/microbench.log"
 
 # HuggingFace cache (set default if not already set)
-export HF_HOME="${HF_HOME:-/tmp/hf_cache_$USER}"
+# export HF_HOME="${HF_HOME:-/tmp/hf_cache_$USER}"
+export HF_HOME="/scratch/$USER/hf_cache"
 
 # Python path setup for imports
 export PYTHONPATH="$SODA_SRC:$PYTHONPATH"
 
-# Helper function to activate virtual environment
-activate_venv() {
-    if [ -d "$PYTHON_VENV" ]; then
-        source "$PYTHON_VENV/bin/activate"
-        echo "Virtual environment activated: $PYTHON_VENV"
-    else
-        echo "Warning: Virtual environment not found at $PYTHON_VENV"
-        return 1
-    fi
-}
-
-activate_python_env() {
-    if [ -n "$CONDA_DEFAULT_ENV" ]; then
+# Helper function to activate Python environment (supports conda or venv)
+activate_env() {
+    if [ -n "$CONDA_DEFAULT_ENV" ] && [ "$CONDA_DEFAULT_ENV" != "base" ]; then
         echo "Using conda environment: $CONDA_DEFAULT_ENV"
     elif [ -d "$PYTHON_VENV" ]; then
         echo "Activating venv at $PYTHON_VENV"
         source "$PYTHON_VENV/bin/activate"
+    elif [ -n "$CONDA_DEFAULT_ENV" ]; then
+        echo "Using conda base environment"
     else
         echo "Warning: No virtual environment found. Using system Python."
     fi
-}
-
-# Alias for convenience
-alias activate_venv='activate_python_env'
-
-# Helper function to print all paths (for debugging)
-print_soda_env() {
-    echo "=== SODA Environment Variables ==="
-    echo "SODA_ROOT: $SODA_ROOT"
-    echo "SODA_SRC: $SODA_SRC"
-    echo "SODA_EXAMPLES: $SODA_EXAMPLES"
-    echo "SODA_OUTPUT: $SODA_OUTPUT"
-    echo "PYTHON_VENV: $PYTHON_VENV"
-    echo ""
-    echo "=== Microbenchmark Directories ==="
-    echo "MICROBENCH_DIR: $MICROBENCH_DIR"
-    echo "BAREMETAL_MICROBENCH_DIR: $BAREMETAL_MICROBENCH_DIR"
-    echo "PYTORCH_MICROBENCH_DIR: $PYTORCH_MICROBENCH_DIR"
-    echo ""
-    echo "=== Output Directories ==="
-    echo "BAREMETAL_OUTPUT: $BAREMETAL_OUTPUT"
-    echo "PYTORCH_OUTPUT: $PYTORCH_OUTPUT"
-    echo ""
-    echo "=== Key Files ==="
-    echo "PYTORCH_UNIQUE_KERNELS: $PYTORCH_UNIQUE_KERNELS"
-    echo "BAREMETAL_JOBS: $BAREMETAL_JOBS"
-    echo "BAREMETAL_RUNS: $BAREMETAL_RUNS"
-    echo "BAREMETAL_REPORT: $BAREMETAL_REPORT"
-    echo "=================================="
 }
 
 # Helper function to cleanup output directory
@@ -130,7 +99,7 @@ cleanup() {
 
 # Helper function to reinstall the soda package
 reinstall() {
-    echo "Reinstalling soda package..."
+    echo "Reinstalling soda package"
     pip install --ignore-installed --force-reinstall --no-deps -e "$SODA_ROOT"
     echo "Soda package reinstalled"
 }
@@ -186,7 +155,7 @@ if [ -z "${SODA_ENV_QUIET:-}" ]; then
     echo ""
     echo "Get started:"
     echo "  * print_soda_env    - Show all environment variables and paths"
-    echo "  * activate_venv     - Activate Python virtual environment"
+    echo "  * activate_env     - Activate Python virtual environment"
     echo "  * cleanup           - Delete output directory ($SODA_OUTPUT)"
     echo "  * reinstall    - Reinstall the soda package (use after making changes)"
     echo ""
