@@ -258,6 +258,8 @@ def generate_jobs(target_sequences: dict, warmup: int, runs: int):
         # Build job entry
         kernel = sequence["kernel"]
         cpu_op = sequence["cpu_op"]
+        cpu_op["dur"] = None
+        cpu_op["ts"] = None
         job = {
             "id": job_id,
             "name": kernel["name"],
@@ -265,7 +267,7 @@ def generate_jobs(target_sequences: dict, warmup: int, runs: int):
             "block": kernel["block"],
             "shared_memory": kernel["shared_memory"],
             "registers_per_thread": kernel["registers_per_thread"],
-            "cpu_op": cpu_op,  
+            "cpu_op": cpu_op,
             "m": params["m"],
             "n": params["n"],
             "k": params["k"],

@@ -75,7 +75,7 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
     - Find kernel events (kernel category)
     - Link via correlation ID (utils.link_sequences)
     - Compute kernel_tax = kernel.ts - cu(da)LaunchKernel.ts (utils.calculate_per_seq_launch_tax)
-    - Aggregate multiple runs (utils.deduplicate_and_aggregate)
+    - Aggregate multiple runs (utils.aggregate_sequences)
     
     Args:
         job: Job dictionary with cpu_op, job_id, and config
@@ -83,7 +83,7 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
         runs: Expected number of measurement runs
         warmup: Number of warmup runs to skip
     
-    Returns: Aggregated sequence dict with keys: kernel, meta, cuda_launch, cpu_op
+    Returns: Aggregated sequence dict with keys: kernel, kernel_tax, cuda_launch, cpu_op
     """
     # Extract CUDA launch events and kernel events
     cuda_launches = extract_launches_from_trace(trace_file_sql)
@@ -103,12 +103,17 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
         # and use job_id as external_id
         cpu_op = CPUOp(
             name="__nop__",
+            ts=0.0,
+            dur=0.0,
             external_id=external_id,
         ).get_signature(full=True)
     else:
         # Regular GEMM job: cpu_op was extracted from PyTorch ptrace
         # Use its original external_id to preserve linking
         cpu_op = job["cpu_op"]
+        # HACK: jobs.json stores aggregated duration; reset to raw 0.0 so re-aggregation works.
+        cpu_op["dur"] = 0.0
+        cpu_op["ts"] = 0.0
         external_id = cpu_op["external_id"]
     
     # Convert to events structure for shared utilities
@@ -141,7 +146,7 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
             ]
         }
     }
-    
+
     # Same approach as PyTorch microbench (see microbench/framework/pytorch/profile.py)
     linked_sequences = utils.link_sequences(events)
     linked_sequences_with_tax = utils.calculate_per_seq_launch_tax(linked_sequences)
@@ -153,8 +158,9 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
         raise RuntimeError(f"No sequences remaining after warmup in {trace_file_sql}")
     
     # Aggregate using shared utility (same as PyTorch pipeline)
-    # This deduplicates by kernel signature and aggregates kernel_tax stats into meta
-    aggregated_sequences = utils.deduplicate_and_aggregate(sequences_after_warmup)
+    # Deduplicate + aggregate by kernel signature (adds kernel_tax stats)
+    grouped_seqs_by_id_dict = utils.group_sequences_by_identity(sequences_after_warmup)
+    aggregated_sequences = utils.aggregate_sequences(grouped_seqs_by_id_dict)
     
     # Baremetal runs same kernel config multiple times, so should have exactly 1 unique kernel
     if len(aggregated_sequences) != 1:
@@ -164,7 +170,7 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
         )
     
     # Return the single aggregated sequence
-    # Format: {meta: {avg_kernel_tax, ...}, kernel: {...}, cuda_launch: {...}, cpu_op: {...}}
+    # Format: {kernel_tax: {...}, kernel: {...}, cuda_launch: {...}, cpu_op: {...}}
     return aggregated_sequences[0]
 
 def profile_baremetal_gemm_kernels() -> Dict[str, Any]:
@@ -197,7 +203,7 @@ def profile_baremetal_gemm_kernels() -> Dict[str, Any]:
     # Run each job and collect sequences
     sequences = []
     null_kernel_tax = None
-    
+
     for job in jobs:
 
         # Skip batched GEMMs for now due to non-contiguous layout issue
@@ -216,12 +222,12 @@ def profile_baremetal_gemm_kernels() -> Dict[str, Any]:
         if sequence is None:
             raise Exception(f"No kernel events found for job {job['id']}")
         
-        # Add job_id to meta (cpu_op already included from parse_trace_and_compute_stats)
-        sequence["meta"]["job_id"] = job["id"]
+        # Attach job_id for downstream reporting
+        sequence["job_id"] = job["id"]
         
         # Capture null kernel baseline tax for delta calculations
         if job["name"] == "__null__":
-            null_kernel_tax = sequence["meta"]["avg_kernel_tax"]
+            null_kernel_tax = sequence["kernel_tax"]["avg"]
         
         sequences.append(sequence)
     
@@ -247,13 +253,13 @@ def print_summary(sequences, null_kernel_tax=None):
         if sequence is None:
             continue
 
-        avg = sequence["meta"]["avg_kernel_tax"]
+        avg = sequence["kernel_tax"]["avg"]
         delta_pct = (
             (avg - null_kernel_tax) / null_kernel_tax * 100
             if null_kernel_tax else 0.0
         )
         table_data.append([
-            sequence["meta"]["job_id"],
+            sequence["job_id"],
             sequence["cpu_op"]["name"],
             sequence["kernel"]["name"],
             f"{avg:.2f} μs",

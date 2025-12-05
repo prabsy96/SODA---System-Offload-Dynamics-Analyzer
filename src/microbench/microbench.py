@@ -50,7 +50,8 @@ class SodaMicrobench:
         utils.save_json(all_gemm_sequences_file, all_gemm_sequences_data)
         print(f"Saved {all_gemm_sequences_data['summary']['count']} GEMM sequences to {all_gemm_sequences_file}")
         
-        unique_gemm_sequences = utils.deduplicate_and_aggregate(gemm_sequences)
+        grouped_seqs_by_id_dict = utils.group_sequences_by_identity(gemm_sequences)
+        unique_gemm_sequences = utils.aggregate_sequences(grouped_seqs_by_id_dict)
         unique_gemm_sequences_file = utils.get_path("UNIQUE_GEMM_SEQUENCES")
         target_gemm_sequences_data = {
             "summary": {

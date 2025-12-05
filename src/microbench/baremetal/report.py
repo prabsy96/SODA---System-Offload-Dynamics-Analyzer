@@ -32,7 +32,7 @@ def load_pytorch_results(pytorch_file):
         
         kernel_dict = sequence["kernel"]
         cpu_op_dict = sequence["cpu_op"]
-        meta = sequence["meta"]
+        kernel_tax = sequence.get("kernel_tax")
         
         # Convert dicts to objects
         cpu_op = CPUOp.from_dict(cpu_op_dict)
@@ -42,12 +42,7 @@ def load_pytorch_results(pytorch_file):
         kernel_info = kernel.get_signature()
         
         # Extract stats
-        stats = {
-            "avg_kernel_tax": meta["avg_kernel_tax"],
-            "min_kernel_tax": meta["min_kernel_tax"],
-            "max_kernel_tax": meta["max_kernel_tax"],
-            "count": meta["count"],
-        }
+        stats = kernel_tax if kernel_tax else None
         
         results[job_id] = {
             "kernel": kernel_info,
@@ -75,7 +70,7 @@ def load_baremetal_results(baremetal_file):
         if sequence is None:
             continue
 
-        job_id = sequence["meta"]["job_id"]
+        job_id = sequence.get("job_id")
 
         # Skip null kernel job (0000) from comparison results
         if sequence["kernel"]["name"] == "__null__":
@@ -83,7 +78,7 @@ def load_baremetal_results(baremetal_file):
 
         results[job_id] = {
             "kernel": sequence["kernel"],
-            "stats": sequence["meta"],  # meta contains all the stats fields
+            "stats": sequence["kernel_tax"],
         }
     
     return results
@@ -106,8 +101,10 @@ def compare_results(pytorch_results, baremetal_results):
         baremetal = baremetal_results[job_id]
         
         # Compute deltas (all values in microseconds)
-        fw_avg = pytorch["stats"]["avg_kernel_tax"]
-        bm_avg = baremetal["stats"]["avg_kernel_tax"]
+        fw_stats = pytorch["stats"]
+        bm_stats = baremetal["stats"]
+        fw_avg = fw_stats["avg"]
+        bm_avg = bm_stats["avg"]
         
         delta = fw_avg - bm_avg
         # Calculate percentage difference: (FW - BM) / FW * 100
@@ -124,19 +121,8 @@ def compare_results(pytorch_results, baremetal_results):
                 "block": pytorch["kernel"]["block"],
                 "shared_memory": pytorch["kernel"]["shared_memory"],
             },
-            "framework": {
-                "avg_kernel_tax": fw_avg,
-                "min_kernel_tax": pytorch["stats"]["min_kernel_tax"],
-                "max_kernel_tax": pytorch["stats"]["max_kernel_tax"],
-                "count": pytorch["stats"]["count"],
-            },
-            "baremetal": {
-                "kernel_name": baremetal["kernel"]["name"],
-                "avg_kernel_tax": bm_avg,
-                "min_kernel_tax": baremetal["stats"]["min_kernel_tax"],
-                "max_kernel_tax": baremetal["stats"]["max_kernel_tax"],
-                "count": baremetal["stats"]["count"],
-            },
+            "framework": fw_stats,
+            "baremetal": bm_stats,
             "delta": delta,
             "delta_pct": delta_pct,
         }
@@ -154,8 +140,8 @@ def print_summary(matches, baseline_tax=None):
         per_kernel_rows.append([
             match["job_id"],
             kernel_name,
-            f"{match['framework']['avg_kernel_tax']:.2f}",
-            f"{match['baremetal']['avg_kernel_tax']:.2f}",
+            f"{match['framework']['avg']:.2f}",
+            f"{match['baremetal']['avg']:.2f}",
             f"{match['delta_pct']:.1f}",
         ])
 
@@ -198,7 +184,7 @@ def report():
         
         # Extract null kernel tax for baseline
         if sequence["kernel"]["name"] == "__null__":
-            null_kernel_tax = sequence["meta"]["avg_kernel_tax"]
+            null_kernel_tax = sequence["kernel_tax"]["avg"]
             break
     
     # Compare

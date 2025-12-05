@@ -31,10 +31,10 @@ def plot_pytorch_gemm_sequences(pytorch_gemm_sequences: Dict[str, Any]) -> None:
     for idx, sequence in enumerate(sequences, start=1):
         kernel = sequence["kernel"]
         cpu_op = sequence["cpu_op"]
-        meta = sequence["meta"]
+        kernel_tax = sequence["kernel_tax"]
         kernel_name = kernel["name"]
         op_name = cpu_op["name"]
-        kernel_tax_values = meta["all_kernel_tax"]
+        kernel_tax_values = kernel_tax["all"] if kernel_tax else []
 
         if not kernel_tax_values:
             # Nothing to plot

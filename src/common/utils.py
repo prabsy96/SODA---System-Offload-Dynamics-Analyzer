@@ -40,6 +40,18 @@ def calculate_avg_min_max(values, base_name=None):
 
     return result
 
+def summarize_metric(values: List[float]) -> Dict[str, Any]:
+    """
+    Build a summary dict with count, all samples, and avg/min/max stats.
+    Assumes values is non-empty.
+    """
+    summary = {
+        "count": len(values),
+        "all": list(values),
+    }
+    summary.update(calculate_avg_min_max(values))
+    return summary
+
 def format_sequence_filename(index: int, op_name: str, kernel_name: str, extension: str = "png") -> str:
     """
     Format a filename for a sequence file (trace, plot, etc.) using index, op name, and kernel name.
@@ -300,7 +312,7 @@ def validate_sequences(sequences: List[Dict[str, Any]]) -> None:
     assert all(c['cpu_op'] for c in sequences), f"Some sequences missing cpu_op (total: {num_sequences})"
     assert all(c['cuda_launch'] for c in sequences), f"Some sequences missing cuda_launch (total: {num_sequences})"
 
-def validate_static_props(sequences: List[Dict[str, Any]]) -> None:
+def validate_kernel_static_props(sequences: List[Dict[str, Any]]) -> None:
     """Validate that static kernel properties are consistent across sequences.
     
     Static properties (shared_memory, registers_per_thread, occupancy, etc.) should be
@@ -381,7 +393,7 @@ def make_kernel_identity_key(kernel, cpu_op):
         tuple(tuple(d) if isinstance(d, list) else d for d in cpu_op.input_dims)
     )
 
-def group_by_identity(sequences):
+def group_sequences_by_identity(sequences):
     """
     Group event sequences by kernel identity key.
     
@@ -400,114 +412,58 @@ def group_by_identity(sequences):
             if kernel_obj and cpu_op_obj:
                 key = make_kernel_identity_key(kernel_obj, cpu_op_obj)
                 grouped[key].append(seq)
+    for seq_group in grouped.values():
+        validate_kernel_static_props(seq_group)
     return grouped
 
-def aggregate_execution_metrics(instances):
-    """
-    Aggregate execution metrics across a group of identical event sequences.
-    All time values in microseconds.
-    Produces avg/min/max for:
-      - kernel.dur
-      - cpu_op.dur
-      - cuda_launch.dur
-      - kernel_tax
-    Returns a deep-copied, aggregated base instance.
-    """
-    base_instance = copy.deepcopy(instances[0])
-    
-    # Aggregate kernel duration
-    kernel_durations = [
-        inst["kernel"]["dur"]
-        for inst in instances
-        if inst["kernel"]["dur"] is not None
-    ]
-    if kernel_durations:
-        base_instance["kernel"].update(calculate_avg_min_max(kernel_durations, "dur"))
-        base_instance["kernel"]["all_dur"] = kernel_durations
-    
-    # Aggregate cpu_op duration
-    cpu_op_durations = [
-        inst["cpu_op"]["dur"]
-        for inst in instances
-        if inst["cpu_op"]["dur"] is not None
-    ]
-    if cpu_op_durations:
-        base_instance["cpu_op"].update(calculate_avg_min_max(cpu_op_durations, "dur"))
-        base_instance["cpu_op"]["all_dur"] = cpu_op_durations
-    
-    # Aggregate cuda_launch duration
-    cuda_launch_durations = [
-        inst["cuda_launch"]["dur"]
-        for inst in instances
-        if inst["cuda_launch"]["dur"] is not None
-    ]
-    if cuda_launch_durations:
-        base_instance["cuda_launch"].update(calculate_avg_min_max(cuda_launch_durations, "dur"))
-        base_instance["cuda_launch"]["all_dur"] = cuda_launch_durations
-    
-    # Aggregate kernel_tax
-    kernel_tax_values = [
-        inst["kernel_tax"]
-        for inst in instances
-        if inst["kernel_tax"] is not None
-    ]
+def agg_event_metric(seq_group, event_type: str, metric: str):
+    """Aggregate event-level metrics (e.g., duration) if available."""
+    first_value = seq_group[0][event_type][metric]
+    if first_value is None:
+        return None
+    values = [seq[event_type][metric] for seq in seq_group]
+    return summarize_metric(values)
 
-    meta = {"count": len(instances), "all_kernel_tax": kernel_tax_values}
-    meta.update(calculate_avg_min_max(kernel_tax_values, "kernel_tax"))
-    base_instance["meta"] = meta
+def agg_sequence_metric(seq_group, metric_name: str):
+    """Aggregate sequence-level metrics such as kernel tax."""
+    values = [seq[metric_name] for seq in seq_group]
+    return summarize_metric(values)
 
-    
-    # TODO: Remove old code
-    # base_instance.pop("kernel_tax")
-    # base_instance["kernel"].pop("dur")
-    # base_instance["cpu_op"].pop("dur")
-    # base_instance["cuda_launch"].pop("dur")
-    # base_instance["kernel"].pop("ts")
-    # base_instance["cpu_op"].pop("ts")
-    # base_instance["cuda_launch"].pop("ts")
-    
-    # Null these fields since they dont mean anything after aggregation
-    # Kernel tax of the first sequence (base instance)
-    base_instance["kernel_tax"] = None
-    # Duration of each event of the first sequence (base instance)
-    base_instance["kernel"]["dur"] = None
-    base_instance["cpu_op"]["dur"] = None
-    base_instance["cuda_launch"]["dur"] = None
-    # Timestamp of each event of the first sequence (base instance)
-    base_instance["kernel"]["ts"] = None
-    base_instance["cpu_op"]["ts"] = None
-    base_instance["cuda_launch"]["ts"] = None
+def aggregate_sequences(grouped_sequences):
+    """Aggregate grouped sequences into unique GEMM sequences."""
+    unique_sequences = []
+    for key, seq_group in grouped_sequences.items():
+        # Use first sequence as template for aggregation.
+        first_seq = seq_group[0]
 
-    return base_instance
+        # Create sequence level template.
+        agg_seq = {
+            "kernel": dict(first_seq["kernel"]),
+            "cpu_op": dict(first_seq["cpu_op"]),
+            "cuda_launch": dict(first_seq["cuda_launch"]),
+            "count": len(seq_group),
+        }
 
-def deduplicate_and_aggregate(sequences):
-    """Deduplicate sequences by identity key, validate static properties, and aggregate metrics."""
-    # Group by identity
-    grouped_sequences = group_by_identity(sequences)
-    
-    unique_gemm_sequences = []
-    for key, instances in grouped_sequences.items():
-        
-        # Verify static properties are consistent across instances
-        validate_static_props(instances)
+        # Aggregate sequence-level metrics (e.g., kernel tax).
+        agg_seq["kernel_tax"] = agg_sequence_metric(seq_group, "kernel_tax")
 
-        # Aggregate execution metrics (kernel tax, cpu op duration, cuda launch duration, kernel duration)
-        base_instance = aggregate_execution_metrics(instances)
-        
-        # Construct output structure 
-        # TODO: Cleanup
-        # sequence_entry = {
-        #     "meta": base_instance["meta"],
-        #     "kernel": base_instance['kernel'],
-        #     "cuda_launch": base_instance["cuda_launch"],
-        #     "cpu_op": base_instance["cpu_op"]
-        # }
-        sequence_entry = base_instance
-        
-        unique_gemm_sequences.append(sequence_entry)
-    
-    validate_sequences(unique_gemm_sequences)
-    return unique_gemm_sequences
+        # Aggregate event-level metrics (e.g., per event durations).
+        event_metrics = ["dur"]
+        for event_type in ["kernel", "cpu_op", "cuda_launch"]:
+            for metric in event_metrics:
+                agg_seq[event_type][metric] = agg_event_metric(seq_group, event_type, metric)
+
+        # Clean up; ts has no meaning after aggregation.
+        agg_seq["kernel"]["ts"] = None
+        agg_seq["cpu_op"]["ts"] = None
+        agg_seq["cuda_launch"]["ts"] = None
+
+        # Save aggregated unique sequence.
+        unique_sequences.append(agg_seq)
+
+    # Validate the aggregated sequences.
+    validate_sequences(unique_sequences)
+    return unique_sequences
 
 def get_args_parser() -> argparse.ArgumentParser:
     """Create and return argument parser."""
@@ -780,8 +736,6 @@ def collect_env_metadata():
 
 def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
     """
-    TODO: refactor - Move to SodaTraceProcessor.collect_events()
-    
     Collects all events from trace organized by category.
     
     Args:
@@ -884,8 +838,6 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
 
 def link_sequences(events: Dict[str, Any]) -> List[Dict]:
     """
-    TODO: refactor - Move to SodaTraceProcessor.link_sequences()
-    
     Get event sequences linking CPU operations, CUDA launches, and kernels.
     
     Args:
