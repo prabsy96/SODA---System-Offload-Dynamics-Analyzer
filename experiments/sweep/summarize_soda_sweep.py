@@ -288,7 +288,27 @@ def apply_colorbar(fig, ax, im, data: np.ndarray) -> None:
             cbar.set_ticks([vmin, vmax])
 
 
-def annotate_cells(ax, x_labels: List, y_labels: List, value_grid: List[List], status_grid: List[List]) -> None:
+def _text_color_for_value(value: Optional[float], im) -> str:
+    """
+    Choose white or black text based on the background tile color.
+
+    We compute relative luminance from the heatmap's colormap and switch to
+    black text only on very bright tiles (e.g., yellow in viridis) to keep
+    numbers legible while keeping white text on darker and mid-tone greens.
+    """
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return "white"
+    rgba = im.cmap(im.norm(value))
+    r, g, b, _ = rgba
+    # Standard relative luminance formula.
+    luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    # For viridis, light green is ~0.54 and bright yellow is ~0.87.
+    # Use a threshold in between so light green still uses white text,
+    # but bright yellow/very bright tiles use black text.
+    return "black" if luminance > 0.7 else "white"
+
+
+def annotate_cells(ax, im, x_labels: List, y_labels: List, value_grid: List[List], status_grid: List[List]) -> None:
     for i, _ in enumerate(y_labels):
         for j, _ in enumerate(x_labels):
             status = status_grid[i][j]
@@ -297,7 +317,8 @@ def annotate_cells(ax, x_labels: List, y_labels: List, value_grid: List[List], s
             if status == "oom":
                 ax.text(j, i, "OOM", ha="center", va="center", color="red", fontsize=8, fontweight="bold")
             elif is_number:
-                ax.text(j, i, f"{float(value):.0f}", ha="center", va="center", color="white", fontsize=8)
+                text_color = _text_color_for_value(float(value), im)
+                ax.text(j, i, f"{float(value):.0f}", ha="center", va="center", color=text_color, fontsize=8)
             else:
                 ax.text(j, i, "DNH", ha="center", va="center", color="#9e9e9e", fontsize=8, fontweight="bold")
 
@@ -314,7 +335,9 @@ def plot_heatmap(section: Dict, out_paths: List[Path]) -> None:
 
     fig_width, fig_height = compute_figsize(x_labels, y_labels, rotate_axes)
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-    im = ax.imshow(data, aspect="equal", cmap="viridis")
+    # Use origin='lower' so that the smallest values for both axes
+    # appear at the bottom-left corner, regardless of orientation.
+    im = ax.imshow(data, aspect="equal", cmap="viridis", origin="lower")
     ax.set_xticks(range(len(x_labels)))
     ax.set_xticklabels(x_labels)
     ax.set_yticks(range(len(y_labels)))
@@ -333,7 +356,7 @@ def plot_heatmap(section: Dict, out_paths: List[Path]) -> None:
     ax.set_title(f"{metric_title}\n{model_label}, {precision_label}")
 
     apply_colorbar(fig, ax, im, data)
-    annotate_cells(ax, x_labels, y_labels, value_grid, status_grid)
+    annotate_cells(ax, im, x_labels, y_labels, value_grid, status_grid)
 
     fig.tight_layout()
 

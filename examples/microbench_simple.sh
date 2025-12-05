@@ -37,15 +37,16 @@ echo "Python version: $(python --version)"
 echo ""
 
 # Configuration 
-# MODEL="gpt2"
+MODEL="gpt2"
 # MODEL="meta-llama/Meta-Llama-3-8B"
-MODEL="meta-llama/Llama-3.2-3B"
+# MODEL="meta-llama/Llama-3.2-3B"
+# MODEL="meta-llama/Llama-3.2-1B"
 BATCH_SIZE="1"
 SEQ_LEN="128"
 PRECISION="bfloat16"
 COMPILE_TYPE="eager"
-WARMUP="1"
-RUNS="1"
+WARMUP="1000"
+RUNS="5000"
 MAX_NEW_TOKENS="1"
 
 python -m soda \

@@ -23,7 +23,9 @@ def main() -> None:
     """Example usage of SODA programmatically."""
     ensure_env_loaded()
 
-    model = "meta-llama/Llama-3.2-3B"
+    # model = "meta-llama/Llama-3.2-3B"
+    # model = "meta-llama/Llama-3.2-1B"
+    model = "gpt2"
     cli_args = [
         "--model", model,
         "--output-dir", str(Path(os.environ.get("SODA_OUTPUT", "."))),
@@ -33,6 +35,7 @@ def main() -> None:
         "--seq-len", "128",
         "--max-new-tokens", "1",
         "--batch-size", "1",
+        "--warmup", "5",
         # Extra parser knobs (fusion/microbench/etc.) left at defaults:
         # "--fusion", "2",
         # "--prox-score", "1.0",

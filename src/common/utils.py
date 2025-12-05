@@ -419,8 +419,10 @@ def group_sequences_by_identity(sequences):
 def agg_event_metric(seq_group, event_type: str, metric: str):
     """Aggregate event-level metrics (e.g., duration) if available."""
     first_value = seq_group[0][event_type][metric]
-    if first_value is None:
-        return None
+    # FIXME: Clean up 
+    # Too defensive; we should handle None values.
+    # if first_value is None:
+    #     return None
     values = [seq[event_type][metric] for seq in seq_group]
     return summarize_metric(values)
 
