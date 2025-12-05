@@ -99,17 +99,25 @@ class SodaMicrobench:
         generate_jobs(target_gemm_sequences, warmup=self.warmup, runs=self.runs)
         print_utils.section_end(section)
 
-        # Search for cuBLASLt algorithms
-        section = "Offline Search for cuBLASLt Algorithms"
-        print_utils.section_start(section)
-        search_cublas_algos_offline()
-        print_utils.section_end(section)
+        # Search for cuBLASLt algorithms (optional)
+        if not self.args.skip_offline_cublas_algo_search:
+            section = "Offline Search for cuBLASLt Algorithms"
+            print_utils.section_start(section)
+            search_cublas_algos_offline()
+            print_utils.section_end(section)
+        else:
+            section = "Offline Search for cuBLASLt Algorithms (skipped)"
+            print_utils.section_start(section)
+            print("Skipping offline cuBLASLt algorithm search (--skip-offline-cublas-algo-search).")
+            print_utils.section_end(section)
         
         # Profile baremetal performance
         section = "Profile Baremetal GEMM Kernels"
         print_utils.section_start(section)
         print("This will run nsys profiling for multiple jobs, may take several minutes")
-        baremetal_gemm_sequences = profile_baremetal_gemm_kernels()
+        baremetal_gemm_sequences = profile_baremetal_gemm_kernels(
+            skip_offline_cublas_algo_search=self.args.skip_offline_cublas_algo_search
+        )
         print_utils.section_end(section)
         
         # Verify baremetal sequences

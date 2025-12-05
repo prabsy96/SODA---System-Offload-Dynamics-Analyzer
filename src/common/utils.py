@@ -544,6 +544,12 @@ def get_args_parser() -> argparse.ArgumentParser:
         help="Enable deterministic setup for microbench reproducibility.",
     )
     parser.add_argument(
+        "--skip-offline-cublas-algo-search",
+        dest="skip_offline_cublas_algo_search",
+        action="store_true",
+        help="Skip offline cuBLASLt algorithm search in the microbench pipeline (use heuristic algorithms).",
+    )
+    parser.add_argument(
         "--runs",
         type=int,
         default=5,

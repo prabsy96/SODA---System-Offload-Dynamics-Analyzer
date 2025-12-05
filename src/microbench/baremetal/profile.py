@@ -6,7 +6,8 @@ Reads jobs from baremetal/output/jobs.json, uses cublas_index from
 algorithm matching phase, runs full nsys profiling, computes kernel launch
 tax statistics, and emits baremetal/output/baremetal_gemm_runs.json.
 
-This phase assumes search_cublas_algos_offline.py has already been run.
+By default, this phase assumes search_cublas_algos_offline.py has already
+been run, but the caller can choose to skip that requirement.
 """
 
 import sqlite3
@@ -42,7 +43,6 @@ def run_job(job):
         ]
     else:
 
-        matched_algo_idx = job["cublas_index"]
         args = build_base_args(job) + [
             "--warmup", str(job["warmup"]),
             "--runs", str(job["runs"]),
@@ -50,9 +50,22 @@ def run_job(job):
         
         if "batch" in job:
             args = args + ["--batch", str(job["batch"])]
-        
-        if matched_algo_idx is not None:
-            args = args + ["--algo_index", str(matched_algo_idx)]
+
+        if "cublas_index" not in job:
+            # Offline cuBLASLt algorithm search metadata not present for this job
+            # This means the offline search step was skipped for this run.
+            # In this case, we rely on cuBLASLt heuristic algorithm selection.
+            # This is implicitly done by the binary main_gemm_bm.cpp
+            pass
+        else:
+            # Offline cuBLASLt algorithm search has been completed for this job.
+            matched_algo_idx = job["cublas_index"]
+            if matched_algo_idx is None:
+                # Offline search ran but found no matching algorithm index.
+                # Fall back to heuristic algorithm selection in main_gemm_bm.cpp.
+                pass
+            else: 
+                args = args + ["--algo_index", str(matched_algo_idx)]
     
     trace_file_name = f"trace_{job_id}"
     success, trace_file_sql, message = nsys_profile_to_sql(
@@ -173,14 +186,22 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
     # Format: {kernel_tax: {...}, kernel: {...}, cuda_launch: {...}, cpu_op: {...}}
     return aggregated_sequences[0]
 
-def profile_baremetal_gemm_kernels() -> Dict[str, Any]:
+def profile_baremetal_gemm_kernels(
+    skip_offline_cublas_algo_search: bool = False,
+) -> Dict[str, Any]:
     """
     Profile baremetal GEMM kernels for all jobs using matched algorithms.
+    
+    Args:
+        skip_offline_cublas_algo_search:
+            If True, allow profiling even when offline cuBLASLt algorithm
+            search metadata is missing; baremetal will then rely on heuristic
+            algorithm selection instead of matched cublas_index.
     
     Returns:
         Dictionary with profiled baremetal GEMM sequences data (same format as saved JSON).
     """ 
-
+    
     # Load jobs
     jobs_file = utils.get_path("BAREMETAL_JOBS")
     jobs_data = utils.load_json(jobs_file)
@@ -188,12 +209,19 @@ def profile_baremetal_gemm_kernels() -> Dict[str, Any]:
     print(f"Loaded {len(jobs)} jobs.")
     
     # Check if offline cublas algorithm search has been completed
-    if "offline_cublas_search" in jobs_data["summary"]:
-        offline_cublas_search = jobs_data["summary"]["offline_cublas_search"]
-        algos_found = offline_cublas_search["algos_found"]
+    if "offline_cublas_algo_search" in jobs_data["summary"]:
+        offline_cublas_algo_search = summary["offline_cublas_algo_search"]
+        algos_found = offline_cublas_algo_search["algos_found"]
         print(f"Using {algos_found} matched algorithms")
     else:
-        raise RuntimeError("Offline cublas algorithm search has not been completed.")
+        if skip_offline_cublas_algo_search:
+            print(
+                "Skipping offline cuBLASLt algorithm search metadata; "
+                "profiling baremetal kernels with heuristic cuBLASLt algorithms.",
+                file=sys.stderr,
+            )
+        else:
+            raise RuntimeError("Offline cublas algorithm search has not been completed.")
     
     # Build binary
     build_binary()
