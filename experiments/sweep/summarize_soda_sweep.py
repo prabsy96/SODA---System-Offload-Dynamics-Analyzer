@@ -49,6 +49,31 @@ def safe_inference_time(report: Dict) -> Optional[float]:
             return float(timing[key])
     return None
 
+def get_gpu_name(data: Dict) -> str:
+    """Extract GPU name from report data with fallbacks."""
+    meta = data.get("metadata", {})
+    if "gpu_name" in meta: return meta["gpu_name"]
+    if "device_name" in meta: return meta["device_name"]
+    
+    env = data.get("environment", {})
+    if "gpu" in env: return env["gpu"]
+    if "gpu_name" in env: return env["gpu_name"]
+    
+    return "gpu"
+
+
+def short_gpu_name(name: str) -> str:
+    """Shorten GPU name for filenames and titles (e.g. 'NVIDIA H100 80GB' -> 'H100')."""
+    if not name or name.lower() == "gpu":
+        return ""
+    upper = name.upper()
+    # Check for common architectures
+    for key in ["H100", "H200", "A100", "V100", "T4", "L4", "4090", "3090"]:
+        if key in upper:
+            return key
+    # Fallback: remove NVIDIA and take first word
+    return name.replace("NVIDIA", "").replace("nvidia", "").strip().split(" ")[0]
+
 
 def parse_from_dirname(path: Path) -> Tuple[Optional[int], Optional[int], Optional[str], Optional[str]]:
     name = path.name
@@ -89,9 +114,13 @@ def collect_reports(root: Path) -> List[Dict]:
     for report_path in root.rglob("report.json"):
         try:
             data = json.loads(report_path.read_text())
+     
         except Exception as exc:
             print(f"Skipping {report_path}: unable to read JSON ({exc})", file=sys.stderr)
             continue
+
+        metadata = data.get("metadata", {})
+                
 
         metadata = data.get("metadata", {})
         config = metadata.get("config", {})
@@ -151,17 +180,18 @@ def collect_reports(root: Path) -> List[Dict]:
 
 
 def build_sections(rows: List[Dict]) -> List[Dict]:
-    grouped: Dict[Tuple[str, str, str], List[Dict]] = defaultdict(list)
+    grouped: Dict[Tuple[str, str, str, str], List[Dict]] = defaultdict(list)
     for row in rows:
         key = (
             row.get("model_name") or "unknown_model",
             row.get("compile_type") or "unknown_compile",
             row.get("precision") or "unknown_precision",
+            row.get("gpu_name") or "unknown_gpu",
         )
         grouped[key].append(row)
 
     sections: List[Dict] = []
-    for (model, compile_type, precision), items in grouped.items():
+    for (model, compile_type, precision, gpu_name), items in grouped.items():
         batch_sizes = sorted({r.get("batch_size") for r in items if r.get("batch_size") is not None})
         seq_lens = sorted({r.get("seq_len") for r in items if r.get("seq_len") is not None})
         lookup = {(r.get("seq_len"), r.get("batch_size")): r for r in items}
@@ -187,6 +217,7 @@ def build_sections(rows: List[Dict]) -> List[Dict]:
                 "model_name": model,
                 "compile_type": compile_type,
                 "precision": precision,
+                "gpu_name": gpu_name, # Ensure this is passed to section dict
                 "batch_sizes": batch_sizes,
                 "seq_lens": seq_lens,
                 "values": values,
@@ -312,52 +343,110 @@ def plot_heatmap(section: Dict, out_paths: List[Path]) -> None:
         dtype=float,
     )
 
-    fig_width, fig_height = compute_figsize(x_labels, y_labels, rotate_axes)
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-    im = ax.imshow(data, aspect="equal", cmap="viridis")
+    # PV: added IEEE style double column format
+
+    plt.rcParams.update({
+        "figure.dpi": 150,
+        "savefig.dpi": 600,
+        "font.size": 12,
+        "axes.labelsize": 12,
+        "axes.titlesize": 12, 
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 11,
+        "legend.fontsize": 11,
+        "axes.linewidth": 1.5,
+        "lines.linewidth": 3,
+        "lines.markersize": 6,
+        "grid.linewidth": 0.6,
+        "grid.linestyle": ":",
+        "mathtext.fontset": "stix",
+        "font.family": "sans-serif",
+        "font.sans-serif": ["DejaVu Sans", "Arial", "Helvetica", "Liberation Sans"],
+    })
+
+    IEEE_COL_WIDTH = 3.5 
+    n_rows = len(y_labels)
+    n_cols = len(x_labels)
+
+    # Calculate height based on aspect ratio + padding for title/labels
+    cell_height = 0.3  # inches per cell
+    base_height = n_rows * cell_height
+    # Add smaller padding for labels/title/colorbar
+    fig_height = base_height + 1.2  # Reduced from +1.5 to +1.2
+
+    fig, ax = plt.subplots(figsize=(IEEE_COL_WIDTH, fig_height))
+
+    im = ax.imshow(data, aspect="auto", cmap="viridis")
+    
     ax.set_xticks(range(len(x_labels)))
-    ax.set_xticklabels(x_labels)
+    ax.set_xticklabels(x_labels, rotation=45, ha="right", rotation_mode="anchor")
     ax.set_yticks(range(len(y_labels)))
     ax.set_yticklabels(y_labels)
-    if x_labels and y_labels:
-        ax.set_box_aspect(len(y_labels) / len(x_labels))
-    if rotate_axes:
-        ax.set_xlabel("sequence length")
-        ax.set_ylabel("batch size")
-    else:
-        ax.set_xlabel("batch size")
-        ax.set_ylabel("sequence length")
+    
+    ax.set_xlabel("Batch Size")
+    ax.set_ylabel("Sequence Length")
+    
     metric_title = METRIC_LABEL[:1].upper() + METRIC_LABEL[1:]
     model_label = format_model_label(section.get("model_name"))
     precision_label = section.get("precision") or "unknown_precision"
-    ax.set_title(f"{metric_title}\n{model_label}, {precision_label}")
+    gpu_short = short_gpu_name(section.get("gpu_name"))
+    # Title with GPU name
+    title_str = f"{metric_title}\n{model_label} ({precision_label})"
+    if gpu_short:
+        title_str += f" [{gpu_short}]"
+    ax.set_title(title_str, pad=8)
 
-    apply_colorbar(fig, ax, im, data)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="5%", pad=0.08)
+    cbar = fig.colorbar(im, cax=cax)
+
+    finite_values = data[np.isfinite(data)]
+    if finite_values.size:
+        vmin = float(finite_values.min())
+        vmax = float(finite_values.max())
+        im.set_clim(vmin=vmin, vmax=vmax)
+        # Only show min/max on colorbar to save space
+        cbar.set_ticks([vmin, vmax])
+        cbar.ax.set_yticklabels([f"{vmin:.0f}", f"{vmax:.0f}"])
+
     annotate_cells(ax, x_labels, y_labels, value_grid, status_grid)
 
     fig.tight_layout()
 
     for out_path in out_paths:
         suffix = out_path.suffix.lower()
-        save_kwargs = {"dpi": 150} if suffix in {".png", ".jpg", ".jpeg"} else {}
-        fig.savefig(out_path, **save_kwargs)
+        # Explicitly set DPI for raster formats, rely on vector defaults for PDF
+        save_kwargs = {"dpi": 600} if suffix in {".png", ".jpg", ".jpeg"} else {}
+        fig.savefig(out_path, **save_kwargs, bbox_inches="tight")
     plt.close(fig)
 
 
-def summarize(root: Path) -> None:
+def summarize(root: Path, gpu_name_override: Optional[str] = None) -> None:
     rows = collect_reports(root)
     if not rows:
         raise RuntimeError(f"No report.json files found under {root}")
+
+    # Apply override if provided
+    if gpu_name_override:
+        for row in rows:
+            row["gpu_name"] = gpu_name_override
 
     summary_dir = root / "summary"
     summary_dir.mkdir(parents=True, exist_ok=True)
 
     sections = build_sections(rows)
     for section in sections:
-        slug = slugify(f"{section['model_name']}_{section['compile_type']}_{section['precision']}")
+        # Construct slug with GPU name
+        gpu_suffix = short_gpu_name(section['gpu_name'])
+        slug_str = f"{section['model_name']}_{section['compile_type']}_{section['precision']}"
+        if gpu_suffix:
+            slug_str += f"_{gpu_suffix}"
+        slug = slugify(slug_str)
+        
         csv_path = summary_dir / f"{slug}_pivot.csv"
         png_path = summary_dir / f"{slug}_heatmap.png"
         pdf_path = summary_dir / f"{slug}_heatmap.pdf"
+        
         write_pivot(section, csv_path)
         plot_heatmap(section, [png_path, pdf_path])
         print("Wrote")

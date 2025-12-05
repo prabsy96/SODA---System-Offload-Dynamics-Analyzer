@@ -20,22 +20,22 @@ from experiments.sweep.summarize_soda_sweep import summarize as summarize_soda_s
 
 # Each config declares the model to test and the BS/SL sweeps to run.
 CONFIGS = {
-    "gpt2_short_ctx": {
-        "model_name": "gpt2",
-        # "batch_sizes": sorted([1, 2, 4, 8], reverse=True),
-        # "seq_lens": sorted([128, 256, 512, 1024], reverse=True),
-        # FIXME: DEBUG ONLY
-        "batch_sizes": sorted([1, 2], reverse=True),
-        "seq_lens": sorted([128, 256], reverse=True),
-        "max_new_toks": [1],
-    },
+    # "gpt2_short_ctx": {
+    #     "model_name": "gpt2",
+    #     # "batch_sizes": sorted([1, 2, 4, 8], reverse=True),
+    #     # "seq_lens": sorted([128, 256, 512, 1024], reverse=True),
+    #     # FIXME: DEBUG ONLY
+    #     "batch_sizes": sorted([1, 2], reverse=True),
+    #     "seq_lens": sorted([128, 256], reverse=True),
+    #     "max_new_toks": [1],
+    # },
     "llama_3.2_1b_short_ctx": {
         "model_name": "meta-llama/Llama-3.2-1B",
         # FIXME: DEBUG ONLY
         # "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
         # "seq_lens": sorted([128, 256, 512, 1024, 2048], reverse=True),
-        "batch_sizes": sorted([1, 2, 4, 8], reverse=True),
-        "seq_lens": sorted([512, 1024, 2048], reverse=True),
+        "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
+        "seq_lens": sorted([512, 1024, 2048, 4096, 8192], reverse=True),
         "max_new_toks": [1],
     },
     # "tinyllama_1.1b": {
@@ -55,12 +55,25 @@ def ensure_env_loaded() -> None:
         sys.exit(1)
 
 
+def get_gpu_suffix() -> str:
+    """Returns a short GPU suffix (e.g., H100, A100) or 'cpu'."""
+    if not torch.cuda.is_available():
+        return "cpu"
+    name = torch.cuda.get_device_name(0)
+    if "H100" in name: return "H100"
+    if "H200" in name: return "H200"
+    if "A100" in name: return "A100"
+    if "V100" in name: return "V100"
+    if "4090" in name: return "4090"
+    return "gpu"
+
 def main() -> None:
     ensure_env_loaded()
 
     compile_type = "eager"
     precision = "bfloat16"
     sweep_roots = set()
+    gpu_suffix = get_gpu_suffix()
 
     for config_name, cfg in CONFIGS.items():
         model = cfg["model_name"]
@@ -69,7 +82,7 @@ def main() -> None:
         max_new_toks = cfg["max_new_toks"]
 
         # Group sweep outputs under a common prefix (model + compile_type + precision)
-        sweep_root = Path(os.environ.get("SODA_OUTPUT", "output")) / f"{model.replace('/', '_')}_{compile_type}_{precision}"
+        sweep_root = Path(os.environ.get("SODA_OUTPUT", "output")) / f"{model.replace('/', '_')}_{compile_type}_{precision}_{gpu_suffix}"
         sweep_roots.add(sweep_root)
         print(f"\n=== Running config: {config_name} ({model}) ===")
 
@@ -119,7 +132,8 @@ def main() -> None:
                 print(f"Skipping summary for {root}: path does not exist", file=sys.stderr)
                 continue
             try:
-                summarize_soda_sweep(root)
+                # PASS gpu_suffix here
+                summarize_soda_sweep(root, gpu_name_override=gpu_suffix)
             except RuntimeError as exc:
                 print(f"Failed to summarize {root}: {exc}", file=sys.stderr)
 
