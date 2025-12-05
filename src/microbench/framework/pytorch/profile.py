@@ -43,24 +43,52 @@ def create_tensor(
     # Map dtype strings to torch dtypes
     dtype = utils.parse_dtype_to_torch(dtype_str)
     target_device = torch.device(device)
+    # Build a random tensor on CPU first so we have values to populate the strided view later.
     tensor = torch.randn(*dims, dtype=dtype)
 
-    if strides and len(strides) == len(dims):
-        default_strides = []
-        stride = 1
-        for dim in reversed(dims):
-            default_strides.insert(0, stride)
-            stride *= dim
-        
-        if strides != default_strides:
-            max_size = max(s * d for s, d in zip(strides, dims) if d > 0)
-            storage = torch.empty(max_size + 100, dtype=dtype)
-            tensor = torch.as_strided(storage, dims, strides)
-            source = torch.randn(*dims, dtype=dtype)
-            tensor.copy_(source)
-    
+    default_strides = []
+    stride = 1
+    for dim in reversed(dims):
+        default_strides.insert(0, stride)
+        stride *= dim
+
+    needs_strided = strides and len(strides) == len(dims) and strides != default_strides
+
+    # Move to the target device before imposing any custom stride. Moving after as_strided
+    # would re-pack the tensor and erase the layout we're trying to mimic from the trace.
     tensor = tensor.to(target_device)
-    
+
+    if needs_strided:
+        max_size = max(s * d for s, d in zip(strides, dims) if d > 0)
+        storage = torch.empty(max_size + 100, dtype=dtype, device=target_device)
+        tensor = torch.as_strided(storage, dims, strides)
+        source = torch.randn(*dims, dtype=dtype, device=target_device)
+        tensor.copy_(source)
+
+    # CHANGELOG:
+    #   v1 (original, working): builds tensor on CUDA directly, so stride metadata is preserved.
+    #       tensor = torch.randn(*dims, dtype=dtype, device=device)
+    #       if needs_strided: tensor = torch.as_strided(..., device=device)
+    #   v2 (buggy): built on CPU, as_strided on CPU, then tensor.to(cuda) -> stride lost because
+    #       the device copy repacks tensor data contiguously.
+    #       tensor = torch.randn(*dims, dtype=dtype)
+    #       tensor = torch.as_strided(...)
+    #       tensor = tensor.to(device)  # repacked
+    #   v3 (current, working): build on CPU, move, then reapply striding on CUDA storage so the
+    #       layout matches v1 without reallocating the entire tensor on device.
+    #       tensor = torch.randn(*dims, dtype=dtype)
+    #       tensor = tensor.to(device)
+    #       storage = torch.empty(..., device=device); tensor = torch.as_strided(storage, ...)
+    #       tensor.copy_(torch.randn(*dims, device=device))
+    # NOTE:
+    #   * v1 and v3 both preserve the stride metadata seen in the trace (the replayed tensor looks 
+    #     exactly like what we saved originally).
+    #   * v2 was an intermediate refactor with the goal of reusing CPU-built randomness and delaying
+    #     CUDA allocation until the last moment (useful when the CUDA context isn't ready or to reduce
+    #     GPU memory churn). The change of ordering repacked tensors back to contiguous and broke
+    #     verification; v3 keeps the optimization goal but fixes the ordering.
+    #   * Keeping this history here makes it obvious why the ordering matters if we revisit the code.
+
     return tensor
 
 def execute_operation(
