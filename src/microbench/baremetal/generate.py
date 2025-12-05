@@ -258,8 +258,6 @@ def generate_jobs(target_sequences: dict, warmup: int, runs: int):
         # Build job entry
         kernel = sequence["kernel"]
         cpu_op = sequence["cpu_op"]
-        cpu_op["dur"] = None
-        cpu_op["ts"] = None
         job = {
             "id": job_id,
             "name": kernel["name"],
