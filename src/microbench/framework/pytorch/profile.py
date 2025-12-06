@@ -189,11 +189,11 @@ def replay_sequences_from_cpu_ops(
         events = utils.collect_events(trace_data)
         linked_sequences = utils.link_sequences(events)
 
-        # Calculate kernel tax for event sequences
-        linked_sequences_with_tax = utils.calculate_per_seq_launch_tax(linked_sequences)
+        # Calculate launch/xlat taxes for event sequences
+        linked_sequences_with_tax = utils.calculate_sequence_metrics(linked_sequences, metrics=["launch_tax", "xlat_tax"])
 
         grouped_seqs_by_id_dict = utils.group_sequences_by_identity(linked_sequences_with_tax)
-        agg_sequence = utils.aggregate_sequences(grouped_seqs_by_id_dict)
+        agg_sequence = utils.aggregate_sequences(grouped_seqs_by_id_dict, metrics=["launch_tax", "xlat_tax"])
         sequence_by_idx[i] = agg_sequence
 
     # Extend all sequences at the end
@@ -210,7 +210,7 @@ def profile_pytorch_gemm_sequences(
     runs: int
 ) -> Dict[str, Any]:
     """
-    Profile PyTorch GEMM sequences to measure kernel tax.
+    Profile PyTorch GEMM sequences to measure launch tax.
     
     Args:
         target_gemm_sequences: Dictionary with target GEMM sequences data.

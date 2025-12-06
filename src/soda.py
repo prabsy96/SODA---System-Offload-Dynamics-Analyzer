@@ -92,7 +92,7 @@ class SodaAnalyzer:
         """
         print("=== Analyzing Trace Data ===")
         print(f"Analyzing {len(self.sequences)} event sequences")
-        sequences = utils.calculate_per_seq_launch_tax(list(self.sequences))
+        sequences = utils.calculate_sequence_metrics(list(self.sequences), metrics=["launch_tax", "xlat_tax"])
         
         # Analyze per-stream metrics
         stream_info = utils.analyze_per_stream(self.events)
@@ -108,8 +108,10 @@ class SodaAnalyzer:
         
         # Kernel metrics
         kernel_exec_time = utils.calculate_kernel_exec_time(self.events)
-        total_launch_tax = utils.calculate_total_launch_tax(sequences)
-        avg_launch_tax = utils.calculate_avg_launch_tax(sequences)
+        total_launch_tax = utils.calculate_total_tax(sequences, "launch")
+        avg_launch_tax = utils.calculate_avg_tax(sequences, "launch")
+        total_xlat_tax = utils.calculate_total_tax(sequences, "xlat")
+        avg_xlat_tax = utils.calculate_avg_tax(sequences, "xlat")
         avg_kernel_dur = utils.get_average_kernel_duration(self.events)
         top_k_kernels = utils.get_top_k_kernels(self.events, k=3)
         
@@ -119,7 +121,12 @@ class SodaAnalyzer:
             print("=== Kernel Fusion Analysis ===")
             fusion_results = {}
             for f in self.args.fusion:
-                fusion_results[f] = utils.analyze_kernel_fusion_candidates(sequences, f, self.args.prox_score, logger=LOGGER)
+                fusion_results[f] = utils.analyze_kernel_fusion_candidates(
+                    sequences,
+                    f,
+                    self.args.prox_score,
+                    logger=None
+                )
 
         # Framework overhead (CPU-side latency)
         framework_overhead = utils.calculate_framework_tax(
@@ -150,8 +157,10 @@ class SodaAnalyzer:
             "total_kernel_exec_time_ms": utils.us_to_ms(kernel_exec_time["total"]),
             "num_total_kernels": len(self.events["gpu"]["kernels"]),
             "avg_kernel_exec_time_ms": utils.us_to_ms(kernel_exec_time["avg"]),
-            "total_kernel_launch_tax_ms": utils.us_to_ms(total_launch_tax),
-            "avg_kernel_launch_tax_ms": utils.us_to_ms(avg_launch_tax),
+            "total_xlat_tax_ms": utils.us_to_ms(total_xlat_tax),
+            "avg_xlat_tax_ms": utils.us_to_ms(avg_xlat_tax),
+            "total_launch_tax_ms": utils.us_to_ms(total_launch_tax),
+            "avg_launch_tax_ms": utils.us_to_ms(avg_launch_tax),
         }
         
         self.results = {
@@ -205,10 +214,12 @@ class SodaAnalyzer:
         print(f"\t* Active streams: {metrics['active_streams']}")
         
         print("")
-        print("=== Launch & Queue Latency (TKLQT) ===")
-        print(f"\t* Total TKLQT (ms): {metrics['total_kernel_launch_tax_ms']:.4f}")
+        print("=== Taxes ===")
+        print(f"\t* Total xlat tax (t_op -> t_api) (ms): {metrics['total_xlat_tax_ms']:.4f}")
+        print(f"\t* Total launch tax (+ queue latency) (ms): {metrics['total_launch_tax_ms']:.4f}")
         if metrics['num_total_kernels'] > 0:
-            print(f"\t* Avg. TKLQT per kernel (ms): {metrics['avg_kernel_launch_tax_ms']:.4f}")
+            print(f"\t* Avg. xlat tax per kernel (ms): {metrics['avg_xlat_tax_ms']:.4f}")
+            print(f"\t* Avg. launch tax (+ queue latency) per kernel (ms): {metrics['avg_launch_tax_ms']:.4f}")
             print(f"\t* Avg. execution time per kernel (ms): {metrics['avg_kernel_exec_time_ms']:.4f}")
         
         print("")

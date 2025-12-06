@@ -52,7 +52,7 @@ export UNIQUE_GEMM_SEQUENCES="sequences/unique_gemm_sequences.json"
 # Framework/pytorch
 export PYTORCH_GEMM_SEQUENCES="$PYTORCH_OUTPUT_DIR/pytorch_gemm_profile.json"
 export PYTORCH_TRACES="$PYTORCH_OUTPUT_DIR/traces"
-export PYTORCH_KERNEL_TAX_GRAPHS="$PYTORCH_OUTPUT_DIR/graphs/kernel_tax"
+export PYTORCH_LAUNCH_TAX_GRAPHS="$PYTORCH_OUTPUT_DIR/graphs/launch_tax"
 
 # Baremetal
 export BAREMETAL_JOBS="$BAREMETAL_OUTPUT_DIR/jobs.json"

@@ -81,13 +81,13 @@ def run_job(job):
 
 def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
     """
-    Parse nsys sqlite trace and compute kernel launch tax statistics.
+    Parse nsys sqlite trace and compute launch tax statistics.
     
     Uses same event linking and aggregation logic as PyTorch pipeline:
     - Find cu(da)LaunchKernel events
     - Find kernel events (kernel category)
     - Link via correlation ID (utils.link_sequences)
-    - Compute kernel_tax = kernel.ts - cu(da)LaunchKernel.ts (utils.calculate_per_seq_launch_tax)
+    - Compute launch_tax = kernel.ts - cu(da)LaunchKernel.ts (utils.calculate_sequence_metrics)
     - Aggregate multiple runs (utils.aggregate_sequences)
     
     Args:
@@ -96,7 +96,7 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
         runs: Expected number of measurement runs
         warmup: Number of warmup runs to skip
     
-    Returns: Aggregated sequence dict with keys: kernel, kernel_tax, cuda_launch, cpu_op
+    Returns: Aggregated sequence dict with keys: kernel, launch_tax, cuda_launch, cpu_op
     """
     # Extract CUDA launch events and kernel events
     cuda_launches = extract_launches_from_trace(trace_file_sql)
@@ -162,7 +162,7 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
 
     # Same approach as PyTorch microbench (see microbench/framework/pytorch/profile.py)
     linked_sequences = utils.link_sequences(events)
-    linked_sequences_with_tax = utils.calculate_per_seq_launch_tax(linked_sequences)
+    linked_sequences_with_tax = utils.calculate_sequence_metrics(linked_sequences, metrics=["launch_tax"])
     
     # Skip warmup iterations by slicing
     sequences_after_warmup = linked_sequences_with_tax[warmup:]
@@ -171,9 +171,9 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
         raise RuntimeError(f"No sequences remaining after warmup in {trace_file_sql}")
     
     # Aggregate using shared utility (same as PyTorch pipeline)
-    # Deduplicate + aggregate by kernel signature (adds kernel_tax stats)
+    # Deduplicate + aggregate by kernel signature (adds launch_tax stats)
     grouped_seqs_by_id_dict = utils.group_sequences_by_identity(sequences_after_warmup)
-    aggregated_sequences = utils.aggregate_sequences(grouped_seqs_by_id_dict)
+    aggregated_sequences = utils.aggregate_sequences(grouped_seqs_by_id_dict, metrics=["launch_tax"])
     
     # Baremetal runs same kernel config multiple times, so should have exactly 1 unique kernel
     if len(aggregated_sequences) != 1:
@@ -230,7 +230,7 @@ def profile_baremetal_gemm_kernels(
     
     # Run each job and collect sequences
     sequences = []
-    null_kernel_tax = None
+    null_launch_tax = None
 
     for job in jobs:
 
@@ -255,7 +255,7 @@ def profile_baremetal_gemm_kernels(
         
         # Capture null kernel baseline tax for delta calculations
         if job["name"] == "__null__":
-            null_kernel_tax = sequence["kernel_tax"]["avg"]
+            null_launch_tax = sequence["launch_tax"]["avg"]
         
         sequences.append(sequence)
     
@@ -268,11 +268,11 @@ def profile_baremetal_gemm_kernels(
     print(f"Saved {baremetal_gemm_sequences_data['summary']['count']} baremetal GEMM sequences to {baremetal_gemm_sequences_file}")
     
     # Print a summary table with % delta over null kernel 
-    print_summary(sequences, null_kernel_tax)
+    print_summary(sequences, null_launch_tax)
     
     return baremetal_gemm_sequences_data
 
-def print_summary(sequences, null_kernel_tax=None):
+def print_summary(sequences, null_launch_tax=None):
     """Print a compact table summary of profiled sequences, with % delta over null kernel."""
     table_data = []
     for sequence in sequences:
@@ -281,10 +281,10 @@ def print_summary(sequences, null_kernel_tax=None):
         if sequence is None:
             continue
 
-        avg = sequence["kernel_tax"]["avg"]
+        avg = sequence["launch_tax"]["avg"]
         delta_pct = (
-            (avg - null_kernel_tax) / null_kernel_tax * 100
-            if null_kernel_tax else 0.0
+            (avg - null_launch_tax) / null_launch_tax * 100
+            if null_launch_tax else 0.0
         )
         table_data.append([
             sequence["job_id"],
@@ -297,6 +297,6 @@ def print_summary(sequences, null_kernel_tax=None):
     if table_data:
         print_utils.comp_table(
             title="Profile Summary",
-            headers=["Job", "CPU Op", "Kernel", "Avg Kernel Tax", "Δ(%)"],
+            headers=["Job", "CPU Op", "Kernel", "Avg Launch Tax", "Δ(%)"],
             data=table_data,
         )

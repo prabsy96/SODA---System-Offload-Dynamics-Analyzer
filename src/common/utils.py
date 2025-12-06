@@ -20,7 +20,7 @@ from .data import Kernel, CPUOp, Sequence, clean_kernel_name
 def calculate_avg_min_max(values, base_name=None):
     """
     Calculate avg/min/max from a list of values. If base_name is provided,
-    the keys are suffixed with it (e.g., avg_kernel_tax); otherwise the keys
+    the keys are suffixed with it (e.g., avg_launch_tax); otherwise the keys
     are plain avg/min/max.
     """
     if not values:
@@ -426,13 +426,19 @@ def agg_event_metric(seq_group, event_type: str, metric: str):
     values = [seq[event_type][metric] for seq in seq_group]
     return summarize_metric(values)
 
-def agg_sequence_metric(seq_group, metric_name: str):
-    """Aggregate sequence-level metrics such as kernel tax."""
+def agg_seq_metric(seq_group, metric_name: str):
+    """Aggregate sequence-level metrics such as launch tax."""
     values = [seq[metric_name] for seq in seq_group]
     return summarize_metric(values)
 
-def aggregate_sequences(grouped_sequences):
-    """Aggregate grouped sequences into unique GEMM sequences."""
+def aggregate_sequences(grouped_sequences, metrics: List[str]):
+    """
+    Aggregate grouped sequences into unique GEMM sequences.
+
+    Args:
+        grouped_sequences: Dict mapping identity key -> list[sequence dict]
+        metrics: Sequence-level metrics to summarize (e.g., ["launch_tax", "xlat_tax"])
+    """
     unique_sequences = []
     for key, seq_group in grouped_sequences.items():
         # Use first sequence as template for aggregation.
@@ -446,8 +452,10 @@ def aggregate_sequences(grouped_sequences):
             "count": len(seq_group),
         }
 
-        # Aggregate sequence-level metrics (e.g., kernel tax).
-        agg_seq["kernel_tax"] = agg_sequence_metric(seq_group, "kernel_tax")
+        # Aggregate sequence-level metrics (e.g., launch/xlat tax).
+        for metric in metrics:
+            if metric in first_seq:
+                agg_seq[metric] = agg_seq_metric(seq_group, metric)
 
         # Aggregate event-level metrics (e.g., per event durations).
         event_metrics = ["dur"]
@@ -876,60 +884,78 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
     return sequences
 
 
-def calculate_per_seq_launch_tax(sequences: List[Dict]) -> List[Dict]:
+def calculate_sequence_metrics(sequences: List[Dict], metrics: List[str]) -> List[Dict]:
     """
-    Calculates launch tax for each sequence and adds it to the sequence dict.
+    Calculates per-sequence metrics (e.g., launch_tax, xlat_tax) and adds them to the sequence dict.
 
     Args:
         sequences: List of event sequence dictionaries.
+        metrics: Metrics to compute (e.g., ["launch_tax", "xlat_tax"])
 
     Returns:
-        Modified event sequences with "kernel_tax" key added to each.
+        Modified event sequences with requested metric keys added to each.
     """
     for seq in sequences:
         kernel = seq["kernel"]
+        cpu_op = seq["cpu_op"]
         cuda_launch = seq["cuda_launch"]
-        launch_tax = kernel["ts"] - cuda_launch["ts"]
-        assert launch_tax >= 0, f"Negative launch tax detected: kernel.ts={kernel['ts']}, cu(da)LaunchKernel.ts={cuda_launch['ts']}, tax={launch_tax}"
-        seq["kernel_tax"] = launch_tax
+        t_op = cpu_op["ts"]
+        t_api = cuda_launch["ts"]
+
+        if "xlat_tax" in metrics:
+            # Delta xlat captures pre-launch translation from PyTorch op boundary to CUDA launch (t_op -> t_api).
+            xlat_tax = t_api - t_op
+            assert xlat_tax >= 0, f"Negative xlat tax detected: cu(da)LaunchKernel.ts={t_api}, cpu_op.ts={t_op}, tax={xlat_tax}"
+            seq["xlat_tax"] = xlat_tax
+
+        if "launch_tax" in metrics:
+            # Delta launch captures post-launch execution from CUDA launch to kernel execution (t_api -> t_kernel).
+            # Caveat: This might also include queue latency if the kernel is not immediately executed.
+            launch_tax = kernel["ts"] - t_api
+            assert launch_tax >= 0, f"Negative launch tax detected: kernel.ts={kernel['ts']}, cu(da)LaunchKernel.ts={t_api}, tax={launch_tax}"
+            seq["launch_tax"] = launch_tax
 
     return sequences
 
 
-def calculate_total_launch_tax(sequences: List[Dict]) -> float:
+def calculate_total_tax(sequences: List[Dict], tax_type: str) -> float:
     """
-    Calculates total launch tax across all sequences.
+    Calculates total for a given sequence-level tax metric (e.g., launch or xlat).
 
     Args:
-        sequences: List of event sequence dictionaries with "kernel_tax" key.
+        sequences: List of event sequence dictionaries with the metric key.
+        tax_type: Metric type without or with the "_tax" suffix (e.g., "launch", "launch_tax").
 
     Returns:
-        Total launch tax in microseconds.
+        Total tax in microseconds.
     """
+    metric_key = tax_type if tax_type.endswith("_tax") else f"{tax_type}_tax"
     total_tax = 0.0
     for seq in sequences:
-        kernel_tax = seq["kernel_tax"]
-        if kernel_tax is not None:
-            total_tax += kernel_tax
+        tax_value = seq[metric_key]
+        if tax_value is not None:
+            total_tax += tax_value
     return total_tax
 
 
-def calculate_avg_launch_tax(sequences: List[Dict]) -> float:
+def calculate_avg_tax(sequences: List[Dict], tax_type: str) -> float:
     """
-    Calculates average launch tax across all sequences.
+    Calculates average for a given sequence-level tax metric across all sequences.
 
     Args:
-        sequences: List of event sequence dictionaries with "kernel_tax" key.
+        sequences: List of event sequence dictionaries with the metric key.
+        tax_type: Metric type without or with the "_tax" suffix (e.g., "launch", "launch_tax").
 
     Returns:
-        Average launch tax in microseconds.
+        Average tax in microseconds.
     """
     if not sequences:
         return 0.0
     
-    total_tax = calculate_total_launch_tax(sequences)
+    total_tax = calculate_total_tax(sequences, tax_type)
     num_kernels = len(sequences)
     return total_tax / num_kernels if num_kernels > 0 else 0.0
+
 
 def get_average_kernel_duration(events: Dict[str, Any]) -> Dict[str, float]:
     """
@@ -1289,8 +1315,6 @@ def analyze_per_stream(events: Dict[str, Any]) -> Dict:
             )
     
     return dict(stream_info)
-
-
 
 def analyze_kernel_fusion_candidates(sequences: List[Dict], exact_length: int, prox_score_threshold: float, logger=None) -> Optional[Dict]:
     """
