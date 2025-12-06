@@ -326,11 +326,11 @@ def annotate_cells(ax, x_labels: List, y_labels: List, value_grid: List[List], s
             value = value_grid[i][j]
             is_number = value is not None and not (isinstance(value, float) and np.isnan(value))
             if status == "oom":
-                ax.text(j, i, "OOM", ha="center", va="center", color="red", fontsize=8, fontweight="bold")
+                ax.text(j, i, "OOM", ha="center", va="center", color="red", fontsize=6, fontweight="bold")
             elif is_number:
-                ax.text(j, i, f"{float(value):.0f}", ha="center", va="center", color="white", fontsize=8)
+                ax.text(j, i, f"{float(value):.0f}", ha="center", va="center", color="white", fontsize=6)
             else:
-                ax.text(j, i, "DNH", ha="center", va="center", color="#9e9e9e", fontsize=8, fontweight="bold")
+                ax.text(j, i, "DNH", ha="center", va="center", color="#9e9e9e", fontsize=6, fontweight="bold")
 
 
 def plot_heatmap(section: Dict, out_paths: List[Path]) -> None:
@@ -348,12 +348,12 @@ def plot_heatmap(section: Dict, out_paths: List[Path]) -> None:
     plt.rcParams.update({
         "figure.dpi": 150,
         "savefig.dpi": 600,
-        "font.size": 12,
-        "axes.labelsize": 12,
-        "axes.titlesize": 12, 
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 11,
-        "legend.fontsize": 11,
+        "font.size": 8,
+        "axes.labelsize": 7,
+        "axes.titlesize": 8, 
+        "xtick.labelsize": 7,
+        "ytick.labelsize": 7,
+        "legend.fontsize": 6,
         "axes.linewidth": 1.5,
         "lines.linewidth": 3,
         "lines.markersize": 6,
@@ -369,10 +369,10 @@ def plot_heatmap(section: Dict, out_paths: List[Path]) -> None:
     n_cols = len(x_labels)
 
     # Calculate height based on aspect ratio + padding for title/labels
-    cell_height = 0.3  # inches per cell
+    cell_height = 0.2  # inches per cell
     base_height = n_rows * cell_height
     # Add smaller padding for labels/title/colorbar
-    fig_height = base_height + 1.2  # Reduced from +1.5 to +1.2
+    fig_height = base_height + 0.8  # Reduced from +1.5 to +1.2
 
     fig, ax = plt.subplots(figsize=(IEEE_COL_WIDTH, fig_height))
 
@@ -421,12 +421,12 @@ def plot_heatmap(section: Dict, out_paths: List[Path]) -> None:
     plt.close(fig)
 
 
-def summarize(root: Path, gpu_name_override: Optional[str] = None) -> None:
+def summarize(root: Path, gpu_name_override: Optional[str] = None, max_tok_override: Optional[str] = None) -> None:
     rows = collect_reports(root)
     if not rows:
         raise RuntimeError(f"No report.json files found under {root}")
 
-    # Apply override if provided
+    # Apply overrides if provided
     if gpu_name_override:
         for row in rows:
             row["gpu_name"] = gpu_name_override
@@ -436,11 +436,17 @@ def summarize(root: Path, gpu_name_override: Optional[str] = None) -> None:
 
     sections = build_sections(rows)
     for section in sections:
-        # Construct slug with GPU name
+        # Construct slug with GPU name AND max_tok
         gpu_suffix = short_gpu_name(section['gpu_name'])
         slug_str = f"{section['model_name']}_{section['compile_type']}_{section['precision']}"
+        
+        # Add max_tok to filename (e.g., mt1 or mt10)
+        if max_tok_override:
+            slug_str += f"_{max_tok_override}"
+        
         if gpu_suffix:
             slug_str += f"_{gpu_suffix}"
+        
         slug = slugify(slug_str)
         
         csv_path = summary_dir / f"{slug}_pivot.csv"

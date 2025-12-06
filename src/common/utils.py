@@ -804,25 +804,37 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
     
     for event in trace["traceEvents"]:
 
+        name = event.get("name", "")
         cat = event.get("cat", "")
         args = event.get("args", {})
         external_id = args.get("External id", None)
         correlation = args.get("correlation", None)
+
+        if external_id is not None:
+            op_events_by_ext_id[external_id] = {
+                "name": name,
+                "ts": event["ts"],
+                "dur": event.get("dur", 0),
+                "args": args,
+                "input_dims": args.get("Input Dims", []),
+                "external_id": external_id
+            }
          
         if cat == "cpu_op" and external_id is not None:
             op_events_by_ext_id[external_id] = {
                 "type": "cpu_op",
-                "name": event["name"],
+                "name": name,
                 "external_id": external_id,
-                "input_dims": args["Input Dims"],
-                "input_strides": args["Input Strides"],
-                "input_type": args["Input type"],
-                "concrete_inputs": args["Concrete Inputs"],
+                # FIX 2: Use .get() for all these fields to avoid KeyError on T4
+                "input_dims": args.get("Input Dims", []),
+                "input_strides": args.get("Input Strides", []),
+                "input_type": args.get("Input type", ""),
+                "concrete_inputs": args.get("Concrete Inputs", []),
                 "ts": event["ts"],
                 "dur": event["dur"]
             }
-        elif (cat == "cuda_runtime" and event["name"] == "cudaLaunchKernel") or \
-             (cat == "cuda_driver" and event["name"] == "cuLaunchKernel"):
+        elif (cat == "cuda_runtime" and name == "cudaLaunchKernel") or \
+             (cat == "cuda_driver" and name == "cuLaunchKernel"):
             if external_id is not None and correlation is not None:
                 cuda_launch_events_by_corr[correlation] = {
                     "type": "cuda_launch",
