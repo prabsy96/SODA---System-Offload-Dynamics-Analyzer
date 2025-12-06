@@ -5,13 +5,13 @@ from torch.profiler import profile, ProfilerActivity, record_function as record
 from soda.common import utils
 
 # Helper functions
-def create_input_tensors(cpu_op: Dict[str, Any]) -> List[torch.Tensor]:
+def create_input_tensors(aten_op: Dict[str, Any]) -> List[torch.Tensor]:
     """
-    Create input tensors from CPU operation metadata.
+    Create input tensors from ATen operation metadata.
     """
-    input_dims = cpu_op["input_dims"]
-    input_types = cpu_op["input_type"]
-    input_strides = cpu_op["input_strides"]
+    input_dims = aten_op["input_dims"]
+    input_types = aten_op["input_type"]
+    input_strides = aten_op["input_strides"]
     
     inputs = []
     for i, dims in enumerate(input_dims):
@@ -92,26 +92,26 @@ def create_tensor(
     return tensor
 
 def execute_operation(
-    cpu_op_name: str,
+    aten_op_name: str,
     inputs: List[torch.Tensor],
 ) -> torch.Tensor:
     """
     Execute a GEMM operation (addmm, mm, or bmm).
     """
-    if cpu_op_name == "aten::addmm" and len(inputs) >= 3:
-        with record(f"torch_op:{cpu_op_name}"):
+    if aten_op_name == "aten::addmm" and len(inputs) >= 3:
+        with record(f"torch_op:{aten_op_name}"):
             return torch.addmm(inputs[0], inputs[1], inputs[2])
-    elif cpu_op_name == "aten::mm" and len(inputs) >= 2:
-        with record(f"torch_op:{cpu_op_name}"):
+    elif aten_op_name == "aten::mm" and len(inputs) >= 2:
+        with record(f"torch_op:{aten_op_name}"):
             return torch.mm(inputs[0], inputs[1])
-    elif cpu_op_name == "aten::bmm" and len(inputs) >= 2:
-        with record(f"torch_op:{cpu_op_name}"):
+    elif aten_op_name == "aten::bmm" and len(inputs) >= 2:
+        with record(f"torch_op:{aten_op_name}"):
             return torch.bmm(inputs[0], inputs[1])
     # If we reach here, op_name was unsupported
-    raise ValueError(f"Unsupported operation: {cpu_op_name}")
+    raise ValueError(f"Unsupported operation: {aten_op_name}")
 
 def profile_operation(
-    cpu_op_name: str,
+    aten_op_name: str,
     inputs: List[torch.Tensor],
     warmup: int,
     runs: int,
@@ -123,21 +123,21 @@ def profile_operation(
     # Warmup: execute without profiling to stabilize kernels/caches
     with torch.no_grad():
         for _ in range(warmup):
-            execute_operation(cpu_op_name, inputs)
+            execute_operation(aten_op_name, inputs)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
     
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
         with torch.no_grad():
             for _ in range(runs):
-                execute_operation(cpu_op_name, inputs)
+                execute_operation(aten_op_name, inputs)
                 # Synchronize to ensure each kernel completes before launching the next
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
     
     prof.export_chrome_trace(str(trace_file))
 
-def replay_sequences_from_cpu_ops(
+def replay_sequences_from_aten_ops(
     sequences: List[Dict[str, Any]], 
     warmup: int,
     runs: int
@@ -156,21 +156,21 @@ def replay_sequences_from_cpu_ops(
     
     # Replay each event sequence
     for i, event_sequence in enumerate(sequences):
-        cpu_op = event_sequence["cpu_op"]
+        aten_op = event_sequence["aten_op"]
         kernel = event_sequence["kernel"]
 
         # FIXME: Clean up
         # assert kernel is not None, f"Kernel is None for event sequence {i}"
-        # assert cpu_op is not None, f"CPU operation is None for event sequence {i}"
+        # assert aten_op is not None, f"ATen operation is None for event sequence {i}"
         expected_kernel = utils.clean_kernel_name(event_sequence['kernel']['name'])
         seq_idx = i+1 
         
-        print(f"[{seq_idx}/{len(sequences)}] {cpu_op['name']} -> {expected_kernel}")
+        print(f"[{seq_idx}/{len(sequences)}] {aten_op['name']} -> {expected_kernel}")
         
         # Generate trace filename based on operation name and expected kernel name
         trace_file_name = utils.format_sequence_filename(
             seq_idx, 
-            cpu_op['name'], 
+            aten_op['name'], 
             expected_kernel, 
             extension="json"
         )
@@ -178,8 +178,8 @@ def replay_sequences_from_cpu_ops(
 
         # Profile the operation 'runs' times with 'warmup' warmup runs
         profile_operation(
-            cpu_op_name=cpu_op["name"], 
-            inputs=create_input_tensors(cpu_op), 
+            aten_op_name=aten_op["name"], 
+            inputs=create_input_tensors(aten_op), 
             warmup=warmup, 
             runs=runs, 
             trace_file=trace_file,
@@ -199,7 +199,7 @@ def replay_sequences_from_cpu_ops(
         agg_sequence = utils.aggregate_sequences(
             grouped_seqs_by_id_dict,
             metrics=["launch_tax", "xlat_tax", "py_tax"],
-            event_types=["kernel", "cpu_op", "cuda_launch", "torch_op"],
+            event_types=["kernel", "aten_op", "cuda_launch", "torch_op"],
         )
         sequence_by_idx[i] = agg_sequence
 
@@ -232,7 +232,7 @@ def profile_pytorch_gemm_sequences(
     utils.ensure_dir(kernel_traces_dir, cleanup=True)
     
     # Replay all event sequences from cpu ops
-    replayed_sequences = replay_sequences_from_cpu_ops(
+    replayed_sequences = replay_sequences_from_aten_ops(
         target_gemm_sequences["sequences"],
         warmup=warmup, 
         runs=runs

@@ -19,7 +19,7 @@ from typing import Dict, Any
 from microbench.baremetal.utils import build_binary, build_base_args, nsys_profile_to_sql, extract_kernels_from_trace, extract_launches_from_trace
 
 from soda.common import utils, print_utils
-from soda.common.data import CPUOp
+from soda.common.data import ATenOp
 
 
 def run_job(job):
@@ -91,51 +91,52 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
     - Aggregate multiple runs (utils.aggregate_sequences)
     
     Args:
-        job: Job dictionary with cpu_op, job_id, and config
+        job: Job dictionary with aten_op, job_id, and config
         trace_file_sql: Path to nsys sqlite export
         runs: Expected number of measurement runs
         warmup: Number of warmup runs to skip
     
-    Returns: Aggregated sequence dict with keys: kernel, launch_tax, cuda_launch, cpu_op
+    Returns: Aggregated sequence dict with keys: kernel, launch_tax, cuda_launch, aten_op
     """
     # Extract CUDA launch events and kernel events
     cuda_launches = extract_launches_from_trace(trace_file_sql)
     kernels = extract_kernels_from_trace(trace_file_sql, cleanup=False)
+    nvtx_ranges = extract_nvtx_ranges_from_trace(trace_file_sql)
 
     if not cuda_launches:
         raise RuntimeError(f"No CUDA launch events found in {trace_file_sql}")
     if not kernels:
         raise RuntimeError(f"No kernel events found in {trace_file_sql}")
     
-    # All kernels in this trace belong to the same job/cpu_op
+    # All kernels in this trace belong to the same job/aten_op
     # Handle null kernel vs regular GEMM jobs differently
     external_id = job["id"]
     if job["name"] == "__null__":
-        # Null kernel job (hack to ensure we have a cpu_op)
-        # cpu_op is null in jobs.json so use a dummy __nop__ cpu_op
+        # Null kernel job (hack to ensure we have an aten_op)
+        # aten_op is null in jobs.json so use a dummy __nop__ op
         # and use job_id as external_id
-        cpu_op = CPUOp(
+        aten_op = ATenOp(
             name="__nop__",
             ts=0.0,
             dur=0.0,
             external_id=external_id,
         ).get_signature(full=True)
     else:
-        # Regular GEMM job: cpu_op was extracted from PyTorch ptrace
+        # Regular GEMM job: aten_op was extracted from PyTorch ptrace
         # Use its original external_id to preserve linking
-        cpu_op = job["cpu_op"]
+        aten_op = job["aten_op"]
         # HACK: jobs.json stores aggregated duration; reset to raw 0.0 so re-aggregation works.
-        cpu_op["dur"] = 0.0
-        cpu_op["ts"] = 0.0
-        external_id = cpu_op["external_id"]
+        aten_op["dur"] = 0.0
+        aten_op["ts"] = 0.0
+        external_id = aten_op["external_id"]
     
     # Convert to events structure for shared utilities
     # This adapts baremetal data to the format expected by utils.link_sequences()
     events = {
         "cpu": {
-            "cpu_ops": {
-                # Map external_id -> cpu_op (preserves original linking)
-                external_id: cpu_op
+            "aten_ops": {
+                # Map external_id -> aten_op (preserves original linking)
+                external_id: aten_op
             },
             "launches": cuda_launches  # Dict[corr_id -> launch_dict]
         },
@@ -176,7 +177,7 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
     aggregated_sequences = utils.aggregate_sequences(
         grouped_seqs_by_id_dict,
         metrics=["launch_tax"],
-        event_types=["kernel", "cpu_op", "cuda_launch"],
+        event_types=["kernel", "aten_op", "cuda_launch"],
     )
     
     # Baremetal runs same kernel config multiple times, so should have exactly 1 unique kernel
@@ -248,7 +249,7 @@ def profile_baremetal_gemm_kernels(
         if trace_file_sql is None:
             raise Exception(f"No trace file found for job {job['id']}")
         
-        # Parse trace and compute stats (returns aggregated sequence with cpu_op already included)
+        # Parse trace and compute stats (returns aggregated sequence with aten_op already included)
         sequence = parse_trace_and_compute_stats(job, trace_file_sql, job["runs"], job["warmup"])
         
         if sequence is None:
@@ -292,7 +293,7 @@ def print_summary(sequences, null_launch_tax=None):
         )
         table_data.append([
             sequence["job_id"],
-            sequence["cpu_op"]["name"],
+            sequence["aten_op"]["name"],
             sequence["kernel"]["name"],
             f"{avg:.2f} μs",
             f"{delta_pct:.1f}%",

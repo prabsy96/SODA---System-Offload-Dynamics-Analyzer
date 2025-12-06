@@ -54,7 +54,7 @@ class SodaMicrobench:
         unique_gemm_sequences = utils.aggregate_sequences(
             grouped_seqs_by_id_dict,
             metrics=["launch_tax", "xlat_tax"],
-            event_types=["kernel", "cpu_op", "cuda_launch"],
+            event_types=["kernel", "aten_op", "cuda_launch"],
         )
         unique_gemm_sequences_file = utils.get_path("UNIQUE_GEMM_SEQUENCES")
         target_gemm_sequences_data = {

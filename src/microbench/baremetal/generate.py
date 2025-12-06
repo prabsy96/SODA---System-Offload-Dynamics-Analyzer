@@ -192,12 +192,12 @@ def extract_gemm_params(sequence):
     
     Returns dict with M, N, K, trans_a, trans_b, lda, ldb, ldc, alpha, beta, dtype
     """
-    cpu_op = sequence["cpu_op"]
-    op_name = cpu_op["name"]
-    input_dims = cpu_op["input_dims"]
-    input_strides = cpu_op["input_strides"]
-    input_types = cpu_op["input_type"]
-    concrete_inputs = cpu_op["concrete_inputs"]
+    aten_op = sequence["aten_op"]
+    op_name = aten_op["name"]
+    input_dims = aten_op["input_dims"]
+    input_strides = aten_op["input_strides"]
+    input_types = aten_op["input_type"]
+    concrete_inputs = aten_op["concrete_inputs"]
     
     # Dispatch to operation-specific extractors
     if op_name == "aten::addmm":
@@ -238,7 +238,7 @@ def generate_jobs(target_sequences: dict, warmup: int, runs: int):
         "grid": [1, 1, 1],  # Explicit value for null kernel, not a default
         "block": [1, 1, 1],  # Explicit value for null kernel, not a default
         "shared_memory": 0,  # Explicit value for null kernel, not a default
-        "cpu_op": None,
+        "aten_op": None,
         "warmup": warmup,
         "runs": runs,
     })
@@ -257,7 +257,7 @@ def generate_jobs(target_sequences: dict, warmup: int, runs: int):
         
         # Build job entry
         kernel = sequence["kernel"]
-        cpu_op = sequence["cpu_op"]
+        aten_op = sequence["aten_op"]
         job = {
             "id": job_id,
             "name": kernel["name"],
@@ -265,7 +265,7 @@ def generate_jobs(target_sequences: dict, warmup: int, runs: int):
             "block": kernel["block"],
             "shared_memory": kernel["shared_memory"],
             "registers_per_thread": kernel["registers_per_thread"],
-            "cpu_op": cpu_op,
+            "aten_op": aten_op,
             "m": params["m"],
             "n": params["n"],
             "k": params["k"],
