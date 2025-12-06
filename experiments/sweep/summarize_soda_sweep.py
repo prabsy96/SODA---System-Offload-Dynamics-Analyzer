@@ -24,7 +24,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 
 METRIC_LABEL = "inference time (ms)"
-
+T_EXPOSED_LABEL = "T_exposed (ms)"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Summarize a SODA sweep directory.")
@@ -47,6 +47,23 @@ def safe_inference_time(report: Dict) -> Optional[float]:
     for key in ("torch_measured_inference_time_ms", "trace_calculated_inference_time_ms"):
         if key in timing:
             return float(timing[key])
+    return None
+
+def safe_t_exposed(report: Dict) -> Optional[float]:
+    """Extract T_exposed from report with fallbacks."""
+    perf = report.get("performance_metrics") or report.get("metrics") or {}
+    
+    # Try framework_overhead dict first (new structure)
+    framework = perf.get("framework_overhead", {})
+    t_exposed = framework.get("T_exposed_ms")
+    if t_exposed is not None:
+        return float(t_exposed)
+    
+    # Fallback: Try direct key (old structure)
+    t_exposed = perf.get("T_exposed_ms")
+    if t_exposed is not None:
+        return float(t_exposed)
+    
     return None
 
 def get_gpu_name(data: Dict) -> str:
@@ -114,13 +131,9 @@ def collect_reports(root: Path) -> List[Dict]:
     for report_path in root.rglob("report.json"):
         try:
             data = json.loads(report_path.read_text())
-     
         except Exception as exc:
             print(f"Skipping {report_path}: unable to read JSON ({exc})", file=sys.stderr)
             continue
-
-        metadata = data.get("metadata", {})
-                
 
         metadata = data.get("metadata", {})
         config = metadata.get("config", {})
@@ -139,6 +152,8 @@ def collect_reports(root: Path) -> List[Dict]:
 
         model_name = metadata.get("model_name") or infer_model_name(report_path.parent.name, compile_type, precision)
         inference_time_ms = safe_inference_time(data)
+        t_exposed_ms = safe_t_exposed(data)
+        gpu_name = get_gpu_name(data)  # FIX: Extract GPU name from report
 
         rows.append(
             {
@@ -146,9 +161,11 @@ def collect_reports(root: Path) -> List[Dict]:
                 "compile_type": compile_type,
                 "precision": precision,
                 "device": device,
+                "gpu_name": gpu_name,  # FIX: Add gpu_name to row
                 "batch_size": batch_size,
                 "seq_len": seq_len,
                 "inference_time_ms": inference_time_ms,
+                "t_exposed_ms": t_exposed_ms,
                 "status": "ok",
             }
         )
@@ -170,9 +187,11 @@ def collect_reports(root: Path) -> List[Dict]:
                 "compile_type": ct_guess,
                 "precision": prec_guess,
                 "device": None,
+                "gpu_name": None,  # FIX: OOM dirs don't have GPU name
                 "batch_size": bs_guess,
                 "seq_len": sl_guess,
                 "inference_time_ms": None,
+                "t_exposed_ms": None,
                 "status": "oom",
             }
         )
@@ -198,19 +217,24 @@ def build_sections(rows: List[Dict]) -> List[Dict]:
 
         values = []
         statuses = []
+        t_exposed_values = [] 
         for sl in seq_lens:
             value_row: List[Optional[float]] = []
             status_row: List[Optional[str]] = []
+            t_exposed_row: List[Optional[float]] = [] 
             for bs in batch_sizes:
                 entry = lookup.get((sl, bs))
                 if entry is None:
                     value_row.append(None)
                     status_row.append(None)
+                    t_exposed_row.append(None) 
                 else:
                     value_row.append(entry.get("inference_time_ms"))
                     status_row.append(entry.get("status"))
+                    t_exposed_row.append(entry.get("t_exposed_ms"))
             values.append(value_row)
             statuses.append(status_row)
+            t_exposed_values.append(t_exposed_row)
 
         sections.append(
             {
@@ -222,6 +246,7 @@ def build_sections(rows: List[Dict]) -> List[Dict]:
                 "seq_lens": seq_lens,
                 "values": values,
                 "statuses": statuses,
+                "t_exposed_values": t_exposed_values,
             }
         )
     return sections
@@ -243,17 +268,19 @@ def short_model_name(name: Optional[str]) -> str:
     return tokens[-1] if tokens else name
 
 
-def write_pivot(section: Dict, out_csv: Path) -> None:
+def write_pivot(section: Dict, out_csv: Path, metric_key: str = "values", metric_name: str = "inference_time") -> None:
+    """Write pivot table to CSV. Can be used for inference_time or t_exposed."""
     with out_csv.open("w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["model_name", section["model_name"]])
         writer.writerow(["compile_type", section["compile_type"]])
         writer.writerow(["precision", section["precision"]])
+        writer.writerow(["metric", metric_name])  # ADD THIS
         writer.writerow(["seq_len"] + [str(bs) for bs in section["batch_sizes"]])
         for row_idx, sl in enumerate(section["seq_lens"]):
             row = [sl]
             for col_idx, _ in enumerate(section["batch_sizes"]):
-                value = section["values"][row_idx][col_idx]
+                value = section[metric_key][row_idx][col_idx]
                 status = section["statuses"][row_idx][col_idx]
                 if status == "oom":
                     row.append("OOM")
@@ -270,19 +297,20 @@ def transpose_grid(grid: List[List]) -> List[List]:
     return [list(row) for row in zip(*grid)]
 
 
-def prepare_grids(section: Dict) -> Tuple[bool, List, List, List[List], List[List]]:
+def prepare_grids(section: Dict, metric_key: str = "values") -> Tuple[bool, List, List, List[List], List[List]]:
+    """Prepare grids for plotting. Supports both inference_time and t_exposed."""
     bs = section["batch_sizes"]
     sl = section["seq_lens"]
     rotate_axes = len(bs) != len(sl)
     if rotate_axes:
         x_labels = sl
         y_labels = bs
-        value_grid = transpose_grid(section["values"])
+        value_grid = transpose_grid(section[metric_key])
         status_grid = transpose_grid(section["statuses"])
     else:
         x_labels = bs
         y_labels = sl
-        value_grid = section["values"]
+        value_grid = section[metric_key]
         status_grid = section["statuses"]
     return rotate_axes, x_labels, y_labels, value_grid, status_grid
 
@@ -333,8 +361,9 @@ def annotate_cells(ax, x_labels: List, y_labels: List, value_grid: List[List], s
                 ax.text(j, i, "DNH", ha="center", va="center", color="#9e9e9e", fontsize=6, fontweight="bold")
 
 
-def plot_heatmap(section: Dict, out_paths: List[Path]) -> None:
-    rotate_axes, x_labels, y_labels, value_grid, status_grid = prepare_grids(section)
+def plot_heatmap(section: Dict, out_paths: List[Path], metric_key: str = "values", metric_label: str = METRIC_LABEL) -> None:
+    """Plot heatmap. Can be used for inference_time or t_exposed."""
+    rotate_axes, x_labels, y_labels, value_grid, status_grid = prepare_grids(section, metric_key)
     data = np.array(
         [
             [np.nan if v is None else v for v in row]
@@ -342,8 +371,6 @@ def plot_heatmap(section: Dict, out_paths: List[Path]) -> None:
         ],
         dtype=float,
     )
-
-    # PV: added IEEE style double column format
 
     plt.rcParams.update({
         "figure.dpi": 150,
@@ -366,13 +393,9 @@ def plot_heatmap(section: Dict, out_paths: List[Path]) -> None:
 
     IEEE_COL_WIDTH = 3.5 
     n_rows = len(y_labels)
-    n_cols = len(x_labels)
-
-    # Calculate height based on aspect ratio + padding for title/labels
-    cell_height = 0.2  # inches per cell
+    cell_height = 0.2
     base_height = n_rows * cell_height
-    # Add smaller padding for labels/title/colorbar
-    fig_height = base_height + 0.8  # Reduced from +1.5 to +1.2
+    fig_height = base_height + 0.8
 
     fig, ax = plt.subplots(figsize=(IEEE_COL_WIDTH, fig_height))
 
@@ -386,11 +409,10 @@ def plot_heatmap(section: Dict, out_paths: List[Path]) -> None:
     ax.set_xlabel("Batch Size")
     ax.set_ylabel("Sequence Length")
     
-    metric_title = METRIC_LABEL[:1].upper() + METRIC_LABEL[1:]
+    metric_title = metric_label[:1].upper() + metric_label[1:]
     model_label = format_model_label(section.get("model_name"))
     precision_label = section.get("precision") or "unknown_precision"
     gpu_short = short_gpu_name(section.get("gpu_name"))
-    # Title with GPU name
     title_str = f"{metric_title}\n{model_label} ({precision_label})"
     if gpu_short:
         title_str += f" [{gpu_short}]"
@@ -405,7 +427,6 @@ def plot_heatmap(section: Dict, out_paths: List[Path]) -> None:
         vmin = float(finite_values.min())
         vmax = float(finite_values.max())
         im.set_clim(vmin=vmin, vmax=vmax)
-        # Only show min/max on colorbar to save space
         cbar.set_ticks([vmin, vmax])
         cbar.ax.set_yticklabels([f"{vmin:.0f}", f"{vmax:.0f}"])
 
@@ -415,7 +436,6 @@ def plot_heatmap(section: Dict, out_paths: List[Path]) -> None:
 
     for out_path in out_paths:
         suffix = out_path.suffix.lower()
-        # Explicitly set DPI for raster formats, rely on vector defaults for PDF
         save_kwargs = {"dpi": 600} if suffix in {".png", ".jpg", ".jpeg"} else {}
         fig.savefig(out_path, **save_kwargs, bbox_inches="tight")
     plt.close(fig)
@@ -426,7 +446,6 @@ def summarize(root: Path, gpu_name_override: Optional[str] = None, max_tok_overr
     if not rows:
         raise RuntimeError(f"No report.json files found under {root}")
 
-    # Apply overrides if provided
     if gpu_name_override:
         for row in rows:
             row["gpu_name"] = gpu_name_override
@@ -436,11 +455,9 @@ def summarize(root: Path, gpu_name_override: Optional[str] = None, max_tok_overr
 
     sections = build_sections(rows)
     for section in sections:
-        # Construct slug with GPU name AND max_tok
         gpu_suffix = short_gpu_name(section['gpu_name'])
         slug_str = f"{section['model_name']}_{section['compile_type']}_{section['precision']}"
         
-        # Add max_tok to filename (e.g., mt1 or mt10)
         if max_tok_override:
             slug_str += f"_{max_tok_override}"
         
@@ -449,16 +466,27 @@ def summarize(root: Path, gpu_name_override: Optional[str] = None, max_tok_overr
         
         slug = slugify(slug_str)
         
+        # Inference time outputs
         csv_path = summary_dir / f"{slug}_pivot.csv"
         png_path = summary_dir / f"{slug}_heatmap.png"
         pdf_path = summary_dir / f"{slug}_heatmap.pdf"
         
-        write_pivot(section, csv_path)
-        plot_heatmap(section, [png_path, pdf_path])
+        write_pivot(section, csv_path, metric_key="values", metric_name="inference_time_ms")
+        plot_heatmap(section, [png_path, pdf_path], metric_key="values", metric_label=METRIC_LABEL)
+        
+        # T_exposed outputs (ADD THIS BLOCK)
+        t_exposed_csv = summary_dir / f"{slug}_t_exposed_pivot.csv"
+        t_exposed_png = summary_dir / f"{slug}_t_exposed_heatmap.png"
+        t_exposed_pdf = summary_dir / f"{slug}_t_exposed_heatmap.pdf"
+        
+        write_pivot(section, t_exposed_csv, metric_key="t_exposed_values", metric_name="t_exposed_ms")
+        plot_heatmap(section, [t_exposed_png, t_exposed_pdf], metric_key="t_exposed_values", metric_label=T_EXPOSED_LABEL)
+        
         print("Wrote")
-        print(f"* Summary to {csv_path}")
-        print(f"* Heatmap to {png_path}")
-        print(f"* Heatmap to {pdf_path}")
+        print(f"* Inference time summary to {csv_path}")
+        print(f"* Inference time heatmap to {png_path}, {pdf_path}")
+        print(f"* T_exposed summary to {t_exposed_csv}")
+        print(f"* T_exposed heatmap to {t_exposed_png}, {t_exposed_pdf}")
 
 
 def main() -> int:

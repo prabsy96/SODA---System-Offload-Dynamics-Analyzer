@@ -187,8 +187,8 @@ class SodaAnalyzer:
         timing = metrics["inference_time_breakdown"]
         LOGGER.info("")
         LOGGER.info("=== Framework Tax Analysis ===")
-        LOGGER.info(f"\t* Framework Tax (Exposed CPU Overhead): {framework['framework_tax_ms']:.4f} ms ({framework['framework_tax_percent']:.1f}%)")
-        LOGGER.info(f"\t* GPU Active Time (Compute): {metrics['gpu_busy_time_ms']:.4f} ms ({framework['gpu_busy_time_percent']:.1f}%)")
+        LOGGER.info(f"\t* T_exposed (Framework Tax): {framework['T_exposed_ms']:.4f} ms ({framework['T_exposed_percent']:.1f}%)")
+        LOGGER.info(f"\t* T_gpu_busy (GPU Active Time): {metrics['gpu_busy_time_ms']:.4f} ms ({framework['T_gpu_busy_percent']:.1f}%)")
         
         # Timing breakdown
         LOGGER.info(f"\t  - Torch measured inference time (ms): {timing['torch_measured_inference_time_ms']:.4f}")
@@ -244,11 +244,6 @@ class SodaAnalyzer:
     def save(self) -> str:
         """
         Saves analysis results to JSON file.
-        Uses results stored in self.results from analyze().
-        Generates model_name and config from self.args.
-            
-        Returns:
-            Path to the saved report file.
         """
         if self.results is None:
             raise ValueError("No analysis results available. Call analyze() first.")
@@ -259,6 +254,10 @@ class SodaAnalyzer:
         
         # Generate model_name and config from args
         model_name = self.args.model
+        
+        # FIX: Add GPU name to config
+        gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
+        
         config = {
             "batch_size": self.args.batch_size,
             "seq_len": self.args.seq_len,
@@ -266,6 +265,7 @@ class SodaAnalyzer:
             "precision": self.args.precision,
             "compile_type": self.args.compile_type,
             "device": self.args.device,
+            "gpu_name": gpu_name,  # ADD THIS
         }
         
         # Build output structure
@@ -275,7 +275,7 @@ class SodaAnalyzer:
                 "timestamp": datetime.now().isoformat(),
                 "config": config
             },
-            "performance_metrics": metrics, 
+            "performance_metrics": metrics,
             "per_stream_analysis": {
                 str(stream_id): {
                     "total_ops": data["op_count"],
@@ -467,15 +467,18 @@ class ModelTracer:
         # Load model and tokenizer
         if self.is_whisper:
             self.model, self.tokenizer = self.load_whisper()
+            # FIX: Generate audio inputs for Whisper, not text inputs
+            print(f"Generating synthetic audio input: batch_size={self.batch_size}, seq_len={self.seq_len}")
+            self.model_inputs = self.generate_audio_inputs()
         elif self.is_decoder:
             self.model, self.tokenizer = self.load_decoder()
+            print(f"Generating synthetic input: batch_size={self.batch_size}, seq_len={self.seq_len}")
+            self.model_inputs = utils.generate_synthetic_inputs(
+                self.tokenizer, self.device, self.batch_size, self.seq_len
+            )
         else:
             self.model, self.tokenizer = self.load_encoder()
-
-        print(f"Generating synthetic input: batch_size={self.batch_size}, seq_len={self.seq_len}")
-        if self.is_whisper:
-            self.model_inputs = self.generate_audio_inputs()
-        else:
+            print(f"Generating synthetic input: batch_size={self.batch_size}, seq_len={self.seq_len}")
             self.model_inputs = utils.generate_synthetic_inputs(
                 self.tokenizer, self.device, self.batch_size, self.seq_len
             )
@@ -554,12 +557,13 @@ class ModelTracer:
     def load_decoder(self) -> Tuple[transformers.PreTrainedModel, transformers.PreTrainedTokenizer]:
         """Loads a decoder-only model (e.g., Llama)."""
         # Load tokenizer first to get eos_token_id
-        tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_name)
+        tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         
         # Load config and set pad_token_id before model initialization to prevent warning
-        config = transformers.AutoConfig.from_pretrained(self.model_name)
+        # FIX: Add trust_remote_code=True here for models like DeepSeek-MoE
+        config = transformers.AutoConfig.from_pretrained(self.model_name, trust_remote_code=True)
         if hasattr(config, 'pad_token_id') and config.pad_token_id is None:
             config.pad_token_id = tokenizer.eos_token_id
         

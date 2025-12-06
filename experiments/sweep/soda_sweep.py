@@ -22,51 +22,51 @@ from experiments.sweep.summarize_soda_sweep import summarize as summarize_soda_s
 
 ## PREFILL
 
-# CONFIGS = {
+CONFIGS = {
     
-#     # "gpt2_short_ctx": {
-#     #     "model_name": "gpt2",
-#     #     # "batch_sizes": sorted([1, 2, 4, 8], reverse=True),
-#     #     # "seq_lens": sorted([128, 256, 512, 1024], reverse=True),
-#     #     # FIXME: DEBUG ONLY
-#     #     "batch_sizes": sorted([1, 2], reverse=True),
-#     #     "seq_lens": sorted([128, 256], reverse=True),
-#     #     "max_new_toks": [1],
-#     # },
-#     # "llama_3.2_1b_short_ctx": {
-#     #     "model_name": "meta-llama/Llama-3.2-1B",
-#     #     # FIXME: DEBUG ONLY
-#     #     # "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
-#     #     # "seq_lens": sorted([128, 256, 512, 1024, 2048], reverse=True),
-#     #     "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
-#     #     "seq_lens": sorted([512, 1024, 2048, 4096, 8192], reverse=True),
-#     #     "max_new_toks": [1],
-#     # },
-#     # "tinyllama_1.1b": {
-#     #     "model_name": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-#     #     "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
-#     #     "seq_lens": sorted([128, 256, 512, 1024, 2048], reverse=True),
-#     #     "max_new_toks": [1],
-#     # },
-#     # "deepseek_moe_16b_prefill": {
-#     #     "model_name": "deepseek-ai/deepseek-moe-16b-base",
-#     #     "batch_sizes": sorted([1, 2, 4, 8], reverse=True),  # Lower due to MoE memory
-#     #     "seq_lens": sorted([512, 1024, 2048, 4096], reverse=True),  # Reduced max seq_len
-#     #     "max_new_toks": [1],
-#     # },
-#     "whisper_large_v3_prefill": {
-#         "model_name": "openai/whisper-large-v3",
-#         "batch_sizes": sorted([1, 2, 4, 8], reverse=True),
-#         # Sweep Audio Durations: 30s (Standard), 10s, 2s
-#         # Note: Whisper pads to 30s internally, so these might have similar runtime
-#         "seq_lens": [480000, 160000, 32000], 
-#         "max_new_toks": [1], 
-#     },
-# }
+    "gpt2_short_ctx": {
+        "model_name": "gpt2",
+        # "batch_sizes": sorted([1, 2, 4, 8], reverse=True),
+        # "seq_lens": sorted([128, 256, 512, 1024], reverse=True),
+        # FIXME: DEBUG ONLY
+        "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
+        "seq_lens":  sorted([128, 256, 512, 1024], reverse=True),
+        "max_new_toks": [1],
+    },
+    "llama_3.2_1b_short_ctx": {
+        "model_name": "meta-llama/Llama-3.2-1B",
+        # FIXME: DEBUG ONLY
+        # "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
+        # "seq_lens": sorted([128, 256, 512, 1024, 2048], reverse=True),
+        "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
+        "seq_lens": sorted([512, 1024, 2048, 4096, 8192], reverse=True),
+        "max_new_toks": [1],
+    },
+    "tinyllama_1.1b": {
+        "model_name": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
+        "seq_lens": sorted([128, 256, 512, 1024, 2048], reverse=True),
+        "max_new_toks": [1],
+    },
+    "deepseek_moe_16b_prefill": {
+        "model_name": "deepseek-ai/deepseek-moe-16b-base",
+        "batch_sizes": sorted([1, 2, 4, 8], reverse=True),  # Lower due to MoE memory
+        "seq_lens": sorted([512, 1024, 2048, 4096], reverse=True),  # Reduced max seq_len
+        "max_new_toks": [1],
+    },
+    "whisper_large_v3_prefill": {
+        "model_name": "openai/whisper-large-v3",
+        "batch_sizes": sorted([1, 2, 4, 8], reverse=True),
+        # Sweep Audio Durations: 30s (Standard), 10s, 2s
+        # Note: Whisper pads to 30s internally, so these might have similar runtime
+        "seq_lens": [480000, 160000, 32000], 
+        "max_new_toks": [1], 
+    },
+}
 
 # DECODE
 
-CONFIGS = {
+# CONFIGS = {
 
 #     # "gpt2_short_ctx": {
 #     #     "model_name": "gpt2",
@@ -94,15 +94,15 @@ CONFIGS = {
 #         "seq_lens": [128, 1024, 2048, 4096],
 #         "max_new_toks": [10],
 #     },
-    "whisper_large_v3_prefill": {
-        "model_name": "openai/whisper-large-v3",
-        "batch_sizes": sorted([1, 2, 4, 8], reverse=True),
-        # Sweep Audio Durations: 30s (Standard), 10s, 2s
-        # Note: Whisper pads to 30s internally, so these might have similar runtime
-        "seq_lens": [480000, 160000, 32000], 
-        "max_new_toks": [50], 
-    },
-}
+#     "whisper_large_v3_prefill": {
+#         "model_name": "openai/whisper-large-v3",
+#         "batch_sizes": sorted([1, 2, 4, 8], reverse=True),
+#         # Sweep Audio Durations: 30s (Standard), 10s, 2s
+#         # Note: Whisper pads to 30s internally, so these might have similar runtime
+#         "seq_lens": [480000, 160000, 32000], 
+#         "max_new_toks": [50], 
+#     },
+# }
 
 
 def ensure_env_loaded() -> None:

@@ -1209,7 +1209,7 @@ def calculate_true_gpu_busy_time(events: Dict[str, Any]) -> float:
     Returns:
         Merged GPU busy time in microseconds.
     """
-    gpu_events = events["gpu"]["all"]
+    gpu_events = events.get("gpu", {}).get("all", [])
     
     # Edge case: no GPU events
     if not gpu_events:
@@ -1240,8 +1240,7 @@ def calculate_true_gpu_busy_time(events: Dict[str, Any]) -> float:
     # Each merged interval represents a continuous period of GPU activity
     true_gpu_busy_time = 0.0
     for start_time, end_time in merged_intervals:
-        interval_duration = end_time - start_time
-        true_gpu_busy_time += interval_duration
+        true_gpu_busy_time += (end_time - start_time)
     
     return true_gpu_busy_time
 
@@ -1278,35 +1277,44 @@ def calculate_framework_tax(
     """
     Calculate framework tax - the CPU-side time not spent on GPU computation.
     
+    Definitions:
+    - T_total: Total wall-clock inference time (inference_time_us)
+    - T_gpu_busy: True GPU active time, accounting for concurrency (gpu_busy_time_us)
+    - T_exposed: Exposed Framework Tax = T_total - T_gpu_busy
+    
     Args:
-        inference_time_us: Total inference time in microseconds.
-        gpu_busy_time_us: GPU busy time in microseconds.
+        inference_time_us: Total inference time in microseconds (T_total).
+        gpu_busy_time_us: GPU busy time in microseconds (T_gpu_busy).
     
     Returns:
         Dictionary containing:
-        - framework_tax_ms: Framework tax in milliseconds
-        - framework_tax_percent: Framework tax as percentage of inference time
-        - gpu_busy_time_percent: GPU busy time as percentage of inference time
-        - is_framework_bound: Flag indicating if the framework is bound by CPU-side latency
+        - T_exposed: Exposed framework tax in microseconds
+        - T_exposed_ms: Exposed framework tax in milliseconds
+        - T_exposed_percent: T_exposed as a percentage of T_total
+        - T_gpu_busy_percent: T_gpu_busy as a percentage of T_total
+        - is_framework_bound: Boolean flag (True if T_exposed > 50%)
     """
-    # Framework tax = everything except GPU compute
-    framework_tax_us = max(0.0, inference_time_us - gpu_busy_time_us)
-
-    is_framework_bound = framework_tax_us > gpu_busy_time_us
+    # T_exposed = T_total - T_gpu_busy
+    # Clamp to 0 to handle potential measurement noise where GPU time > CPU time slightly
+    t_exposed_us = max(0.0, inference_time_us - gpu_busy_time_us)
     
     # Calculate percentages
     if inference_time_us > 0:
-        framework_tax_percent = (framework_tax_us / inference_time_us) * 100
-        gpu_busy_time_percent = (gpu_busy_time_us / inference_time_us) * 100
+        t_exposed_percent = (t_exposed_us / inference_time_us) * 100.0
+        t_gpu_busy_percent = (gpu_busy_time_us / inference_time_us) * 100.0
     else:
-        framework_tax_percent = 0.0
-        gpu_busy_time_percent = 0.0
-    
+        t_exposed_percent = 0.0
+        t_gpu_busy_percent = 0.0
+        
+    # Heuristic: If exposed tax > 50%, we are framework bound
+    is_framework_bound = t_exposed_percent > 50.0
+
     return {
-        "framework_tax_ms": us_to_ms(framework_tax_us),
-        "framework_tax_percent": framework_tax_percent,
-        "gpu_busy_time_percent": gpu_busy_time_percent,
-        "is_framework_bound": is_framework_bound,
+        "T_exposed": t_exposed_us,
+        "T_exposed_ms": us_to_ms(t_exposed_us),
+        "T_exposed_percent": t_exposed_percent,
+        "T_gpu_busy_percent": t_gpu_busy_percent,
+    #    "is_framework_bound": is_framework_bound
     }
 
 def analyze_per_stream(events: Dict[str, Any]) -> Dict:
