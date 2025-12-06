@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from soda import SodaAnalyzer, ModelTracer, SodaLogger
+from soda import SodaAnalyzer, ModelTracer
 from soda.common import utils
 
 
@@ -48,7 +48,6 @@ def main() -> None:
     args = utils.parse_and_validate_args(cli_args)
 
     tracer = ModelTracer(args=args)
-    SodaLogger(tracer.output_dir, is_console=True, is_file=True)
     tracer.run()
 
     analyzer = SodaAnalyzer(tracer=tracer, args=args)

@@ -12,7 +12,7 @@ import sys
 from itertools import product
 from pathlib import Path
 import torch
-from soda import ModelTracer, SodaLogger
+from soda import ModelTracer
 from soda.microbench.microbench import SodaMicrobench
 from soda.common import utils
 from experiments.sweep.config import PARAMS, SWEEP_CONFIGS
@@ -64,7 +64,6 @@ def main() -> None:
 
             try:
                 tracer = ModelTracer(args=args)
-                SodaLogger(tracer.output_dir, is_console=True, is_file=True)
                 tracer.run()
 
                 microbench = SodaMicrobench(tracer=tracer, args=args)
