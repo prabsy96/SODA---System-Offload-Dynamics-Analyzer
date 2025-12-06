@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import torch
-from torch.profiler import profile, ProfilerActivity
+from torch.profiler import profile, ProfilerActivity, record_function as record
 from soda.common import utils
 
 # Helper functions
@@ -92,27 +92,30 @@ def create_tensor(
     return tensor
 
 def execute_operation(
-    op_name: str,
-    inputs: List[torch.Tensor]
+    cpu_op_name: str,
+    inputs: List[torch.Tensor],
 ) -> torch.Tensor:
     """
     Execute a GEMM operation (addmm, mm, or bmm).
     """
-    if op_name == "aten::addmm" and len(inputs) >= 3:
-        return torch.addmm(inputs[0], inputs[1], inputs[2])
-    elif op_name == "aten::mm" and len(inputs) >= 2:
-        return torch.mm(inputs[0], inputs[1])
-    elif op_name == "aten::bmm" and len(inputs) >= 2:
-        return torch.bmm(inputs[0], inputs[1])
-    else:
-        raise ValueError(f"Unsupported operation: {op_name}")
+    if cpu_op_name == "aten::addmm" and len(inputs) >= 3:
+        with record(f"torch_op:{cpu_op_name}"):
+            return torch.addmm(inputs[0], inputs[1], inputs[2])
+    elif cpu_op_name == "aten::mm" and len(inputs) >= 2:
+        with record(f"torch_op:{cpu_op_name}"):
+            return torch.mm(inputs[0], inputs[1])
+    elif cpu_op_name == "aten::bmm" and len(inputs) >= 2:
+        with record(f"torch_op:{cpu_op_name}"):
+            return torch.bmm(inputs[0], inputs[1])
+    # If we reach here, op_name was unsupported
+    raise ValueError(f"Unsupported operation: {cpu_op_name}")
 
 def profile_operation(
-    op_name: str,
+    cpu_op_name: str,
     inputs: List[torch.Tensor],
     warmup: int,
     runs: int,
-    trace_file: Path
+    trace_file: Path,
 ) -> None:
     """
     Profile a PyTorch operation N times and return trace file path.
@@ -120,14 +123,14 @@ def profile_operation(
     # Warmup: execute without profiling to stabilize kernels/caches
     with torch.no_grad():
         for _ in range(warmup):
-            execute_operation(op_name, inputs)
+            execute_operation(cpu_op_name, inputs)
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
     
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
         with torch.no_grad():
             for _ in range(runs):
-                execute_operation(op_name, inputs)
+                execute_operation(cpu_op_name, inputs)
                 # Synchronize to ensure each kernel completes before launching the next
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
@@ -175,11 +178,11 @@ def replay_sequences_from_cpu_ops(
 
         # Profile the operation 'runs' times with 'warmup' warmup runs
         profile_operation(
-            op_name=cpu_op["name"], 
+            cpu_op_name=cpu_op["name"], 
             inputs=create_input_tensors(cpu_op), 
             warmup=warmup, 
             runs=runs, 
-            trace_file=trace_file
+            trace_file=trace_file,
         )
 
         # Load trace data from trace file
@@ -190,10 +193,14 @@ def replay_sequences_from_cpu_ops(
         linked_sequences = utils.link_sequences(events)
 
         # Calculate launch/xlat taxes for event sequences
-        linked_sequences_with_tax = utils.calculate_sequence_metrics(linked_sequences, metrics=["launch_tax", "xlat_tax"])
+        linked_sequences_with_tax = utils.calculate_sequence_metrics(linked_sequences, metrics=["launch_tax", "xlat_tax", "py_tax"])
 
         grouped_seqs_by_id_dict = utils.group_sequences_by_identity(linked_sequences_with_tax)
-        agg_sequence = utils.aggregate_sequences(grouped_seqs_by_id_dict, metrics=["launch_tax", "xlat_tax"])
+        agg_sequence = utils.aggregate_sequences(
+            grouped_seqs_by_id_dict,
+            metrics=["launch_tax", "xlat_tax", "py_tax"],
+            event_types=["kernel", "cpu_op", "cuda_launch", "torch_op"],
+        )
         sequence_by_idx[i] = agg_sequence
 
     # Extend all sequences at the end

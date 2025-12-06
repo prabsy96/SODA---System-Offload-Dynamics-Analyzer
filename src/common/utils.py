@@ -431,13 +431,14 @@ def agg_seq_metric(seq_group, metric_name: str):
     values = [seq[metric_name] for seq in seq_group]
     return summarize_metric(values)
 
-def aggregate_sequences(grouped_sequences, metrics: List[str]):
+def aggregate_sequences(grouped_sequences, metrics: List[str], event_types: List[str]):
     """
     Aggregate grouped sequences into unique GEMM sequences.
 
     Args:
         grouped_sequences: Dict mapping identity key -> list[sequence dict]
         metrics: Sequence-level metrics to summarize (e.g., ["launch_tax", "xlat_tax"])
+        event_types: Event types to aggregate (e.g., ["kernel", "cpu_op", "cuda_launch", "torch_op"])
     """
     unique_sequences = []
     for key, seq_group in grouped_sequences.items():
@@ -445,12 +446,9 @@ def aggregate_sequences(grouped_sequences, metrics: List[str]):
         first_seq = seq_group[0]
 
         # Create sequence level template.
-        agg_seq = {
-            "kernel": dict(first_seq["kernel"]),
-            "cpu_op": dict(first_seq["cpu_op"]),
-            "cuda_launch": dict(first_seq["cuda_launch"]),
-            "count": len(seq_group),
-        }
+        agg_seq = {"count": len(seq_group)}
+        for event_type in event_types:
+            agg_seq[event_type] = dict(first_seq[event_type])
 
         # Aggregate sequence-level metrics (e.g., launch/xlat tax).
         for metric in metrics:
@@ -459,14 +457,13 @@ def aggregate_sequences(grouped_sequences, metrics: List[str]):
 
         # Aggregate event-level metrics (e.g., per event durations).
         event_metrics = ["dur"]
-        for event_type in ["kernel", "cpu_op", "cuda_launch"]:
+        for event_type in event_types:
             for metric in event_metrics:
                 agg_seq[event_type][metric] = agg_event_metric(seq_group, event_type, metric)
 
         # Clean up; ts has no meaning after aggregation.
-        agg_seq["kernel"]["ts"] = None
-        agg_seq["cpu_op"]["ts"] = None
-        agg_seq["cuda_launch"]["ts"] = None
+        for event_type in event_types:
+            agg_seq[event_type]["ts"] = None
 
         # Save aggregated unique sequence.
         unique_sequences.append(agg_seq)
@@ -760,14 +757,16 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         Dictionary with hierarchical structure:
         - cpu: Dict with keys:
-            - ops: Dict[external_id, cpu_op_dict] - CPU operations
+            - cpu_ops: Dict[external_id, cpu_op_dict] - CPU operations
             - launches: Dict[correlation_id, cuda_launch_dict] - CUDA launch events (cu(da)LaunchKernel)
         - gpu: Dict with keys:
             - kernels: List of kernel events
             - memory: List of memcpy/memset events
             - all: List of all GPU events
     """
-    op_events_by_ext_id = {}
+    cpu_op_events_by_ext_id = {}
+    torch_op_events_by_ext_id = {}
+    torch_op_buffer = []
     cuda_launch_events_by_corr = {}
     kernel_events = []
     gpu_mem_events = []
@@ -780,7 +779,7 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
         correlation = args.get("correlation", None)
          
         if cat == "cpu_op" and external_id is not None:
-            op_events_by_ext_id[external_id] = {
+            cpu_op_events_by_ext_id[external_id] = {
                 "type": "cpu_op",
                 "name": event["name"],
                 "external_id": external_id,
@@ -791,6 +790,19 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
                 "ts": event["ts"],
                 "dur": event["dur"]
             }
+            if torch_op_buffer:
+                # NOTE: This is a hack: we pair the oldest buffered torch_op with the next cpu_op.
+                torch_event = torch_op_buffer.pop(0)
+                torch_event["external_id"] = external_id
+                assert external_id not in torch_op_events_by_ext_id, "Duplicate torch_op for external_id"
+                torch_op_events_by_ext_id[external_id] = torch_event
+        elif cat == "user_annotation" and event["name"].startswith("torch_op"):
+            torch_op_buffer.append({
+                "type": "torch_op",
+                "name": event["name"],
+                "ts": event["ts"],
+                "dur": event["dur"],
+            })
         elif (cat == "cuda_runtime" and event["name"] == "cudaLaunchKernel") or \
              (cat == "cuda_driver" and event["name"] == "cuLaunchKernel"):
             if external_id is not None and correlation is not None:
@@ -838,9 +850,11 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
             })
     
     # Create hierarchical structure
+    assert not torch_op_buffer, "Unmatched torch_op events remaining after trace scan"
     events = {
         "cpu": {
-            "ops": op_events_by_ext_id,
+            "cpu_ops": cpu_op_events_by_ext_id,
+            "torch_ops": torch_op_events_by_ext_id,
             "launches": cuda_launch_events_by_corr
         },
         "gpu": {
@@ -863,21 +877,24 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
         List of event sequence dictionaries with keys: kernel, cuda_launch, cpu_op.
     """
     gpu_events = events["gpu"]
-    cpu_ops = events["cpu"]["ops"]
+    cpu_ops = events["cpu"]["cpu_ops"]
     cuda_launches = events["cpu"]["launches"]
+    torch_ops = events["cpu"].get("torch_ops", {})
     kernel_events = gpu_events["kernels"]
 
     sequences = []
     for kernel in kernel_events:
         external_id = kernel["external_id"]
         correlation = kernel["correlation"]
-        cpu_op = cpu_ops[external_id] 
-        cuda_launch = cuda_launches[correlation] 
-        
+        cpu_op = cpu_ops[external_id]
+        cuda_launch = cuda_launches[correlation]
+        torch_op = torch_ops.get(external_id)
+
         sequences.append({
             "kernel": kernel,
             "cuda_launch": cuda_launch,
             "cpu_op": cpu_op,
+            "torch_op": torch_op,
         })
     
     validate_sequences(sequences)
@@ -914,6 +931,14 @@ def calculate_sequence_metrics(sequences: List[Dict], metrics: List[str]) -> Lis
             launch_tax = kernel["ts"] - t_api
             assert launch_tax >= 0, f"Negative launch tax detected: kernel.ts={kernel['ts']}, cu(da)LaunchKernel.ts={t_api}, tax={launch_tax}"
             seq["launch_tax"] = launch_tax
+
+        if "py_tax" in metrics:
+            torch_op = seq["torch_op"]
+            assert torch_op is not None, "torch_op missing for py_tax"
+            t_py = torch_op["ts"]
+            py_tax = t_op - t_py
+            assert py_tax >= 0, f"Negative py_tax detected: cpu_op.ts={t_op}, torch_op.ts={t_py}, tax={py_tax}"
+            seq["py_tax"] = py_tax
 
     return sequences
 

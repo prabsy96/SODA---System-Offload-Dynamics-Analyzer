@@ -133,7 +133,7 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
     # This adapts baremetal data to the format expected by utils.link_sequences()
     events = {
         "cpu": {
-            "ops": {
+            "cpu_ops": {
                 # Map external_id -> cpu_op (preserves original linking)
                 external_id: cpu_op
             },
@@ -173,7 +173,11 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
     # Aggregate using shared utility (same as PyTorch pipeline)
     # Deduplicate + aggregate by kernel signature (adds launch_tax stats)
     grouped_seqs_by_id_dict = utils.group_sequences_by_identity(sequences_after_warmup)
-    aggregated_sequences = utils.aggregate_sequences(grouped_seqs_by_id_dict, metrics=["launch_tax"])
+    aggregated_sequences = utils.aggregate_sequences(
+        grouped_seqs_by_id_dict,
+        metrics=["launch_tax"],
+        event_types=["kernel", "cpu_op", "cuda_launch"],
+    )
     
     # Baremetal runs same kernel config multiple times, so should have exactly 1 unique kernel
     if len(aggregated_sequences) != 1:
