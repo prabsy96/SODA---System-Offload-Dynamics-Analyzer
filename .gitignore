@@ -48,3 +48,5 @@ traces/
 *.tmp
 *.json
 *dev*
+*.csv
+*.pdf

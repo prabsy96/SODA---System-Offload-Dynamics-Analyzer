@@ -48,7 +48,6 @@ struct GemmParams {
     bool has_algo_index;
     int algo_id;  // Algorithm ID to use directly (from cublasLtMatmulAlgoGetIds)
     bool has_algo_id;
-    bool list_algo_ids;  // If true, just list all algorithm IDs and exit
     bool null_kernel;  // If true, launch empty kernel to measure baseline launch tax
 };
     
@@ -74,7 +73,6 @@ void parse_args(int argc, char** argv, GemmParams& params) {
     params.algo_index = 0;
     params.has_algo_id = false;
     params.algo_id = 0;
-    params.list_algo_ids = false;
     params.null_kernel = false;
     
     for (int i = 1; i < argc; i++) {
@@ -120,9 +118,6 @@ void parse_args(int argc, char** argv, GemmParams& params) {
             // Algorithm ID to use directly (from cublasLtMatmulAlgoGetIds)
             params.algo_id = std::atoi(argv[++i]);
             params.has_algo_id = true;
-        } else if (arg == "--list_algo_ids") {
-            // List all available algorithm IDs and exit
-            params.list_algo_ids = true;
         } else if (arg == "--null_kernel") {
             // Launch empty kernel to measure baseline launch tax
             params.null_kernel = true;
@@ -163,50 +158,7 @@ cublasOperation_t get_transpose_op(char trans) {
     return (trans == 'T' || trans == 't') ? CUBLAS_OP_T : CUBLAS_OP_N;
 }
 
-void list_all_algorithm_ids(const GemmParams& params) {
-    // Get CUDA types
-    cudaDataType_t cuda_dtype = get_cuda_dtype(params.dtype);
-    cublasComputeType_t compute_type = get_compute_type(params.dtype);
-    
-    // Create cuBLASLt handle
-    cublasLtHandle_t handle;
-    CHECK_CUBLASLT(cublasLtCreate(&handle));
-    
-    // Query all algorithm IDs
-    const int max_algo_ids = 10000;  // Large number to get all IDs
-    int algo_ids[max_algo_ids];
-    int returned_count = 0;
-    
-    cublasStatus_t status = cublasLtMatmulAlgoGetIds(
-        handle,
-        compute_type,
-        cuda_dtype,  // scaleType
-        cuda_dtype,  // Atype
-        cuda_dtype,  // Btype
-        cuda_dtype,  // Ctype
-        cuda_dtype,  // Dtype
-        max_algo_ids,
-        algo_ids,
-        &returned_count
-    );
-    
-    if (status != CUBLAS_STATUS_SUCCESS) {
-        std::cerr << "Error: Failed to get algorithm IDs: " << status << std::endl;
-        CHECK_CUBLASLT(cublasLtDestroy(handle));
-        exit(EXIT_FAILURE);
-    }
-    
-    std::cout << "Found " << returned_count << " algorithm IDs:" << std::endl;
-    for (int i = 0; i < returned_count; i++) {
-        std::cout << algo_ids[i];
-        if (i < returned_count - 1) std::cout << " ";
-    }
-    std::cout << std::endl;
-    
-    CHECK_CUBLASLT(cublasLtDestroy(handle));
-}
-
-__global__ void null_kernel() {
+__global__ void __null_kernel__() {
     // Empty kernel to measure baseline launch tax
 }
 
@@ -214,12 +166,12 @@ void run_null_kernel(const GemmParams& params) {
     CHECK_CUDA(cudaDeviceSynchronize());
     
     for (int i = 0; i < params.warmup; i++) {
-        null_kernel<<<1, 1>>>();
+        __null_kernel__<<<1, 1>>>();
         CHECK_CUDA(cudaDeviceSynchronize());
     }
     
     for (int i = 0; i < params.runs; i++) {
-        null_kernel<<<1, 1>>>();
+        __null_kernel__<<<1, 1>>>();
         CHECK_CUDA(cudaDeviceSynchronize());
     }
 }
@@ -229,7 +181,14 @@ void run_gemm(const GemmParams& params) {
         run_null_kernel(params);
         return;
     }
-    
+
+    // === Input tensor setup & staging ===
+    // High-level flow here:
+    //   1. Unpack job metadata (dims, strides, dtype, batch).
+    //   2. Size device buffers for A/B/C based on layout hints.
+    //   3. Allocate and zero the buffers so cuBLASLt sees deterministic inputs.
+    // The next section configures cuBLASLt descriptors/preference knobs around these pointers.
+
     std::cout << "Running GEMM: M=" << params.m << " N=" << params.n << " K=" << params.k 
               << " order_a=" << params.order_a << " order_b=" << params.order_b
               << " trans_a=" << params.trans_a << " trans_b=" << params.trans_b
@@ -273,7 +232,13 @@ void run_gemm(const GemmParams& params) {
     CHECK_CUDA(cudaMemset(d_A, 0, size_A));
     CHECK_CUDA(cudaMemset(d_B, 0, size_B));
     CHECK_CUDA(cudaMemset(d_C, 0, size_C));
-    
+
+    // === cuBLASLt descriptor & preference setup ===
+    // Outline:
+    //   1. Create handle + matrix layouts mirroring PyTorch (transposes, batch strides, row/col order).
+    //   2. Configure matmul descriptor and execution preference (workspace budget, pointer alignment).
+    //   3. Allocate workspace buffer that matches the preferred size.
+
     // Create cuBLASLt handle
     cublasLtHandle_t handle;
     CHECK_CUBLASLT(cublasLtCreate(&handle));
@@ -490,7 +455,11 @@ void run_gemm(const GemmParams& params) {
     
     void* workspace = nullptr;
     CHECK_CUDA(cudaMalloc(&workspace, workspace_size));
-    
+
+    // === Algorithm selection ===
+    // Bind a specific cuBLASLt plan either via explicit algo_id/algo_index or by querying
+    // heuristics (PyTorch-style) and choosing index 0 when no override is provided.
+
     // Select algorithm: either use direct ID or from heuristic results
     cublasLtMatmulAlgo_t selected_algo;
     
@@ -601,6 +570,7 @@ void run_gemm(const GemmParams& params) {
     float alpha = params.alpha;
     float beta = params.beta;
     
+    // === Execution loops (warmup + measurement) ===
     // Warmup runs
     for (int i = 0; i < params.warmup; i++) {
         CHECK_CUBLASLT(cublasLtMatmul(handle, matmul_desc,
@@ -644,12 +614,7 @@ void run_gemm(const GemmParams& params) {
 int main(int argc, char** argv) {
     GemmParams params;
     parse_args(argc, argv, params);
-    
-    if (params.list_algo_ids) {
-        list_all_algorithm_ids(params);
-        return 0;
-    }
-    
+
     run_gemm(params);
     return 0;
 }

@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from soda import SodaAnalyzer, ModelTracer, SodaLogger
+from soda import SodaAnalyzer, ModelTracer
 from soda.common import utils
 
 
@@ -23,7 +23,9 @@ def main() -> None:
     """Example usage of SODA programmatically."""
     ensure_env_loaded()
 
-    model = "meta-llama/Llama-3.2-3B"
+    # model = "meta-llama/Llama-3.2-3B"
+    # model = "meta-llama/Llama-3.2-1B"
+    model = "gpt2"
     cli_args = [
         "--model", model,
         "--output-dir", str(Path(os.environ.get("SODA_OUTPUT", "."))),
@@ -33,6 +35,7 @@ def main() -> None:
         "--seq-len", "128",
         "--max-new-tokens", "1",
         "--batch-size", "1",
+        "--warmup", "5",
         # Extra parser knobs (fusion/microbench/etc.) left at defaults:
         # "--fusion", "2",
         # "--prox-score", "1.0",
@@ -45,7 +48,6 @@ def main() -> None:
     args = utils.parse_and_validate_args(cli_args)
 
     tracer = ModelTracer(args=args)
-    SodaLogger(tracer.output_dir, is_console=True, is_file=True)
     tracer.run()
 
     analyzer = SodaAnalyzer(tracer=tracer, args=args)

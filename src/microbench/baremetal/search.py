@@ -167,7 +167,7 @@ def search_cublas_algos_offline():
     for job in jobs:
 
         # Skip null kernel jobs 
-        if job["name"] == "__null__":
+        if job["name"] == "__null_kernel__":
             job["cublas_index"] = None
             continue
         
@@ -193,7 +193,7 @@ def search_cublas_algos_offline():
     jobs_data["jobs"] = jobs
 
     # Update summary
-    jobs_data["summary"]["offline_cublas_search"] = {
+    jobs_data["summary"]["offline_cublas_algo_search"] = {
         "algos_found": num_algos_found,
         "algos_not_found": num_algos_not_found,
         "total_jobs": num_jobs_searched

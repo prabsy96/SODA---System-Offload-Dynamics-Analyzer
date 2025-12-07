@@ -347,8 +347,8 @@ class Kernel:
         )
 
 
-class CPUOp:
-    """CPU operation class."""
+class ATenOp:
+    """ATen operation class."""
     def __init__(self, name: str = "unknown",
                  input_dims: Optional[List[List[int]]] = [],
                  input_strides: Optional[List[List[int]]] = [],
@@ -361,7 +361,7 @@ class CPUOp:
                  min_dur: Optional[float] = None,
                  max_dur: Optional[float] = None,
                  all_dur: Optional[List[float]] = None):
-        """Initialize CPU operation."""
+        """Initialize ATen operation."""
         self.name = name
         self.input_dims = input_dims
         self.input_strides = input_strides
@@ -405,7 +405,7 @@ class CPUOp:
     
     def get_signature(self, full: bool = False) -> dict:
         """
-        Extract canonical operation signature (input conditions) from cpu_op.
+        Extract canonical operation signature (input conditions) from aten_op.
         
         This signature uniquely identifies an operation's inputs and determines
         which kernel should be dispatched. Used consistently across:
@@ -436,14 +436,14 @@ class CPUOp:
 
         return signature
     
-    def compare(self, other: 'CPUOp', show_table: bool = False, title: str = "CPU op comparison") -> bool:
+    def compare(self, other: 'ATenOp', show_table: bool = False, title: str = "ATen op comparison") -> bool:
         """Compare this CPU op with another CPU op and return True if all fields match.
         
         Compares: name, input_dims, input_strides, input_type, and concrete_inputs
         (alpha/beta scalars for addmm operations).
         
         Args:
-            other: Other CPUOp object to compare against
+            other: Other ATenOp object to compare against
             show_table: If True, print comparison table with match indicators
             title: Optional custom title for the comparison table
         
@@ -480,7 +480,7 @@ class CPUOp:
         if self.name == "aten::addmm":
             # For addmm, compare alpha/beta separately
             if len(self.concrete_inputs) >= 5 and len(other.concrete_inputs) >= 5:
-                # Parse alpha/beta scalars using CPUOp method
+                # Parse alpha/beta scalars using ATenOp method
                 actual_alpha, actual_beta = self.get_alpha_beta()
                 target_alpha, target_beta = other.get_alpha_beta()
                 
@@ -509,38 +509,38 @@ class CPUOp:
         return match
     
     @classmethod
-    def from_dict(cls, cpu_op_dict: Optional[Dict[str, Any]]) -> Optional['CPUOp']:
-        """Create CPUOp from dictionary."""
-        if not cpu_op_dict:
+    def from_dict(cls, aten_op_dict: Optional[Dict[str, Any]]) -> Optional['ATenOp']:
+        """Create ATenOp from dictionary."""
+        if not aten_op_dict:
             return None
         return cls(
-            name=cpu_op_dict.get("name"),
-            input_dims=cpu_op_dict.get("input_dims"),
-            input_strides=cpu_op_dict.get("input_strides"),
-            input_type=cpu_op_dict.get("input_type"),
-            concrete_inputs=cpu_op_dict.get("concrete_inputs"),
+            name=aten_op_dict.get("name"),
+            input_dims=aten_op_dict.get("input_dims"),
+            input_strides=aten_op_dict.get("input_strides"),
+            input_type=aten_op_dict.get("input_type"),
+            concrete_inputs=aten_op_dict.get("concrete_inputs"),
 
             # Other fields
-            external_id=cpu_op_dict.get("external_id"),
-            ts=cpu_op_dict.get("ts"),
-            dur=cpu_op_dict.get("dur"),
-            avg_dur=cpu_op_dict.get("avg_dur"),
-            min_dur=cpu_op_dict.get("min_dur"),
-            max_dur=cpu_op_dict.get("max_dur"),
-            all_dur=cpu_op_dict.get("all_dur")
+            external_id=aten_op_dict.get("external_id"),
+            ts=aten_op_dict.get("ts"),
+            dur=aten_op_dict.get("dur"),
+            avg_dur=aten_op_dict.get("avg_dur"),
+            min_dur=aten_op_dict.get("min_dur"),
+            max_dur=aten_op_dict.get("max_dur"),
+            all_dur=aten_op_dict.get("all_dur")
         )
 
 
 class Sequence:
-    """Sequence class containing cpu_op and kernel."""
-    def __init__(self, cpu_op: Optional[CPUOp] = None, kernel: Optional[Kernel] = None):
-        """Initialize sequence with cpu_op and kernel."""
-        self.cpu_op = cpu_op
+    """Sequence class containing aten_op and kernel."""
+    def __init__(self, aten_op: Optional[ATenOp] = None, kernel: Optional[Kernel] = None):
+        """Initialize sequence with aten_op and kernel."""
+        self.aten_op = aten_op
         self.kernel = kernel
     
     def get_str(self) -> str:
         """Get sequence string representation: "{op_name} -> {kernel_name}"."""
-        return f"{self.cpu_op.name} -> {clean_kernel_name(self.kernel.name)}"
+        return f"{self.aten_op.name} -> {clean_kernel_name(self.kernel.name)}"
     
     @classmethod
     def from_dict(cls, sequence_dict: Optional[Dict[str, Any]]) -> Optional['Sequence']:
@@ -548,6 +548,6 @@ class Sequence:
         if not sequence_dict:
             return None
 
-        cpu_op = CPUOp.from_dict(sequence_dict.get("cpu_op"))
+        aten_op = ATenOp.from_dict(sequence_dict.get("aten_op"))
         kernel = Kernel.from_dict(sequence_dict.get("kernel"))
-        return cls(cpu_op=cpu_op, kernel=kernel)
+        return cls(aten_op=aten_op, kernel=kernel)

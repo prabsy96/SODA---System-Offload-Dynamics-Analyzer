@@ -90,9 +90,9 @@ class SodaAnalyzer:
             - sequences: Event sequences
             - avg_kernel_dur: Average kernel duration results
         """
-        LOGGER.info("=== Analyzing Trace Data ===")
-        LOGGER.info(f"Analyzing {len(self.sequences)} event sequences")
-        sequences = utils.calculate_per_seq_launch_tax(list(self.sequences))
+        print("=== Analyzing Trace Data ===")
+        print(f"Analyzing {len(self.sequences)} event sequences")
+        sequences = utils.calculate_sequence_metrics(list(self.sequences), metrics=["launch_tax", "xlat_tax"])
         
         # Analyze per-stream metrics
         stream_info = utils.analyze_per_stream(self.events)
@@ -108,18 +108,25 @@ class SodaAnalyzer:
         
         # Kernel metrics
         kernel_exec_time = utils.calculate_kernel_exec_time(self.events)
-        total_launch_tax = utils.calculate_total_launch_tax(sequences)
-        avg_launch_tax = utils.calculate_avg_launch_tax(sequences)
+        total_launch_tax = utils.calculate_total_tax(sequences, "launch")
+        avg_launch_tax = utils.calculate_avg_tax(sequences, "launch")
+        total_xlat_tax = utils.calculate_total_tax(sequences, "xlat")
+        avg_xlat_tax = utils.calculate_avg_tax(sequences, "xlat")
         avg_kernel_dur = utils.get_average_kernel_duration(self.events)
         top_k_kernels = utils.get_top_k_kernels(self.events, k=3)
         
         # Fusion analysis
         fusion_results = None
         if self.args.fusion:
-            LOGGER.info("=== Kernel Fusion Analysis ===")
+            print("=== Kernel Fusion Analysis ===")
             fusion_results = {}
             for f in self.args.fusion:
-                fusion_results[f] = utils.analyze_kernel_fusion_candidates(sequences, f, self.args.prox_score, logger=LOGGER)
+                fusion_results[f] = utils.analyze_kernel_fusion_candidates(
+                    sequences,
+                    f,
+                    self.args.prox_score,
+                    logger=None
+                )
 
         # Framework overhead (CPU-side latency)
         framework_overhead = utils.calculate_framework_tax(
@@ -150,8 +157,10 @@ class SodaAnalyzer:
             "total_kernel_exec_time_ms": utils.us_to_ms(kernel_exec_time["total"]),
             "num_total_kernels": len(self.events["gpu"]["kernels"]),
             "avg_kernel_exec_time_ms": utils.us_to_ms(kernel_exec_time["avg"]),
-            "total_kernel_launch_tax_ms": utils.us_to_ms(total_launch_tax),
-            "avg_kernel_launch_tax_ms": utils.us_to_ms(avg_launch_tax),
+            "total_xlat_tax_ms": utils.us_to_ms(total_xlat_tax),
+            "avg_xlat_tax_ms": utils.us_to_ms(avg_xlat_tax),
+            "total_launch_tax_ms": utils.us_to_ms(total_launch_tax),
+            "avg_launch_tax_ms": utils.us_to_ms(avg_launch_tax),
         }
         
         self.results = {
@@ -178,64 +187,66 @@ class SodaAnalyzer:
         top_k_kernels = self.results["top_k_kernels"]
         
         # --- Enhanced Reporting ---
-        LOGGER.info("")
-        LOGGER.info("=== Performance Metrics ===")
-        LOGGER.info(f"\t* Inference runtime (ms): {metrics['inference_time_ms']:.4f}")
+        print("")
+        print("=== Performance Metrics ===")
+        print(f"\t* Inference runtime (ms): {metrics['inference_time_ms']:.4f}")
         
         # Framework Tax Analysis
         framework = metrics["framework_overhead"]
         timing = metrics["inference_time_breakdown"]
-        LOGGER.info("")
-        LOGGER.info("=== Framework Tax Analysis ===")
-        LOGGER.info(f"\t* T_exposed (Framework Tax): {framework['T_exposed_ms']:.4f} ms ({framework['T_exposed_percent']:.1f}%)")
-        LOGGER.info(f"\t* T_gpu_busy (GPU Active Time): {metrics['gpu_busy_time_ms']:.4f} ms ({framework['T_gpu_busy_percent']:.1f}%)")
+        print("")
+        print("=== Framework Tax Analysis ===")
+        print(f"\t* T_exposed (Framework Tax): {framework['T_exposed_ms']:.4f} ms ({framework['T_exposed_percent']:.1f}%)")
+        print(f"\t* T_gpu_busy (GPU Active Time): {metrics['gpu_busy_time_ms']:.4f} ms ({framework['T_gpu_busy_percent']:.1f}%)")
         
         # Timing breakdown
-        LOGGER.info(f"\t  - Torch measured inference time (ms): {timing['torch_measured_inference_time_ms']:.4f}")
-        LOGGER.info(f"\t  - Trace calculated inference time (ms): {timing['trace_calculated_inference_time_ms']:.4f}")
-        LOGGER.info(f"\t  - Profiler overhead (ms): {timing['profiler_overhead_ms']:.4f}")
+        print(f"\t  - Torch measured inference time (ms): {timing['torch_measured_inference_time_ms']:.4f}")
+        print(f"\t  - Trace calculated inference time (ms): {timing['trace_calculated_inference_time_ms']:.4f}")
+        print(f"\t  - Profiler overhead (ms): {timing['profiler_overhead_ms']:.4f}")
         
-        LOGGER.info("")
-        LOGGER.info("=== GPU Metrics ===")
-        LOGGER.info(f"\t* Total kernel execution time (ms): {metrics['total_kernel_exec_time_ms']:.4f}")
-        LOGGER.info(f"\t* GPU busy time (concurrent-aware) (ms): {metrics['gpu_busy_time_ms']:.4f}")
-        LOGGER.info(f"\t* GPU idle time (ms): {metrics['gpu_idle_time_ms']:.4f}")
-        LOGGER.info(f"\t* GPU utilization: {metrics['gpu_utilization_percent']:.2f}%")
-        LOGGER.info(f"\t* Number of kernels: {metrics['num_total_kernels']}")
-        LOGGER.info(f"\t* Active streams: {metrics['active_streams']}")
+        print("")
+        print("=== GPU Metrics ===")
+        print(f"\t* Total kernel execution time (ms): {metrics['total_kernel_exec_time_ms']:.4f}")
+        print(f"\t* GPU busy time (concurrent-aware) (ms): {metrics['gpu_busy_time_ms']:.4f}")
+        print(f"\t* GPU idle time (ms): {metrics['gpu_idle_time_ms']:.4f}")
+        print(f"\t* GPU utilization: {metrics['gpu_utilization_percent']:.2f}%")
+        print(f"\t* Number of kernels: {metrics['num_total_kernels']}")
+        print(f"\t* Active streams: {metrics['active_streams']}")
         
-        LOGGER.info("")
-        LOGGER.info("=== Launch & Queue Latency (TKLQT) ===")
-        LOGGER.info(f"\t* Total TKLQT (ms): {metrics['total_kernel_launch_tax_ms']:.4f}")
+        print("")
+        print("=== Taxes ===")
+        print(f"\t* Total xlat tax (t_op -> t_api) (ms): {metrics['total_xlat_tax_ms']:.4f}")
+        print(f"\t* Total launch tax (+ queue latency) (ms): {metrics['total_launch_tax_ms']:.4f}")
         if metrics['num_total_kernels'] > 0:
-            LOGGER.info(f"\t* Avg. TKLQT per kernel (ms): {metrics['avg_kernel_launch_tax_ms']:.4f}")
-            LOGGER.info(f"\t* Avg. execution time per kernel (ms): {metrics['avg_kernel_exec_time_ms']:.4f}")
+            print(f"\t* Avg. xlat tax per kernel (ms): {metrics['avg_xlat_tax_ms']:.4f}")
+            print(f"\t* Avg. launch tax (+ queue latency) per kernel (ms): {metrics['avg_launch_tax_ms']:.4f}")
+            print(f"\t* Avg. execution time per kernel (ms): {metrics['avg_kernel_exec_time_ms']:.4f}")
         
-        LOGGER.info("")
+        print("")
         # --- Per-Stream Breakdown ---
-        LOGGER.info("=== Per-Stream Analysis ===")
+        print("=== Per-Stream Analysis ===")
         for stream_id, data in stream_info.items():
-            LOGGER.info(
+            print(
                 f"\t* Stream {stream_id}: {data['op_count']} ops "
                 f"({data['kernel_count']} kernels), "
                 f"Busy Time: {utils.us_to_ms(data['true_gpu_busy_time']):.4f} ms"
             )
         
-        LOGGER.info("")
+        print("")
         # Top-K kernels 
         if top_k_kernels["by_frequency"]:
-            LOGGER.info("=== Top-3 Kernels by Frequency ===")
+            print("=== Top-3 Kernels by Frequency ===")
             for i, (name, data) in enumerate(top_k_kernels["by_frequency"], 1):
-                LOGGER.info(
+                print(
                     f"\t* #{i}: {name} "
                     f"(Frequency: {int(data['frequency'])}, "
                     f"Total Duration: {utils.us_to_ms(data['duration']):.4f} ms)"
                 )
             
-            LOGGER.info("")
-            LOGGER.info("=== Top-3 Kernels by Duration ===")
+            print("")
+            print("=== Top-3 Kernels by Duration ===")
             for i, (name, data) in enumerate(top_k_kernels["by_duration"], 1):
-                LOGGER.info(
+                print(
                     f"\t* #{i}: {name} "
                     f"(Total Duration: {utils.us_to_ms(data['duration']):.4f} ms, "
                     f"Frequency: {int(data['frequency'])})"
@@ -314,7 +325,7 @@ class SodaAnalyzer:
         # Save to file
         utils.save_json(self.report_file, output)
         
-        LOGGER.info(f"Metrics exported to: {self.report_file}")
+        print(f"Metrics exported to: {self.report_file}")
         return str(self.report_file)
     
     def run(self) -> str:
@@ -501,7 +512,7 @@ class ModelTracer:
         """
         Convert Linear layer weights to FP8 E4M3 for inference if quantization config is unavailable.
         """
-        LOGGER.info("Converting linear layer weights to float8_e4m3fn...")
+        print("Converting linear layer weights to float8_e4m3fn...")
 
         converted_count = 0
         for _, module in model.named_modules():
@@ -512,7 +523,7 @@ class ModelTracer:
                     module.weight.data = clamped.to(torch.float8_e4m3fn)
                     converted_count += 1
 
-        LOGGER.info(f"Converted {converted_count} linear layers to FP8 E4M3.")
+        print(f"Converted {converted_count} linear layers to FP8 E4M3.")
         return model
 
     def load_encoder(self) -> Tuple[transformers.PreTrainedModel, transformers.PreTrainedTokenizer]:
@@ -704,7 +715,7 @@ class ModelTracer:
         
         # Load trace data into memory immediately
         self.trace_data = utils.load_json(self.trace_file)
-        LOGGER.info(f"Chrome trace file generated at: {self.trace_file}")
+        print(f"Chrome trace file generated at: {self.trace_file}")
 
     def process(self) -> None:
         """
@@ -712,7 +723,7 @@ class ModelTracer:
         """
         self.events = utils.collect_events(self.trace_data)
         self.sequences = utils.link_sequences(self.events)
-        LOGGER.info(f"Collected {len(self.sequences)} event sequences.")
+        print(f"Collected {len(self.sequences)} event sequences.")
 
     def trace_forward_pass_for_whisper(self) -> None:
         """
@@ -765,7 +776,7 @@ class ModelTracer:
         Args:
             inputs: A dictionary of tokenized inputs.
         """
-        LOGGER.info("=== Profiling Model Forward Pass ===")
+        print("=== Profiling Model Forward Pass ===")
         
         # Warm-up runs
         with torch.no_grad():
@@ -814,7 +825,7 @@ class ModelTracer:
         Args:
             inputs: A dictionary of tokenized inputs.
         """
-        LOGGER.info("=== Profiling Model Forward Pass ===")
+        print("=== Profiling Model Forward Pass ===")
         
         # Warm-up runs
         with torch.no_grad():
@@ -863,9 +874,7 @@ def main() -> int:
         # Create tracer (derives experiment/output paths internally)
         print(f"Loading model: {args.model} with precision {args.precision}")
         tracer = ModelTracer(args=args)
-        
-        # Setup logger for tracer
-        SodaLogger(tracer.output_dir, is_console=True, is_file=True)
+        print(f"Results will be saved to: {tracer.output_dir.resolve()}")
         
         # Run the tracing pipeline
         tracer.run()

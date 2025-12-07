@@ -28,19 +28,19 @@ def compare_sequences(target_sequences: list, actual_sequences: list, title: str
         # Get sequence string
         sequence = target_sequence.get_str()
         
-        # Get cpu_op and kernel
-        target_cpu_op = target_sequence.cpu_op
+        # Get aten_op and kernel
+        target_aten_op = target_sequence.aten_op
         target_kernel = target_sequence.kernel
-        actual_cpu_op = actual_sequence.cpu_op
+        actual_aten_op = actual_sequence.aten_op
         actual_kernel = actual_sequence.kernel
         
         # Print sequence string
         print_utils.iter_start(f"Sequence: {sequence}")
         
-        # Compare cpu_op input conditions 
-        assert actual_cpu_op is not None and target_cpu_op is not None, "Missing cpu_op in sequence"
-        cpu_op_match = actual_cpu_op.compare(target_cpu_op, show_table=False, title=f"{title} CPU op")
-        assert cpu_op_match, f"CPU op mismatch: target={target_cpu_op.name}, actual={actual_cpu_op.name}"
+        # Compare aten_op input conditions 
+        assert actual_aten_op is not None and target_aten_op is not None, "Missing aten_op in sequence"
+        aten_op_match = actual_aten_op.compare(target_aten_op, show_table=False, title=f"{title} ATen op")
+        assert aten_op_match, f"ATen op mismatch: target={target_aten_op.name}, actual={actual_aten_op.name}"
         
         # Compare kernels
         assert actual_kernel is not None and target_kernel is not None, "Missing kernel in sequence"
@@ -48,6 +48,6 @@ def compare_sequences(target_sequences: list, actual_sequences: list, title: str
         kernel_match = results["match"]
         assert kernel_match, f"Kernel mismatch: target={target_kernel.name}, actual={actual_kernel.name}"
         
-        summary.append([sequence, cpu_op_match, kernel_match])
+        summary.append([sequence, aten_op_match, kernel_match])
     
-    print_utils.comp_table("Sequence comparison", ["Sequence", "cpu_op", "kernel"], summary)
+    print_utils.comp_table("Sequence comparison", ["Sequence", "aten_op", "kernel"], summary)

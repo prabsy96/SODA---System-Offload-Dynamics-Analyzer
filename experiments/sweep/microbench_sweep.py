@@ -9,38 +9,13 @@ below to try different shapes or precisions.
 
 import os
 import sys
-from argparse import Namespace
 from itertools import product
 from pathlib import Path
 import torch
-from soda import ModelTracer, SodaLogger
+from soda import ModelTracer
 from soda.microbench.microbench import SodaMicrobench
 from soda.common import utils
-
-# Each config declares the model to test and the BS/SL sweeps to run.
-CONFIGS = {
-    "gpt2_short_ctx": {
-        "model_name": "gpt2",
-        # "batch_sizes": sorted([1, 2, 4, 8], reverse=True),
-        # "seq_lens": sorted([128, 256, 512, 1024], reverse=True),
-        "batch_sizes": sorted([1, 2], reverse=True),
-        "seq_lens": sorted([128, 256], reverse=True),
-        "max_new_toks": [1],
-    },
-    # "llama_3.2_1b_short_ctx": {
-    #     "model_name": "meta-llama/Llama-3.2-1B",
-    #     "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
-    #     "seq_lens": sorted([128, 256, 512, 1024, 2048], reverse=True),
-    #     "max_new_toks": [1],
-    # },
-    # "tinyllama_1.1b": {
-    #     "model_name": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    #     "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
-    #     "seq_lens": sorted([128, 256, 512, 1024, 2048], reverse=True),
-    #     "max_new_toks": [1],
-    # },
-}
-
+from experiments.sweep.config import PARAMS, SWEEP_CONFIGS
 
 def ensure_env_loaded() -> None:
     """Exit early if env.sh was not sourced."""
@@ -53,10 +28,13 @@ def ensure_env_loaded() -> None:
 def main() -> None:
     ensure_env_loaded()
 
-    compile_type = "eager"
-    precision = "bfloat16"
+    compile_type = PARAMS["compile_type"]
+    precision = PARAMS["precision"]
+    device = PARAMS["device"]
+    warmup = PARAMS["microbench_warmup"]
+    runs = PARAMS["microbench_runs"]
 
-    for config_name, cfg in CONFIGS.items():
+    for config_name, cfg in SWEEP_CONFIGS.items():
         model = cfg["model_name"]
         batch_sizes = cfg["batch_sizes"]
         seq_lens = cfg["seq_lens"]
@@ -77,16 +55,15 @@ def main() -> None:
                 "--max-new-tokens", str(max_new_tokens),
                 "--precision", precision,
                 "--compile-type", compile_type,
-                "--device", "cuda",
+                "--device", device,
                 "--microbench",
-                "--warmup", "200",
-                "--runs", "100",
+                "--warmup", warmup,
+                "--runs", runs,
             ]
             args = utils.parse_and_validate_args(cli_args)
 
             try:
                 tracer = ModelTracer(args=args)
-                SodaLogger(tracer.output_dir, is_console=True, is_file=True)
                 tracer.run()
 
                 microbench = SodaMicrobench(tracer=tracer, args=args)
