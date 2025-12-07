@@ -44,11 +44,12 @@ struct GemmParams {
     int warmup;
     int runs;
     int batch;  // For bmm, default 1
-    int algo_index;  // Algorithm index to use (for matching, from heuristic results)
-    bool has_algo_index;
+    int heuristic_index;  // Heuristic index to use (for matching, from cublasLt heuristics)
+    bool use_heuristic_index;
     int algo_id;  // Algorithm ID to use directly (from cublasLtMatmulAlgoGetIds)
     bool has_algo_id;
     bool null_kernel;  // If true, launch empty kernel to measure baseline launch tax
+    bool list_heuristics; // If true, just list available heuristic algos and exit
 };
     
 void parse_args(int argc, char** argv, GemmParams& params) {
@@ -69,11 +70,12 @@ void parse_args(int argc, char** argv, GemmParams& params) {
     params.warmup = 200;
     params.runs = 1000;
     params.batch = 1;
-    params.has_algo_index = false;
-    params.algo_index = 0;
+    params.use_heuristic_index = false;
+    params.heuristic_index = 0;
     params.has_algo_id = false;
     params.algo_id = 0;
     params.null_kernel = false;
+    params.list_heuristics = false;
     
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -110,14 +112,18 @@ void parse_args(int argc, char** argv, GemmParams& params) {
             params.runs = std::atoi(argv[++i]);
         } else if (arg == "--batch" && i+1 < argc) {
             params.batch = std::atoi(argv[++i]);
-        } else if (arg == "--algo_index" && i+1 < argc) {
-            // Algorithm index to use (for matching, from heuristic results)
-            params.algo_index = std::atoi(argv[++i]);
-            params.has_algo_index = true;
+        } else if (arg == "--heuristic_index" && i+1 < argc) {
+            // Heuristic index to use (matching PyTorch kernels in search)
+            params.heuristic_index = std::atoi(argv[++i]);
+            params.use_heuristic_index = true;
         } else if (arg == "--algo_id" && i+1 < argc) {
             // Algorithm ID to use directly (from cublasLtMatmulAlgoGetIds)
             params.algo_id = std::atoi(argv[++i]);
             params.has_algo_id = true;
+        } else if (arg == "--list_heuristics") {
+            // Only list available heuristic algorithms, do not run matmul
+            params.list_heuristics = true;
+            params.use_heuristic_index = true; // to request full heuristic list
         } else if (arg == "--null_kernel") {
             // Launch empty kernel to measure baseline launch tax
             params.null_kernel = true;
@@ -158,30 +164,84 @@ cublasOperation_t get_transpose_op(char trans) {
     return (trans == 'T' || trans == 't') ? CUBLAS_OP_T : CUBLAS_OP_N;
 }
 
+class MatBufs {
+public:
+    void* d_A{nullptr};
+    void* d_B{nullptr};
+    void* d_C{nullptr};
+    size_t size_A{0};
+    size_t size_B{0};
+    size_t size_C{0};
+
+    MatBufs(const GemmParams& params, size_t elem_size) {
+        int M = params.m;
+        int N = params.n;
+        int K = params.k;
+        int lda = params.lda;
+        int ldb = params.ldb;
+        int ldc = params.ldc;
+        int batch = params.batch;
+
+        // Allocate device memory
+        // For batched operations, allocate batch * matrix_size
+        // Size depends on physical layout (row-major vs col-major)
+        // Row-major [M, K] with ld: size = M * ld
+        // Col-major [M, K] with ld: size = K * ld (since ld is stride between columns)
+        size_A = batch * M * lda * elem_size;
+        if (params.order_b == "col") {
+            size_B = batch * N * ldb * elem_size;
+        } else {
+            size_B = batch * K * ldb * elem_size;
+        }
+        size_C = batch * M * ldc * elem_size;
+
+        CHECK_CUDA(cudaMalloc(&d_A, size_A));
+        CHECK_CUDA(cudaMalloc(&d_B, size_B));
+        CHECK_CUDA(cudaMalloc(&d_C, size_C));
+        CHECK_CUDA(cudaMemset(d_A, 0, size_A));
+        CHECK_CUDA(cudaMemset(d_B, 0, size_B));
+        CHECK_CUDA(cudaMemset(d_C, 0, size_C));
+    }
+
+    ~MatBufs() {
+        if (d_A) cudaFree(d_A);
+        if (d_B) cudaFree(d_B);
+        if (d_C) cudaFree(d_C);
+    }
+
+    MatBufs(const MatBufs&) = delete;
+    MatBufs& operator=(const MatBufs&) = delete;
+};
+
+class WorkspaceBuffer {
+public:
+    void* ptr{nullptr};
+    size_t bytes{0};
+
+    WorkspaceBuffer() {
+        const size_t DEFAULT_WORKSPACE_KIB = 1024;  // PyTorch default: 1024 KiB = 1 MB
+        bytes = DEFAULT_WORKSPACE_KIB * 1024;
+        CHECK_CUDA(cudaMalloc(&ptr, bytes));
+    }
+
+    ~WorkspaceBuffer() {
+        if (ptr) cudaFree(ptr);
+    }
+
+    WorkspaceBuffer(const WorkspaceBuffer&) = delete;
+    WorkspaceBuffer& operator=(const WorkspaceBuffer&) = delete;
+};
+
 __global__ void __null_kernel__() {
     // Empty kernel to measure baseline launch tax
 }
 
-void run_null_kernel(const GemmParams& params) {
+inline void run_null_kernel_once() {
+    __null_kernel__<<<1, 1>>>();
     CHECK_CUDA(cudaDeviceSynchronize());
-    
-    for (int i = 0; i < params.warmup; i++) {
-        __null_kernel__<<<1, 1>>>();
-        CHECK_CUDA(cudaDeviceSynchronize());
-    }
-    
-    for (int i = 0; i < params.runs; i++) {
-        __null_kernel__<<<1, 1>>>();
-        CHECK_CUDA(cudaDeviceSynchronize());
-    }
 }
 
-void run_gemm(const GemmParams& params) {
-    if (params.null_kernel) {
-        run_null_kernel(params);
-        return;
-    }
-
+void run_gemm(const GemmParams& params, MatBufs& matBufs, WorkspaceBuffer& workspace) {
     // === Input tensor setup & staging ===
     // High-level flow here:
     //   1. Unpack job metadata (dims, strides, dtype, batch).
@@ -198,8 +258,7 @@ void run_gemm(const GemmParams& params) {
     // Get CUDA types
     cudaDataType_t cuda_dtype = get_cuda_dtype(params.dtype);
     cublasComputeType_t compute_type = get_compute_type(params.dtype);
-    size_t elem_size = get_element_size(params.dtype);
-    
+
     // Matrix dimensions
     int M = params.m;
     int N = params.n;
@@ -209,30 +268,6 @@ void run_gemm(const GemmParams& params) {
     int ldc = params.ldc;
     int batch = params.batch;
     
-    // Allocate device memory
-    // For batched operations, allocate batch * matrix_size
-    // Size depends on physical layout (row-major vs col-major)
-    // Row-major [M, K] with ld: size = M * ld
-    // Col-major [M, K] with ld: size = K * ld (since ld is stride between columns)
-    size_t size_A = batch * M * lda * elem_size;  // Assuming row-major for simplicity
-    size_t size_B;
-    if (params.order_b == "col") {
-        size_B = batch * N * ldb * elem_size;  // Col-major: N columns, ld stride per column
-    } else {
-        size_B = batch * K * ldb * elem_size;  // Row-major: K rows, ld stride per row
-    }
-    size_t size_C = batch * M * ldc * elem_size;  // Output always row-major
-    
-    void *d_A, *d_B, *d_C;
-    CHECK_CUDA(cudaMalloc(&d_A, size_A));
-    CHECK_CUDA(cudaMalloc(&d_B, size_B));
-    CHECK_CUDA(cudaMalloc(&d_C, size_C));
-    
-    // Initialize with zeros (beta might be non-zero)
-    CHECK_CUDA(cudaMemset(d_A, 0, size_A));
-    CHECK_CUDA(cudaMemset(d_B, 0, size_B));
-    CHECK_CUDA(cudaMemset(d_C, 0, size_C));
-
     // === cuBLASLt descriptor & preference setup ===
     // Outline:
     //   1. Create handle + matrix layouts mirroring PyTorch (transposes, batch strides, row/col order).
@@ -287,7 +322,8 @@ void run_gemm(const GemmParams& params) {
     
     // Matrix C: [M, N] with leading dimension ldc (never transposed)
     CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&C_desc, cuda_dtype, M, N, ldc));
-    
+
+#if 0 // FIXME: Add support for batched GEMMs
     // Set batch count if batched
     if (batch > 1) {
         int64_t batch_count = batch;
@@ -320,7 +356,7 @@ void run_gemm(const GemmParams& params) {
         CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(C_desc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
                                                          &stride_C, sizeof(stride_C)));
     }
-    
+#endif
     // ORDER attributes: PyTorch does NOT set ORDER - it uses default column-major
     // 
     // PyTorch Reference: aten/src/ATen/cuda/CUDABlas.cpp
@@ -361,29 +397,7 @@ void run_gemm(const GemmParams& params) {
     cublasLtMatmulPreference_t preference;
     CHECK_CUBLASLT(cublasLtMatmulPreferenceCreate(&preference));
     
-    // Workspace size - match PyTorch's default and environment variable handling
-    //
-    // PyTorch Reference: aten/src/ATen/cuda/CUDABlas.cpp
-    //   * _parseChosenWorkspaceSize() (lines 182-203):
-    //     * Default: 1024 KiB (1 MB) - see comment "default size in KiB according to #73328"
-    //     * Reads CUBLASLT_WORKSPACE_SIZE env var (in KiB units)
-    //     * Returns size in bytes: workspace_size * 1024
-    //   * _getWorkspaceSize() (lines 205-208): Returns cached workspace size
-    //   * Usage in gemm_and_bias (line 1246):
-    //     size_t workspaceSize = _getWorkspaceSize();
-    //     preference.setAttribute(CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, workspaceSize);
-    //   * See also: https://github.com/pytorch/pytorch/issues/73328
-    //
-    // Rationale: 1MB workspace allows cuBLASLt to select algorithms that require
-    // temporary memory. Larger workspace (e.g., 128MB) can cause different algorithm
-    // selection, leading to kernel mismatches.
-    const char* workspace_env = std::getenv("CUBLASLT_WORKSPACE_SIZE");
-    const size_t DEFAULT_WORKSPACE_KIB = 1024;  // PyTorch default: 1024 KiB = 1 MB
-    size_t workspace_size = DEFAULT_WORKSPACE_KIB * 1024;  // Convert KiB to bytes
-    if (workspace_env) {
-        // Environment variable is in KiB units (matching PyTorch's convention)
-        workspace_size = std::stoull(workspace_env) * 1024;  // Convert KiB to bytes
-    }
+    size_t workspace_size = workspace.bytes;
     CHECK_CUBLASLT(cublasLtMatmulPreferenceSetAttribute(preference,
                                                          CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
                                                          &workspace_size, sizeof(workspace_size)));
@@ -439,9 +453,9 @@ void run_gemm(const GemmParams& params) {
         }
     };
     
-    uint32_t a_alignment = getAlignment(reinterpret_cast<uintptr_t>(d_A));
-    uint32_t b_alignment = getAlignment(reinterpret_cast<uintptr_t>(d_B));
-    uint32_t c_alignment = getAlignment(reinterpret_cast<uintptr_t>(d_C));
+    uint32_t a_alignment = getAlignment(reinterpret_cast<uintptr_t>(matBufs.d_A));
+    uint32_t b_alignment = getAlignment(reinterpret_cast<uintptr_t>(matBufs.d_B));
+    uint32_t c_alignment = getAlignment(reinterpret_cast<uintptr_t>(matBufs.d_C));
     
     CHECK_CUBLASLT(cublasLtMatmulPreferenceSetAttribute(preference,
                                                          CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES,
@@ -453,161 +467,159 @@ void run_gemm(const GemmParams& params) {
                                                          CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES,
                                                          &c_alignment, sizeof(c_alignment)));
     
-    void* workspace = nullptr;
-    CHECK_CUDA(cudaMalloc(&workspace, workspace_size));
-
     // === Algorithm selection ===
-    // Bind a specific cuBLASLt plan either via explicit algo_id/algo_index or by querying
+    // Bind a specific cuBLASLt plan either via explicit algo_id or by querying
     // heuristics (PyTorch-style) and choosing index 0 when no override is provided.
 
     // Select algorithm: either use direct ID or from heuristic results
     cublasLtMatmulAlgo_t selected_algo;
     
-    if (params.has_algo_id) {
-        // Use algorithm ID directly (from cublasLtMatmulAlgoGetIds)
-        cublasStatus_t status = cublasLtMatmulAlgoInit(
-            handle,
-            compute_type,
-            cuda_dtype,  // scaleType
-            cuda_dtype,  // Atype
-            cuda_dtype,  // Btype
-            cuda_dtype,  // Ctype
-            cuda_dtype,  // Dtype
-            params.algo_id,
-            &selected_algo
-        );
+    auto cleanup = [&]() {
+        CHECK_CUBLASLT(cublasLtMatmulPreferenceDestroy(preference));
+        CHECK_CUBLASLT(cublasLtMatmulDescDestroy(matmul_desc));
+        CHECK_CUBLASLT(cublasLtMatrixLayoutDestroy(C_desc));
+        CHECK_CUBLASLT(cublasLtMatrixLayoutDestroy(B_desc));
+        CHECK_CUBLASLT(cublasLtMatrixLayoutDestroy(A_desc));
+        CHECK_CUBLASLT(cublasLtDestroy(handle));
+    };
+
+    // TODO: Investigate later (explicit algo_id path currently disabled)
+    // if (params.has_algo_id) {
+    //     // Use algorithm ID directly (from cublasLtMatmulAlgoGetIds)
+    //     cublasStatus_t status = cublasLtMatmulAlgoInit(
+    //         handle,
+    //         compute_type,
+    //         cuda_dtype,  // scaleType
+    //         cuda_dtype,  // Atype
+    //         cuda_dtype,  // Btype
+    //         cuda_dtype,  // Ctype
+    //         cuda_dtype,  // Dtype
+    //         params.algo_id,
+    //         &selected_algo
+    //     );
         
-        if (status != CUBLAS_STATUS_SUCCESS) {
-            std::cerr << "Error: Failed to initialize algorithm ID " << params.algo_id 
-                      << " (status: " << status << ")" << std::endl;
-            exit(EXIT_FAILURE);
-        }
+    //     if (status != CUBLAS_STATUS_SUCCESS) {
+    //         std::cerr << "Error: Failed to initialize algorithm ID " << params.algo_id 
+    //                   << " (status: " << status << ")" << std::endl;
+    //         cleanup();
+    //         exit(EXIT_FAILURE);
+    //     }
         
-        // Test if algorithm is supported for this problem by trying a test run
-        // (some algorithms can be initialized but not supported for specific problem sizes)
-        float test_alpha = 1.0f;
-        float test_beta = 0.0f;
-        status = cublasLtMatmul(handle, matmul_desc,
-                               &test_alpha, d_A, A_desc, d_B, B_desc,
-                               &test_beta, d_C, C_desc, d_C, C_desc,
-                               &selected_algo, workspace, workspace_size,
-                               0);
+    //     // Test if algorithm is supported for this problem by trying a test run
+    //     // (some algorithms can be initialized but not supported for specific problem sizes)
+    //     float test_alpha = 1.0f;
+    //     float test_beta = 0.0f;
+    //     status = cublasLtMatmul(handle, matmul_desc,
+    //                            &test_alpha, matBufs.d_A, A_desc, matBufs.d_B, B_desc,
+    //                            &test_beta, matBufs.d_C, C_desc, matBufs.d_C, C_desc,
+    //                            &selected_algo, workspace.ptr, workspace_size,
+    //                            0);
         
-        if (status != CUBLAS_STATUS_SUCCESS) {
-            std::cerr << "Error: Algorithm ID " << params.algo_id 
-                      << " not supported for this problem (status: " << status << ")" << std::endl;
-            exit(EXIT_FAILURE);
-        }
+    //     if (status != CUBLAS_STATUS_SUCCESS) {
+    //         std::cerr << "Error: Algorithm ID " << params.algo_id 
+    //                   << " not supported for this problem (status: " << status << ")" << std::endl;
+    //         cleanup();
+    //         exit(EXIT_FAILURE);
+    //     }
         
-        // Reset C matrix (test run modified it)
-        CHECK_CUDA(cudaMemset(d_C, 0, size_C));
-        CHECK_CUDA(cudaDeviceSynchronize());
+    //     // Reset C matrix (test run modified it)
+    //     CHECK_CUDA(cudaMemset(matBufs.d_C, 0, matBufs.size_C));
+    //     CHECK_CUDA(cudaDeviceSynchronize());
         
-        std::cout << "Using algorithm ID " << params.algo_id << " (requested)" << std::endl;
-    } else {
-        // Algorithm selection via heuristic - match PyTorch's behavior
-        //
-        // PyTorch Reference: aten/src/ATen/cuda/CUDABlas.cpp
-        //   * gemm_and_bias (lines 1267-1277):
-        //     cublasLtMatmulAlgoGetHeuristic(
-        //         ltHandle,
-        //         computeDesc.descriptor(),
-        //         Adesc.descriptor(),
-        //         Bdesc.descriptor(),
-        //         Cdesc.descriptor(),
-        //         Cdesc.descriptor(),
-        //         preference.descriptor(),
-        //         1,  // requestedResultCount = 1 (only best algorithm)
-        //         &heuristicResult,
-        //         &returnedResult);
-        //   * Uses heuristicResult.algo directly (line 1295)
-        //
-        // Rationale: PyTorch requests only 1 algorithm (the best heuristic result) and uses it.
-        // Requesting more algorithms (e.g., 200) can return different ordering or different
-        // algorithms, causing kernel mismatches. We default to 1 like PyTorch, but allow
-        // requesting 200 when has_algo_index=true for diagnostic algorithm sweeps.
-        const int PYTORCH_DEFAULT_ALGO_COUNT = 1;  // PyTorch requests only 1 algorithm
-        const int DIAGNOSTIC_ALGO_COUNT = 200;     // For algorithm matching sweeps
-        int requested_algo_count = params.has_algo_index ? DIAGNOSTIC_ALGO_COUNT : PYTORCH_DEFAULT_ALGO_COUNT;
-        
-        std::vector<cublasLtMatmulHeuristicResult_t> heuristic_results(requested_algo_count);
+    //     std::cout << "Using algorithm ID " << params.algo_id << " (requested)" << std::endl;
+
+    //     float alpha = params.alpha;
+    //     float beta = params.beta;
+    //     CHECK_CUBLASLT(cublasLtMatmul(handle, matmul_desc,
+    //                                   &alpha, matBufs.d_A, A_desc, matBufs.d_B, B_desc,
+    //                                   &beta, matBufs.d_C, C_desc, matBufs.d_C, C_desc,
+    //                                   &selected_algo, workspace.ptr, workspace_size,
+    //                                   0));
+    //     CHECK_CUDA(cudaDeviceSynchronize());
+    //     cleanup();
+    //     std::cout << "GEMM completed successfully" << std::endl;
+    //     return;
+    // }
+
+    // Algorithm selection via heuristic - match PyTorch's behavior
+    //
+    // PyTorch Reference: aten/src/ATen/cuda/CUDABlas.cpp
+    //   * gemm_and_bias (lines 1267-1277):
+    //     cublasLtMatmulAlgoGetHeuristic(
+    //         ltHandle,
+    //         computeDesc.descriptor(),
+    //         Adesc.descriptor(),
+    //         Bdesc.descriptor(),
+    //         Cdesc.descriptor(),
+    //         Cdesc.descriptor(),
+    //         preference.descriptor(),
+    //         1,  // requestedResultCount = 1 (only best algorithm)
+    //         &heuristicResult,
+    //         &returnedResult);
+    //   * Uses heuristicResult.algo directly (line 1295)
+    //
+    // Rationale: PyTorch requests only 1 algorithm (the best heuristic result) and uses it.
+    // Requesting more algorithms (e.g., 200) can return different ordering or different
+    // algorithms, causing kernel mismatches. We default to 1 like PyTorch, but allow
+    // requesting 200 when use_heuristic_index=true for diagnostic algorithm sweeps.
+    const int PYTORCH_DEFAULT_ALGO_COUNT = 1;  // PyTorch requests only 1 algorithm
+    const int DIAGNOSTIC_ALGO_COUNT = 200;     // For algorithm matching sweeps
+    int requested_algo_count = params.use_heuristic_index ? DIAGNOSTIC_ALGO_COUNT : PYTORCH_DEFAULT_ALGO_COUNT;
+    
+    std::vector<cublasLtMatmulHeuristicResult_t> heuristic_results(requested_algo_count);
     int returned_results = 0;
     CHECK_CUBLASLT(cublasLtMatmulAlgoGetHeuristic(handle, matmul_desc,
-                                                   A_desc, B_desc, C_desc, C_desc,
-                                                       preference, requested_algo_count,
-                                                       heuristic_results.data(), &returned_results));
-    
+                                                    A_desc, B_desc, C_desc, C_desc,
+                                                    preference, requested_algo_count,
+                                                    heuristic_results.data(), &returned_results));
+
     if (returned_results == 0) {
         std::cerr << "Error: No cuBLASLt algorithm found" << std::endl;
+        cleanup();
         exit(EXIT_FAILURE);
-        }
-        
-        // Print available algorithm count (for debugging when doing algorithm sweeps)
-        if (params.has_algo_index) {
-            std::cout << "Available algorithms: 0-" << (returned_results - 1) << " (total: " << returned_results << ")" << std::endl;
-        }
-        
-        // Select algorithm: use specified index if provided, otherwise use first (best) - matches PyTorch
-        // PyTorch always uses index 0 (the best heuristic result)
-        const int PYTORCH_ALGO_INDEX = 0;  // PyTorch uses first (best) algorithm from heuristic
-        int selected_algo_idx = params.has_algo_index ? params.algo_index : PYTORCH_ALGO_INDEX;
-        if (selected_algo_idx < 0 || selected_algo_idx >= returned_results) {
-            std::cerr << "Error: Invalid algorithm index " << selected_algo_idx 
-                      << " (available: 0-" << (returned_results - 1) << ")" << std::endl;
-            exit(EXIT_FAILURE);
-        }
-        
-        selected_algo = heuristic_results[selected_algo_idx].algo;
-        
-        if (params.has_algo_index) {
-            std::cout << "Using algorithm index " << selected_algo_idx << " (requested)" << std::endl;
-        } else {
-            std::cout << "Using algorithm index 0 (best heuristic result, matches PyTorch)" << std::endl;
-        }
+    }
+    
+    // Print available algorithm count (for debugging when doing algorithm sweeps)
+    if (params.use_heuristic_index) {
+        std::cout << "Total algorithms = " << returned_results << std::endl;
+    }
+
+    // Listing-only mode: stop after printing availability
+    if (params.list_heuristics) {
+        return;
+    }
+    
+    // Select algorithm: use specified index if provided, otherwise use first (best) - matches PyTorch
+    // PyTorch always uses index 0 (the best heuristic result)
+    const int PYTORCH_ALGO_INDEX = 0;  // PyTorch uses first (best) algorithm from heuristic
+    int selected_algo_idx = params.use_heuristic_index ? params.heuristic_index : PYTORCH_ALGO_INDEX;
+    if (selected_algo_idx < 0 || selected_algo_idx >= returned_results) {
+        std::cerr << "Error: Invalid algorithm index " << selected_algo_idx 
+                    << " (available: 0-" << (returned_results - 1) << ")" << std::endl;
+        cleanup();
+        exit(EXIT_FAILURE);
+    }
+    
+    selected_algo = heuristic_results[selected_algo_idx].algo;
+    if (params.use_heuristic_index) {
+        std::cout << "Using algorithm index " << selected_algo_idx << " (requested)" << std::endl;
+    } else {
+        std::cout << "Using algorithm index 0 (best heuristic result, matches PyTorch)" << std::endl;
     }
     
     // Alpha and beta (use float for now, could be templated)
     float alpha = params.alpha;
     float beta = params.beta;
     
-    // === Execution loops (warmup + measurement) ===
-    // Warmup runs
-    for (int i = 0; i < params.warmup; i++) {
-        CHECK_CUBLASLT(cublasLtMatmul(handle, matmul_desc,
-                                      &alpha, d_A, A_desc, d_B, B_desc,
-                                      &beta, d_C, C_desc, d_C, C_desc,
-                                      &selected_algo, workspace, workspace_size,
-                                      0));  // Use default stream
-        CHECK_CUDA(cudaDeviceSynchronize());  // Clear queue for next iteration
-    }
-    CHECK_CUDA(cudaDeviceSynchronize()); // Final synchronization because why not 
-    
-    // Measurement runs (under nsys profiling)
-    // Synchronize between iterations to measure best-case launch overhead
-    // without queueing delays
-    for (int i = 0; i < params.runs; i++) {
-        CHECK_CUBLASLT(cublasLtMatmul(handle, matmul_desc,
-                                      &alpha, d_A, A_desc, d_B, B_desc,
-                                      &beta, d_C, C_desc, d_C, C_desc,
-                                      &selected_algo, workspace, workspace_size,
-                                      0));
-        CHECK_CUDA(cudaDeviceSynchronize());  // Clear queue for next iteration
-    }
-    CHECK_CUDA(cudaDeviceSynchronize()); // Final synchronization because why not
-    
-    // Cleanup
-    CHECK_CUDA(cudaFree(workspace));
-    CHECK_CUDA(cudaFree(d_A));
-    CHECK_CUDA(cudaFree(d_B));
-    CHECK_CUDA(cudaFree(d_C));
-    
-    CHECK_CUBLASLT(cublasLtMatmulPreferenceDestroy(preference));
-    CHECK_CUBLASLT(cublasLtMatmulDescDestroy(matmul_desc));
-    CHECK_CUBLASLT(cublasLtMatrixLayoutDestroy(C_desc));
-    CHECK_CUBLASLT(cublasLtMatrixLayoutDestroy(B_desc));
-    CHECK_CUBLASLT(cublasLtMatrixLayoutDestroy(A_desc));
-    CHECK_CUBLASLT(cublasLtDestroy(handle));
-    
+    // Single execution (callers loop externally)
+    CHECK_CUBLASLT(cublasLtMatmul(handle, matmul_desc,
+                                  &alpha, matBufs.d_A, A_desc, matBufs.d_B, B_desc,
+                                  &beta, matBufs.d_C, C_desc, matBufs.d_C, C_desc,
+                                  &selected_algo, workspace.ptr, workspace_size,
+                                  0));
+    CHECK_CUDA(cudaDeviceSynchronize());  // Clear queue for next iteration
+
+    cleanup();
     std::cout << "GEMM completed successfully" << std::endl;
 }
 
@@ -615,6 +627,35 @@ int main(int argc, char** argv) {
     GemmParams params;
     parse_args(argc, argv, params);
 
-    run_gemm(params);
+    // Pre-allocate A/B/C and workspace, pass into run_gemm
+    size_t elem_size = get_element_size(params.dtype);
+
+    MatBufs matBufs(params, elem_size);
+    WorkspaceBuffer workspace;
+
+    if (params.list_heuristics) {
+        run_gemm(params, matBufs, workspace);
+        return 0;
+    }
+
+    if (params.null_kernel) {
+        // Warmup + measurement handled here to mirror matmul path
+        for (int i = 0; i < params.warmup; i++) {
+            run_null_kernel_once();
+        }
+        for (int i = 0; i < params.runs; i++) {
+            run_null_kernel_once();
+        }
+        return 0;
+    }
+
+    // Warmup iterations
+    for (int i = 0; i < params.warmup; i++) {
+        run_gemm(params, matBufs, workspace);
+    }
+    // Measurement iterations
+    for (int i = 0; i < params.runs; i++) {
+        run_gemm(params, matBufs, workspace);
+    }
     return 0;
 }

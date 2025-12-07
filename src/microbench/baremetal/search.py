@@ -2,9 +2,9 @@
 """
 Search for cuBLASLt algorithm indices that produce PyTorch kernel configurations (offline).
 
-Reads jobs from baremetal/output/jobs.json, searches for cuBLASLt algorithm
+Reads jobs from baremetal/output/jobs.json, searches for cuBLASLt heuristic
 indices that produce the same kernel configurations as PyTorch, and updates
-jobs.json with cublas_index field.
+jobs.json with heur_idx field.
 
 This is an offline process that can be run separately from profiling.
 """
@@ -27,9 +27,9 @@ from soda.microbench.baremetal.utils import (
 )
 
 
-def get_max_algo_idx(job):
+def get_heuristic_algo_count(job):
     """
-    Query how many algorithms are available for this problem.
+    Query how many heuristic algorithms are available for this problem.
     Uses run_gemm with warmup=0 runs=0 to query without executing.
     
     Args:
@@ -38,7 +38,7 @@ def get_max_algo_idx(job):
     Returns: total_count
     Raises: RuntimeError if query fails
     """
-    base_args = build_base_args(job) + ["--warmup", "0", "--runs", "0", "--algo_index", "0"]
+    base_args = build_base_args(job) + ["--list_heuristics"]
     
     try:
         result = subprocess.run(base_args, capture_output=True, text=True, timeout=10)
@@ -50,20 +50,22 @@ def get_max_algo_idx(job):
     if result.returncode != 0:
         raise RuntimeError(f"Query failed for job {job['id']} with return code {result.returncode}:\n{result.stderr}")
     
-    # Parse "Available algorithms: 0-X (total: Y)" format
+    # Parse "Total algorithms = Y"
+    total = None
     for line in result.stdout.split('\n'):
-        if "Available algorithms:" in line:
-            match = re.search(r'Available algorithms: 0-(\d+)(?: \(total: (\d+)\))?', line)
+        if line.startswith("Total algorithms"):
+            match = re.search(r'Total algorithms\s*=\s*(\d+)', line)
             if match:
-                max_idx = int(match.group(1))
-                total = int(match.group(2)) 
-                assert max_idx == total - 1
-                return max_idx
+                total = int(match.group(1))
+                break
+            else: 
+                # Keep looking for the total
+                pass
     
-    raise RuntimeError(f"Could not parse algorithm count from output for job {job['id']}:\n{result.stdout}")
-
+    assert total is not None, f"Could not parse algorithm count from output for job {job['id']}:\n{result.stdout}"
+    return total
     
-def sweep_cublas_algos(job, max_idx=200):
+def sweep_cublas_algos(job, max_count=200):
     """Search for cuBLASLt algorithm index that produces target kernel config.
 
     With PyTorch-matched settings, algorithm index 0 should produce the same kernel.
@@ -86,14 +88,14 @@ def sweep_cublas_algos(job, max_idx=200):
     target_kernel.print()
 
     # Sweep through algorithm indices
-    for algo_idx in range(max_idx +1):
+    for algo_idx in range(max_count):
 
         # Build trace path and args
         trace_file_name = f"match_{job['id']}_algo{algo_idx}"
         args = build_base_args(job) + [
             "--warmup", "0", 
             "--runs", "1", 
-            "--algo_index", str(algo_idx)
+            "--heuristic_index", str(algo_idx)
         ]
 
         # Test cuBLAS algo index 
@@ -168,19 +170,19 @@ def search_cublas_algos_offline():
 
         # Skip null kernel jobs 
         if job["name"] == "__null_kernel__":
-            job["cublas_index"] = None
+            job["heur_idx"] = None
             continue
         
         # Get algorithm count
-        max_algo_idx = get_max_algo_idx(job)
-        algo_info = f"({max_algo_idx+1} algorithm(s))"
+        algo_count = get_heuristic_algo_count(job)
+        algo_info = f"({algo_count} algorithm(s))"
         print_utils.iter_start(f"Job {job['id']} {algo_info}")
         
         # Search for algorithm index
-        algo_idx = sweep_cublas_algos(job, max_idx=max_algo_idx)
+        algo_idx = sweep_cublas_algos(job, max_count=algo_count)
 
-        # Update cublas_index; algo_idx is None if no match found
-        job["cublas_index"] = algo_idx
+        # Update heur_idx; algo_idx is None if no match found
+        job["heur_idx"] = algo_idx
 
         # Update counters
         if algo_idx is None:
@@ -189,7 +191,7 @@ def search_cublas_algos_offline():
             num_algos_found += 1
         num_jobs_searched += 1
 
-    # Update jobs.json with cublas_index and matching summary
+    # Update jobs.json with heur_idx and matching summary
     jobs_data["jobs"] = jobs
 
     # Update summary

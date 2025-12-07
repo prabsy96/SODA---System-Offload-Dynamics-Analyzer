@@ -2,7 +2,7 @@
 """
 Profile baremetal GEMM kernels using matched algorithms (profiling phase).
 
-Reads jobs from baremetal/output/jobs.json, uses cublas_index from
+Reads jobs from baremetal/output/jobs.json, uses heur_idx from
 algorithm matching phase, runs full nsys profiling, computes kernel launch
 tax statistics, and emits baremetal/output/baremetal_gemm_runs.json.
 
@@ -51,21 +51,10 @@ def run_job(job, warmup: int, runs: int):
         if "batch" in job:
             args = args + ["--batch", str(job["batch"])]
 
-        if "cublas_index" not in job:
-            # Offline cuBLASLt algorithm search metadata not present for this job
-            # This means the offline search step was skipped for this run.
-            # In this case, we rely on cuBLASLt heuristic algorithm selection.
-            # This is implicitly done by the binary main_gemm_bm.cpp
-            pass
-        else:
-            # Offline cuBLASLt algorithm search has been completed for this job.
-            matched_algo_idx = job["cublas_index"]
-            if matched_algo_idx is None:
-                # Offline search ran but found no matching algorithm index.
-                # Fall back to heuristic algorithm selection in main_gemm_bm.cpp.
-                pass
-            else: 
-                args = args + ["--algo_index", str(matched_algo_idx)]
+        if "heur_idx" in job:
+            matched_algo_idx = job["heur_idx"]
+            if matched_algo_idx is not None:
+                args = args + ["--heuristic_index", str(matched_algo_idx)]
     
     trace_file_name = f"trace_{job_id}"
     success, trace_file_sql, message = nsys_profile_to_sql(
@@ -204,7 +193,7 @@ def profile_baremetal_gemm_kernels(
         skip_offline_cublas_algo_search:
             If True, allow profiling even when offline cuBLASLt algorithm
             search metadata is missing; baremetal will then rely on heuristic
-            algorithm selection instead of matched cublas_index.
+            algorithm selection instead of matched heur_idx.
     
     Returns:
         Dictionary with profiled baremetal GEMM sequences data (same format as saved JSON).
