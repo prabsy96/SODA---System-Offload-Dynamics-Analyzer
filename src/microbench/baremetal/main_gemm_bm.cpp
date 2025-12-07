@@ -483,64 +483,6 @@ void run_gemm(const GemmParams& params, MatBufs& matBufs, WorkspaceBuffer& works
         CHECK_CUBLASLT(cublasLtDestroy(handle));
     };
 
-    // TODO: Investigate later (explicit algo_id path currently disabled)
-    // if (params.has_algo_id) {
-    //     // Use algorithm ID directly (from cublasLtMatmulAlgoGetIds)
-    //     cublasStatus_t status = cublasLtMatmulAlgoInit(
-    //         handle,
-    //         compute_type,
-    //         cuda_dtype,  // scaleType
-    //         cuda_dtype,  // Atype
-    //         cuda_dtype,  // Btype
-    //         cuda_dtype,  // Ctype
-    //         cuda_dtype,  // Dtype
-    //         params.algo_id,
-    //         &selected_algo
-    //     );
-        
-    //     if (status != CUBLAS_STATUS_SUCCESS) {
-    //         std::cerr << "Error: Failed to initialize algorithm ID " << params.algo_id 
-    //                   << " (status: " << status << ")" << std::endl;
-    //         cleanup();
-    //         exit(EXIT_FAILURE);
-    //     }
-        
-    //     // Test if algorithm is supported for this problem by trying a test run
-    //     // (some algorithms can be initialized but not supported for specific problem sizes)
-    //     float test_alpha = 1.0f;
-    //     float test_beta = 0.0f;
-    //     status = cublasLtMatmul(handle, matmul_desc,
-    //                            &test_alpha, matBufs.d_A, A_desc, matBufs.d_B, B_desc,
-    //                            &test_beta, matBufs.d_C, C_desc, matBufs.d_C, C_desc,
-    //                            &selected_algo, workspace.ptr, workspace_size,
-    //                            0);
-        
-    //     if (status != CUBLAS_STATUS_SUCCESS) {
-    //         std::cerr << "Error: Algorithm ID " << params.algo_id 
-    //                   << " not supported for this problem (status: " << status << ")" << std::endl;
-    //         cleanup();
-    //         exit(EXIT_FAILURE);
-    //     }
-        
-    //     // Reset C matrix (test run modified it)
-    //     CHECK_CUDA(cudaMemset(matBufs.d_C, 0, matBufs.size_C));
-    //     CHECK_CUDA(cudaDeviceSynchronize());
-        
-    //     std::cout << "Using algorithm ID " << params.algo_id << " (requested)" << std::endl;
-
-    //     float alpha = params.alpha;
-    //     float beta = params.beta;
-    //     CHECK_CUBLASLT(cublasLtMatmul(handle, matmul_desc,
-    //                                   &alpha, matBufs.d_A, A_desc, matBufs.d_B, B_desc,
-    //                                   &beta, matBufs.d_C, C_desc, matBufs.d_C, C_desc,
-    //                                   &selected_algo, workspace.ptr, workspace_size,
-    //                                   0));
-    //     CHECK_CUDA(cudaDeviceSynchronize());
-    //     cleanup();
-    //     std::cout << "GEMM completed successfully" << std::endl;
-    //     return;
-    // }
-
     // Algorithm selection via heuristic - match PyTorch's behavior
     //
     // PyTorch Reference: aten/src/ATen/cuda/CUDABlas.cpp
