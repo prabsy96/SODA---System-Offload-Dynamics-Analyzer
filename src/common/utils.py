@@ -777,7 +777,7 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
             - all: List of all GPU events
     """
     aten_op_events_by_ext_id = {}
-    torch_op_events_by_ext_id = {}
+    torch_aten_op_events_by_ext_id = {}
     torch_op_buffer = []
     cuda_launch_events_by_corr = {}
     kernel_events = []
@@ -791,18 +791,8 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
         external_id = args.get("External id", None)
         correlation = args.get("correlation", None)
 
-        if external_id is not None:
-            op_events_by_ext_id[external_id] = {
-                "name": name,
-                "ts": event["ts"],
-                "dur": event.get("dur", 0),
-                "args": args,
-                "input_dims": args.get("Input Dims", []),
-                "external_id": external_id
-            }
-         
         if cat == "cpu_op" and external_id is not None:
-            op_events_by_ext_id[external_id] = {
+            aten_op_events_by_ext_id[external_id] = {
                 "type": "cpu_op",
                 "name": name,
                 "external_id": external_id,
@@ -815,11 +805,11 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
                 "dur": event["dur"]
             }
             if torch_op_buffer:
-                # NOTE: This is a hack: we pair the oldest buffered torch_op with the next ATen op.
+                # NOTE: This is a hack: we pair the last buffered torch_op with the next ATen op.
                 torch_event = torch_op_buffer.pop(0)
                 torch_event["external_id"] = external_id
-                assert external_id not in torch_op_events_by_ext_id, "Duplicate torch_op for external_id"
-                torch_op_events_by_ext_id[external_id] = torch_event
+                assert external_id not in torch_aten_op_events_by_ext_id, "Duplicate torch_op for external_id"
+                torch_aten_op_events_by_ext_id[external_id] = torch_event
         elif cat == "user_annotation" and name.startswith("torch_op"):
             torch_op_buffer.append({
                 "type": "torch_op",
@@ -878,7 +868,7 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
     events = {
         "cpu": {
             "aten_ops": aten_op_events_by_ext_id,
-            "torch_ops": torch_op_events_by_ext_id,
+            "torch_ops": torch_aten_op_events_by_ext_id,
             "launches": cuda_launch_events_by_corr
         },
         "gpu": {
@@ -951,6 +941,7 @@ def calculate_sequence_metrics(sequences: List[Dict], metrics: List[str]) -> Lis
         kernel = seq["kernel"]
         aten_op = seq["aten_op"]
         cuda_launch = seq["cuda_launch"]
+
         t_op = aten_op["ts"]
         t_api = cuda_launch["ts"]
 

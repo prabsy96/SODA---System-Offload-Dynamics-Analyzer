@@ -177,8 +177,8 @@ def print_summary(matches):
 
     if per_kernel_rows:
         print_utils.comp_table(
-            title=f"Per GEMM Framework Overhead (us)",
-            headers=["ID", "Kernel", "py", "aten+culib", "launch"],
+            title=f"Per GEMM Framework Overhead (μs) @ Pytorch Scope",
+            headers=["ID", "Kernel", "py", "aten+culib", "sys"],
             data=per_kernel_rows,
         )
 

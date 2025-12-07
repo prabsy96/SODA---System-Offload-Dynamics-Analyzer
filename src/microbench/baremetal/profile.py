@@ -187,7 +187,7 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
         )
     
     # Return the single aggregated sequence
-    # Format: {launch_tax: {...}, kernel: {...}, cuda_launch: {...}, cpu_op: {...}}
+    # Format: {launch_tax: {...}, kernel: {...}, cuda_launch: {...}, aten_op: {...}}
     return aggregated_sequences[0]
 
 def profile_baremetal_gemm_kernels(
