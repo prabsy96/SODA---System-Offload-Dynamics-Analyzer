@@ -215,14 +215,12 @@ def extract_gemm_params(sequence):
     return params
 
 
-def generate_jobs(target_sequences: dict, warmup: int, runs: int):
+def generate_jobs(target_sequences: dict):
     """
     Generate baremetal jobs from PyTorch unique event sequences data.
     
     Args:
         target_sequences: Dictionary with 'sequences' key containing event sequences.
-        warmup: Number of warmup runs.
-        runs: Number of measurement runs.
     """
     output_file = utils.get_path("BAREMETAL_JOBS")
     sequences = target_sequences["sequences"]
@@ -231,16 +229,14 @@ def generate_jobs(target_sequences: dict, warmup: int, runs: int):
     
     # Add null kernel job (job 0000) for baseline launch tax measurement
     job_id = "0000"
-    print(f"Generating job {job_id} (__null__)")
+    print(f"Generating job {job_id} (__null_kernel__)")
     jobs.append({
         "id": job_id,
-        "name": "__null__",
+        "name": "__null_kernel__",
         "grid": [1, 1, 1],  # Explicit value for null kernel, not a default
         "block": [1, 1, 1],  # Explicit value for null kernel, not a default
         "shared_memory": 0,  # Explicit value for null kernel, not a default
         "aten_op": None,
-        "warmup": warmup,
-        "runs": runs,
     })
     
     for idx, sequence in enumerate(sequences):
@@ -279,8 +275,6 @@ def generate_jobs(target_sequences: dict, warmup: int, runs: int):
             "dtype": params["dtype"],
             "alpha": params["alpha"],
             "beta": params["beta"],
-            "warmup": warmup,
-            "runs": runs,
         }
         
         # Add batch count for bmm

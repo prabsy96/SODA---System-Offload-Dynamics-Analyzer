@@ -98,7 +98,7 @@ def compare_results(pytorch_results, baremetal_results):
     # Process all baremetal results (including null kernel)
     for job_id in sorted(baremetal_results.keys()):
         baremetal = baremetal_results[job_id]
-        is_null_kernel = baremetal["kernel"]["name"] == "__null__"
+        is_null_kernel = baremetal["kernel"]["name"] == "__null_kernel__"
         
         if is_null_kernel:
             # Null kernel: no PyTorch match
@@ -211,7 +211,7 @@ def report():
             continue
         
         # Extract null launch tax for baseline
-        if sequence["kernel"]["name"] == "__null__":
+        if sequence["kernel"]["name"] == "__null_kernel__":
             null_launch_tax = sequence["launch_tax"]["avg"]
             break
     

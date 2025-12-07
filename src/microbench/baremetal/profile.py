@@ -22,7 +22,7 @@ from soda.common import utils, print_utils
 from soda.common.data import ATenOp
 
 
-def run_job(job):
+def run_job(job, warmup: int, runs: int):
     """
     Run a single job under nsys profiling and emit sqlite trace.
     """
@@ -34,18 +34,18 @@ def run_job(job):
     utils.ensure_file(binary_path)
 
     # Handle null kernel job
-    if job["name"] == "__null__":
+    if job["name"] == "__null_kernel__":
         args = [
             str(binary_path),
             "--null_kernel",
-            "--warmup", str(job["warmup"]),
-            "--runs", str(job["runs"]),
+            "--warmup", str(warmup),
+            "--runs", str(runs),
         ]
     else:
 
         args = build_base_args(job) + [
-            "--warmup", str(job["warmup"]),
-            "--runs", str(job["runs"]),
+            "--warmup", str(warmup),
+            "--runs", str(runs),
         ]
         
         if "batch" in job:
@@ -110,7 +110,7 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
     # All kernels in this trace belong to the same job/aten_op
     # Handle null kernel vs regular GEMM jobs differently
     external_id = job["id"]
-    if job["name"] == "__null__":
+    if job["name"] == "__null_kernel__":
         # Null kernel job (hack to ensure we have an aten_op)
         # aten_op is null in jobs.json so use a dummy __nop__ op
         # and use job_id as external_id
@@ -187,16 +187,20 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
         )
     
     # Return the single aggregated sequence
-    # Format: {kernel_tax: {...}, kernel: {...}, cuda_launch: {...}, cpu_op: {...}}
+    # Format: {launch_tax: {...}, kernel: {...}, cuda_launch: {...}, cpu_op: {...}}
     return aggregated_sequences[0]
 
 def profile_baremetal_gemm_kernels(
+    warmup: int,
+    runs: int,
     skip_offline_cublas_algo_search: bool = False,
 ) -> Dict[str, Any]:
     """
     Profile baremetal GEMM kernels for all jobs using matched algorithms.
     
     Args:
+        warmup: Number of warmup iterations to skip per job.
+        runs: Number of measured iterations per job.
         skip_offline_cublas_algo_search:
             If True, allow profiling even when offline cuBLASLt algorithm
             search metadata is missing; baremetal will then rely on heuristic
@@ -244,23 +248,18 @@ def profile_baremetal_gemm_kernels(
             sequences.append(None)  # Append None to maintain alignment
             continue
         
-        trace_file_sql = run_job(job)
-        if trace_file_sql is None:
-            raise Exception(f"No trace file found for job {job['id']}")
+        trace_file_sql = run_job(job, warmup, runs)
+        assert trace_file_sql is not None, f"No trace file found for job {job['id']}"
         
         # Parse trace and compute stats (returns aggregated sequence with aten_op already included)
-        sequence = parse_trace_and_compute_stats(job, trace_file_sql, job["runs"], job["warmup"])
-        
-        if sequence is None:
-            raise Exception(f"No kernel events found for job {job['id']}")
-        
+        sequence = parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup)
+        assert sequence is not None, f"No kernel events found for job {job['id']}"
+
         # Attach job_id for downstream reporting
         sequence["job_id"] = job["id"]
         
         # Capture null kernel baseline tax for delta calculations
-        if job["name"] == "__null__":
-            null_launch_tax = sequence["launch_tax"]["avg"]
-        
+        null_launch_tax = sequence["launch_tax"]["avg"] if job["name"] == "__null_kernel__" else None
         sequences.append(sequence)
     
     baremetal_gemm_sequences_file = utils.get_path("BAREMETAL_GEMM_KERNELS")

@@ -167,7 +167,7 @@ def search_cublas_algos_offline():
     for job in jobs:
 
         # Skip null kernel jobs 
-        if job["name"] == "__null__":
+        if job["name"] == "__null_kernel__":
             job["cublas_index"] = None
             continue
         

@@ -106,7 +106,7 @@ class SodaMicrobench:
         # Generate baremetal jobs
         section = "Generate Baremetal Jobs"
         print_utils.section_start(section)
-        generate_jobs(target_gemm_sequences, warmup=self.warmup, runs=self.runs)
+        generate_jobs(target_gemm_sequences)
         print_utils.section_end(section)
 
         # Search for cuBLASLt algorithms (optional)
@@ -127,6 +127,8 @@ class SodaMicrobench:
             print_utils.section_start(section)
             print("This will run nsys profiling for multiple jobs, may take several minutes")
             baremetal_gemm_sequences = profile_baremetal_gemm_kernels(
+                warmup=self.warmup,
+                runs=self.runs,
                 skip_offline_cublas_algo_search=self.args.skip_offline_cublas_algo_search
             )
             print_utils.section_end(section)
