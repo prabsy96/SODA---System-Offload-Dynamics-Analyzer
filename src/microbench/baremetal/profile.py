@@ -101,7 +101,6 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
     # Extract CUDA launch events and kernel events
     cuda_launches = extract_launches_from_trace(trace_file_sql)
     kernels = extract_kernels_from_trace(trace_file_sql, cleanup=False)
-    nvtx_ranges = extract_nvtx_ranges_from_trace(trace_file_sql)
 
     if not cuda_launches:
         raise RuntimeError(f"No CUDA launch events found in {trace_file_sql}")
@@ -215,7 +214,7 @@ def profile_baremetal_gemm_kernels(
     
     # Check if offline cublas algorithm search has been completed
     if "offline_cublas_algo_search" in jobs_data["summary"]:
-        offline_cublas_algo_search = summary["offline_cublas_algo_search"]
+        offline_cublas_algo_search = jobs_data["summary"]["offline_cublas_algo_search"]
         algos_found = offline_cublas_algo_search["algos_found"]
         print(f"Using {algos_found} matched algorithms")
     else:

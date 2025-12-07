@@ -555,6 +555,18 @@ def get_args_parser() -> argparse.ArgumentParser:
         help="Skip offline cuBLASLt algorithm search in the microbench pipeline (use heuristic algorithms).",
     )
     parser.add_argument(
+        "--skip-pytorch-profile",
+        dest="skip_pytorch_profile",
+        action="store_true",
+        help="Skip PyTorch GEMM kernel profiling in the microbench pipeline.",
+    )
+    parser.add_argument(
+        "--skip-baremetal-profile",
+        dest="skip_baremetal_profile",
+        action="store_true",
+        help="Skip baremetal GEMM kernel profiling in the microbench pipeline.",
+    )
+    parser.add_argument(
         "--runs",
         type=int,
         default=5,
