@@ -45,12 +45,14 @@ def load_pytorch_results(pytorch_file):
         kernel_info = kernel.get_signature()
         
         # Extract stats
-        stats = launch_tax if launch_tax else None
-        xlat_stats = xlat_tax if xlat_tax else None
-        py_stats = py_tax if py_tax else None
+        stats = launch_tax
+        xlat_stats = xlat_tax
+        py_stats = py_tax
+        freq = sequence["freq"]
         
         results[job_id] = {
             "kernel": kernel_info,
+            "freq": freq,
             "op_signature": op_signature,
             "stats": stats,
             "xlat_stats": xlat_stats,
@@ -58,7 +60,6 @@ def load_pytorch_results(pytorch_file):
         }
     
     return results
-
 
 def load_baremetal_results(baremetal_file):
     """
@@ -114,6 +115,7 @@ def compare_results(pytorch_results, baremetal_results):
                 "framework": None,
                 "framework_xlat": None,
                 "framework_py": None,
+                "framework_freq": None,
                 "baremetal": baremetal["stats"],
                 "framework_xlat_avg": None,
                 "framework_py_avg": None,
@@ -134,6 +136,7 @@ def compare_results(pytorch_results, baremetal_results):
             fw_xlat_avg = fw_xlat_stats["avg"] if fw_xlat_stats else None
             fw_py_avg = fw_py_stats["avg"] if fw_py_stats else None
             fw_launch_avg = fw_stats["avg"] if fw_stats else None
+            fw_freq = pytorch["freq"]
             
             # Build match entry
             match_entry = {
@@ -148,6 +151,7 @@ def compare_results(pytorch_results, baremetal_results):
                 "framework": fw_stats,
                 "framework_xlat": fw_xlat_stats,
                 "framework_py": fw_py_stats,
+                "framework_freq": fw_freq,
                 "baremetal": baremetal["stats"],
                 "framework_xlat_avg": fw_xlat_avg,
                 "framework_py_avg": fw_py_avg,
@@ -167,20 +171,28 @@ def print_summary(matches):
         fw_xlat_avg = match.get("framework_xlat_avg")
         fw_py_avg = match.get("framework_py_avg")
         fw_launch_avg = match.get("framework_launch_avg")
+        fw_freq = match.get("framework_freq")
         per_kernel_rows.append([
             match["job_id"],
             kernel_name,
             f"{fw_py_avg:.2f}" if fw_py_avg is not None else "-",
             f"{fw_xlat_avg:.2f}" if fw_xlat_avg is not None else "-",
             f"{fw_launch_avg:.2f}" if fw_launch_avg is not None else "-",
+            fw_freq if fw_freq is not None else "-",
         ])
 
     if per_kernel_rows:
         print_utils.comp_table(
             title=f"Per GEMM Framework Overhead (μs) @ Pytorch Scope",
-            headers=["ID", "Kernel", "py", "aten+culib", "sys"],
+            headers=["ID", "Kernel", "py", "aten+culib", "sys", "freq"],
             data=per_kernel_rows,
         )
+        print("Notes:")
+        print("  - Kernel: CUDA kernel signature")
+        print("  - py: python xlat tax; torch_op -> aten_op")
+        print("  - aten+culib: ATen+cuBLASLt xlat tax; aten_op -> launch")
+        print("  - sys: kernel launch tax; launch -> kernel")
+        print("  - freq: times this aten_op->kernel sequence appears in one forward pass (unique key=name+grid+block+smem+input_dims)")
 
 def report():
     """

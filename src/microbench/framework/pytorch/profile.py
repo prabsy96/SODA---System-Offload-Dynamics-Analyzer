@@ -241,6 +241,11 @@ def profile_pytorch_gemm_sequences(
     # Some cpu ops can produce non GEMM kernels as side effects, filter them out
     pytorch_gemm_sequences = utils.filter_gemm_sequences(replayed_sequences)
 
+    # Pass down the frequency of unique gemm sequences downstream 
+    assert len(pytorch_gemm_sequences) == len(target_gemm_sequences["sequences"]), "pytorch_gemm_sequences length mismatch"
+    for pyt_seq, target_seq in zip(pytorch_gemm_sequences, target_gemm_sequences["sequences"]):
+        pyt_seq["freq"] = target_seq["count"]
+
     pytorch_gemm_sequences_file = utils.get_path("PYTORCH_GEMM_SEQUENCES")
     pytorch_gemm_sequences_data = {
         "summary": {"count": len(pytorch_gemm_sequences)},
