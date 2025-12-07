@@ -196,8 +196,8 @@ class SodaAnalyzer:
         timing = metrics["inference_time_breakdown"]
         print("")
         print("=== Framework Tax Analysis ===")
-        print(f"\t* Framework Tax (Exposed CPU Overhead): {framework['framework_tax_ms']:.4f} ms ({framework['framework_tax_percent']:.1f}%)")
-        print(f"\t* GPU Active Time (Compute): {metrics['gpu_busy_time_ms']:.4f} ms ({framework['gpu_busy_time_percent']:.1f}%)")
+        print(f"\t* T_exposed (Framework Tax): {framework['T_exposed_ms']:.4f} ms ({framework['T_exposed_percent']:.1f}%)")
+        print(f"\t* T_gpu_busy (GPU Active Time): {metrics['gpu_busy_time_ms']:.4f} ms ({framework['T_gpu_busy_percent']:.1f}%)")
         
         # Timing breakdown
         print(f"\t  - Torch measured inference time (ms): {timing['torch_measured_inference_time_ms']:.4f}")
@@ -255,11 +255,6 @@ class SodaAnalyzer:
     def save(self) -> str:
         """
         Saves analysis results to JSON file.
-        Uses results stored in self.results from analyze().
-        Generates model_name and config from self.args.
-            
-        Returns:
-            Path to the saved report file.
         """
         if self.results is None:
             raise ValueError("No analysis results available. Call analyze() first.")
@@ -270,6 +265,10 @@ class SodaAnalyzer:
         
         # Generate model_name and config from args
         model_name = self.args.model
+        
+        # FIX: Add GPU name to config
+        gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
+        
         config = {
             "batch_size": self.args.batch_size,
             "seq_len": self.args.seq_len,
@@ -277,6 +276,7 @@ class SodaAnalyzer:
             "precision": self.args.precision,
             "compile_type": self.args.compile_type,
             "device": self.args.device,
+            "gpu_name": gpu_name,  # ADD THIS
         }
         
         # Build output structure
@@ -286,7 +286,7 @@ class SodaAnalyzer:
                 "timestamp": datetime.now().isoformat(),
                 "config": config
             },
-            "performance_metrics": metrics, 
+            "performance_metrics": metrics,
             "per_stream_analysis": {
                 str(stream_id): {
                     "total_ops": data["op_count"],
@@ -427,10 +427,11 @@ class ModelTracer:
         
         # Determine if model is decoder or encoder
         encoder_models = ["bert", "roberta"]
-        self.is_decoder = not any(
-            model.lower() in self.model_name.lower() 
-            for model in encoder_models
-        )
+        whisper_models = ["whisper"]
+
+        self.is_whisper = any(model.lower() in self.model_name.lower() for model in whisper_models)
+        self.is_encoder = any(model.lower() in self.model_name.lower() for model in encoder_models)
+        self.is_decoder = not (self.is_encoder or self.is_whisper)
 
         # Derive experiment/output paths
         self.experiment_name = utils.generate_experiment_name(
@@ -475,15 +476,24 @@ class ModelTracer:
         """
 
         # Load model and tokenizer
-        if self.is_decoder:
+        if self.is_whisper:
+            self.model, self.tokenizer = self.load_whisper()
+            # FIX: Generate audio inputs for Whisper, not text inputs
+            print(f"Generating synthetic audio input: batch_size={self.batch_size}, seq_len={self.seq_len}")
+            self.model_inputs = self.generate_audio_inputs()
+        elif self.is_decoder:
             self.model, self.tokenizer = self.load_decoder()
+            print(f"Generating synthetic input: batch_size={self.batch_size}, seq_len={self.seq_len}")
+            self.model_inputs = utils.generate_synthetic_inputs(
+                self.tokenizer, self.device, self.batch_size, self.seq_len
+            )
         else:
             self.model, self.tokenizer = self.load_encoder()
+            print(f"Generating synthetic input: batch_size={self.batch_size}, seq_len={self.seq_len}")
+            self.model_inputs = utils.generate_synthetic_inputs(
+                self.tokenizer, self.device, self.batch_size, self.seq_len
+            )
 
-        print(f"Generating synthetic input: batch_size={self.batch_size}, seq_len={self.seq_len}")
-        self.model_inputs = utils.generate_synthetic_inputs(
-            self.tokenizer, self.device, self.batch_size, self.seq_len
-        )
 
     def get_kwargs(self) -> Dict[str, Any]:
         """Returns common kwargs for model loading."""
@@ -558,12 +568,13 @@ class ModelTracer:
     def load_decoder(self) -> Tuple[transformers.PreTrainedModel, transformers.PreTrainedTokenizer]:
         """Loads a decoder-only model (e.g., Llama)."""
         # Load tokenizer first to get eos_token_id
-        tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_name)
+        tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         
         # Load config and set pad_token_id before model initialization to prevent warning
-        config = transformers.AutoConfig.from_pretrained(self.model_name)
+        # FIX: Add trust_remote_code=True here for models like DeepSeek-MoE
+        config = transformers.AutoConfig.from_pretrained(self.model_name, trust_remote_code=True)
         if hasattr(config, 'pad_token_id') and config.pad_token_id is None:
             config.pad_token_id = tokenizer.eos_token_id
         
@@ -594,6 +605,94 @@ class ModelTracer:
         
         return model, tokenizer
     
+    def load_whisper(self) -> Tuple[transformers.PreTrainedModel, transformers.AutoProcessor]:
+        """Loads Whisper encoder-decoder model."""
+        processor = transformers.AutoProcessor.from_pretrained(self.model_name)
+        
+        kwargs = self.get_kwargs()
+        if self.compile_type == "torch.compile":
+            kwargs.update({"attn_implementation": "sdpa"})
+            model = transformers.AutoModelForSpeechSeq2Seq.from_pretrained(
+                self.model_name, **kwargs
+            ).eval()
+            if self.is_fp8 and "quantization_config" not in kwargs:
+                model = self._convert_to_fp8(model)
+            model.generate = torch.compile(model.generate, mode="reduce-overhead", backend="inductor")
+        elif self.compile_type == "flash-attention":
+            kwargs.update({"attn_implementation": "flash_attention_2"})
+            model = transformers.AutoModelForSpeechSeq2Seq.from_pretrained(
+                self.model_name, **kwargs
+            ).eval()
+            if self.is_fp8 and "quantization_config" not in kwargs:
+                model = self._convert_to_fp8(model)
+        else:  # eager
+            kwargs.update({"attn_implementation": "eager"})
+            model = transformers.AutoModelForSpeechSeq2Seq.from_pretrained(
+                self.model_name, **kwargs
+            ).eval()
+            if self.is_fp8 and "quantization_config" not in kwargs:
+                model = self._convert_to_fp8(model)
+        
+        return model, processor
+
+    def generate_audio_inputs(self) -> Dict[str, torch.Tensor]:
+        """
+        Generates synthetic audio features for Whisper.
+        Handles both raw samples (large seq_len) and frames (small seq_len).
+        """
+        # Determine correct mel bins from model config (v3=128, v1/v2=80)
+        num_mel_bins = getattr(self.model.config, "num_mel_bins", 80)
+        WHISPER_EXPECTED_FRAMES = 3000
+
+        # Case 1: seq_len looks like sample count (e.g. 480000 for 30s)
+        if self.seq_len > 10000:
+            # Generate raw audio waveform
+            audio = torch.randn(self.seq_len, dtype=torch.float32)
+            
+            # Use processor to extract features (handles mel conversion & padding)
+            inputs = self.tokenizer(
+                audio, 
+                sampling_rate=16000, 
+                return_tensors="pt"
+            )
+            features = inputs.input_features # [1, bins, frames]
+            
+            # Expand to batch size
+            if self.batch_size > 1:
+                features = features.repeat(self.batch_size, 1, 1)
+                
+        # Case 2: seq_len looks like frame count (e.g. 3000)
+        else:
+            features = torch.randn(
+                self.batch_size, 
+                num_mel_bins, 
+                self.seq_len,
+                dtype=self.precision,
+                device=self.device
+            )
+            
+            # Pad or truncate to expected 3000 frames
+            if self.seq_len < WHISPER_EXPECTED_FRAMES:
+                features = torch.nn.functional.pad(
+                    features, (0, WHISPER_EXPECTED_FRAMES - self.seq_len)
+                )
+            elif self.seq_len > WHISPER_EXPECTED_FRAMES:
+                features = features[:, :, :WHISPER_EXPECTED_FRAMES]
+
+        # Create attention mask (all 1s since we have valid audio)
+        # Shape matches the frames dimension of features: [batch_size, frames]
+        # Note: Whisper attention mask is usually for the encoder inputs
+        attention_mask = torch.ones(
+            features.shape[0], 
+            features.shape[2], 
+            dtype=torch.long, 
+            device=self.device
+        )
+
+        return {
+            "input_features": features.to(self.device).to(self.precision),
+            "attention_mask": attention_mask
+        }
 
     def run(self) -> None:
         """
@@ -607,7 +706,9 @@ class ModelTracer:
         """
         Profiles the forward pass of the model (encoder or decoder).
         """
-        if self.is_decoder:
+        if self.is_whisper:
+            self.trace_forward_pass_for_whisper()
+        elif self.is_decoder:
             self.trace_forward_pass_for_decoder()
         else:
             self.trace_forward_pass_for_encoder()
@@ -623,6 +724,50 @@ class ModelTracer:
         self.events = utils.collect_events(self.trace_data)
         self.sequences = utils.link_sequences(self.events)
         print(f"Collected {len(self.sequences)} event sequences.")
+
+    def trace_forward_pass_for_whisper(self) -> None:
+        """
+        Profiles the generate step of Whisper (encoder-decoder).
+        """
+        LOGGER.info("=== Profiling Whisper Model Forward Pass ===")
+        
+        # Warm-up runs
+        with torch.no_grad():
+            for _ in range(max(0, self.args.warmup)):
+                self.model.generate(
+                    **self.model_inputs,
+                    max_new_tokens=self.max_new_tokens,
+                    do_sample=False,
+                )
+
+        # Synchronize before timing
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        # Profiled run 
+        with torch.no_grad():
+            with profile(
+                activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
+                with_modules=True,
+                with_flops=True,
+                profile_memory=True,
+                record_shapes=True,
+            ) as prof:
+                start_time = torch.cuda.Event(enable_timing=True)
+                end_time = torch.cuda.Event(enable_timing=True)
+                
+                start_time.record()
+                self.model.generate(
+                    **self.model_inputs,
+                    max_new_tokens=self.max_new_tokens,
+                    do_sample=False,
+                )
+                end_time.record()
+                
+                torch.cuda.synchronize()
+                self.torch_measured_inference_time_us = utils.ms_to_us(start_time.elapsed_time(end_time))
+        
+        prof.export_chrome_trace(str(self.trace_file))
 
     def trace_forward_pass_for_decoder(self) -> None:
         """

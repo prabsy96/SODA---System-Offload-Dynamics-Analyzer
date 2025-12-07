@@ -27,10 +27,25 @@ def ensure_env_loaded() -> None:
         sys.exit(1)
 
 
+def get_gpu_suffix() -> str:
+    """Returns a short GPU suffix (e.g., H100, A100) or 'cpu'."""
+    if not torch.cuda.is_available():
+        return "cpu"
+    name = torch.cuda.get_device_name(0)
+    if "H100" in name: return "H100"
+    if "H200" in name: return "H200"
+    if "A100" in name: return "A100"
+    if "V100" in name: return "V100"
+    if "T4" in name: return "T4"     # ADD THIS LINE
+    if "L4" in name: return "L4"     # ADD THIS LINE (for the L4 node)
+    if "4090" in name: return "4090"
+    return "gpu"
+
 def main() -> None:
     ensure_env_loaded()
 
     sweep_roots = set()
+    gpu_suffix = get_gpu_suffix()
 
     compile_type = PARAMS["compile_type"]
     precision = PARAMS["precision"]
@@ -44,7 +59,8 @@ def main() -> None:
         max_new_toks = cfg["max_new_toks"]
 
         # Group sweep outputs under a common prefix (model + compile_type + precision)
-        sweep_root = Path(os.environ.get("SODA_OUTPUT", "output")) / f"{model.replace('/', '_')}_{compile_type}_{precision}"
+        max_tok_str = f"mt{max_new_toks[0]}"  # Use the first value since it's typically a single-element list
+        sweep_root = Path(os.environ.get("SODA_OUTPUT", "output")) / f"{model.replace('/', '_')}_{compile_type}_{precision}_{max_tok_str}_{gpu_suffix}"
         sweep_roots.add(sweep_root)
         print(f"\n=== Running config: {config_name} ({model}) ===")
 
@@ -95,8 +111,19 @@ def main() -> None:
             if not root.exists():
                 print(f"Skipping summary for {root}: path does not exist", file=sys.stderr)
                 continue
+            
+            # Extract max_tok_str from the folder name
+            # e.g., "meta-llama_Llama-3.2-1B_eager_bfloat16_mt10_T4" -> "mt10"
+            folder_name = root.name
+            max_tok_str = None
+            for part in folder_name.split("_"):
+                if part.startswith("mt"):
+                    max_tok_str = part
+                    break
+            
             try:
-                summarize_soda_sweep(root)
+                # PASS both gpu_suffix and max_tok_str
+                summarize_soda_sweep(root, gpu_name_override=gpu_suffix, max_tok_override=max_tok_str)
             except RuntimeError as exc:
                 print(f"Failed to summarize {root}: {exc}", file=sys.stderr)
 
