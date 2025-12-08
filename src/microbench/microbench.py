@@ -12,7 +12,7 @@ from soda.microbench.framework.pytorch.verify import compare_sequences
 from soda.microbench.baremetal.generate import generate_jobs
 from soda.microbench.baremetal.search import search_cublas_algos_offline
 from soda.microbench.baremetal.profile import profile_baremetal_gemm_kernels
-from soda.microbench.baremetal.report import report
+from soda.microbench.baremetal.report import summarize
 
 class SodaMicrobench:
     
@@ -150,10 +150,10 @@ class SodaMicrobench:
             print("Skipping baremetal GEMM kernel profiling (--skip-baremetal-profile).")
             print_utils.section_end(section)
         
-        # Compare PyTorch vs Baremetal
-        section = "Report PyTorch vs Baremetal"
+        # TaxBreak Report
+        section = "TaxBreak Report"
         print_utils.section_start(section)
-        report(
+        summarize(
             model_name=getattr(self.args, "model", None),
             dtype=getattr(self.args, "dtype", None),
         )

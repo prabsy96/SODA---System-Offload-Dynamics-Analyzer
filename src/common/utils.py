@@ -1005,8 +1005,8 @@ def calculate_sequence_metrics(sequences: List[Dict], metrics: List[str]) -> Lis
             assert culib_xlat_tax >= 0, "Negative culib_xlat_tax detected"
             seq["culib_xlat_tax"] = culib_xlat_tax
 
-            # This should still hold true, but we don't have the shim tax
-            assert cuda_launch["ts"] - culib_run["ts"] >= 0, "Negative run tax detected"
+            # NOTE: This should still hold true 
+            assert cuda_launch["ts"] - culib_setup["ts"] >= 0, "Negative culib_xlat_tax detected"
 
         if "launch_tax" in metrics:
             # Launch tax = kernel - launch
