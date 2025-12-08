@@ -96,6 +96,7 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
     
     Returns: Aggregated sequence dict with keys: kernel, launch_tax, cuda_launch, aten_op
     """
+    ################################################################################
     # Extract CUDA launch events, kernel events, and NVTX ranges
     cuda_launches = extract_launches_sql(trace_file_sql)
     kernels = extract_kernels_sql(trace_file_sql)
@@ -212,10 +213,7 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
     )
 
     # Baremetal runs same kernel config multiple times, so should have exactly 1 unique kernel
-    assert len(aggregated_sequences) == 1, (
-        f"Expected 1 unique kernel after aggregation, found {len(aggregated_sequences)}: "
-        f"{[seq['kernel']['name'] for seq in aggregated_sequences]}"
-    )
+    assert len(aggregated_sequences) == 1, f"Expected 1 unique kernel after aggregation, found {len(aggregated_sequences)}"
     
     # Return the single aggregated sequence
     # Format: {launch_tax: {...}, kernel: {...}, cuda_launch: {...}, aten_op: {...}}
@@ -269,11 +267,10 @@ def profile_baremetal_gemm_kernels(
     
     # Run each job and collect sequences
     sequences = []
-    null_launch_tax = None
-
     for job in jobs:
 
         # Skip batched GEMMs for now due to non-contiguous layout issue
+        # FIXME: Implement batched GEMM support in cublaslt backend 
         if "batch" in job and job["batch"] > 1:
             print(f"Skipping job {job['id']} (TODO: batched GEMM)")
             sequences.append(None)  # Append None to maintain alignment
@@ -288,9 +285,7 @@ def profile_baremetal_gemm_kernels(
 
         # Attach job_id for downstream reporting
         sequence["job_id"] = job["id"]
-        
-        # Capture null kernel baseline tax for delta calculations
-        null_launch_tax = sequence["launch_tax"]["avg"] if job["name"] == "__null_kernel__" else None
+
         sequences.append(sequence)
     
     baremetal_gemm_sequences_file = utils.get_path("BAREMETAL_GEMM_KERNELS")
@@ -302,12 +297,19 @@ def profile_baremetal_gemm_kernels(
     print(f"Saved {baremetal_gemm_sequences_data['summary']['count']} baremetal GEMM sequences to {baremetal_gemm_sequences_file}")
     
     # Print a summary table with % delta over null kernel 
-    print_summary(sequences, null_launch_tax)
+    print_summary(sequences)
     
     return baremetal_gemm_sequences_data
 
-def print_summary(sequences, null_launch_tax=None):
+def print_summary(sequences):
     """Print a compact table summary of profiled sequences, with % delta over null kernel."""
+    # Derive null launch tax from sequences if present.
+    null_launch_tax = None
+    for seq in sequences:
+        if seq["kernel"]["name"] == "__null_kernel__":
+            null_launch_tax = seq["launch_tax"]["avg"]
+            break
+
     table_data = []
     for sequence in sequences:
 

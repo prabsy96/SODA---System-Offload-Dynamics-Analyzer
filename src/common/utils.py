@@ -440,54 +440,62 @@ def aggregate_sequences(grouped_sequences, metrics: List[str], event_types: List
         # Use first sequence as template for aggregation.
         first_seq = seq_group[0]
 
-        # Create sequence level template.
+        # Create template for aggregated sequence.
         agg_seq = {"count": len(seq_group)}
         for event_type in event_types:
-            if event_type == "culib":
-                # Handled separately below.
-                continue
-            agg_seq[event_type] = dict(first_seq[event_type])
+            # Generic path for standard events (kernel, aten_op, cuda_launch, torch_op).
+            if event_type !="culib":
+                agg_seq[event_type] = dict(first_seq[event_type])
 
-        # Aggregate sequence-level metrics (e.g., launch/xlat tax).
+            # Special handling for cuBLASLt culib markers.
+            elif event_type == "culib":
+                culib = first_seq["culib"]
+                # Create template for culib sequence 
+                agg_culib = {"temperature": culib.get("temperature")}
+                for phase in culib:
+                    # Skip temperature since it not a phase and doens't have numeric metrics
+                    if phase != "temperature":
+                        agg_culib[phase] = {}
+                agg_seq["culib"] = agg_culib
+            else: 
+                raise ValueError(f"Invalid event type: {event_type}")
+        ##########
+
+        # Aggregate sequence-level metrics (eg launch tax, xlat tax, shim tax etc)
         for metric in metrics:
             if metric in first_seq:
                 agg_seq[metric] = agg_seq_metric(seq_group, metric)
 
-        # Aggregate event-level metrics (e.g., per-event durations).
+        # Aggregate event-level metrics (eg dur, ts, etc)
         event_metrics = ["dur"]
         for event_type in event_types:
-            if event_type == "culib":
-                continue
             # Generic path for standard events (kernel, aten_op, cuda_launch, torch_op).
-            for metric in event_metrics:
-                agg_seq[event_type][metric] = agg_event_metric(
-                    seq_group, event_type, metric
-                )
-
-        # Aggregate cuBLASLt culib markers as an event-like payload (per-phase durations).
-        if "culib" in event_types:
-            culib = first_seq.get("culib", {})
-            agg_culib = {"temperature": culib.get("temperature")}
-            phases = [p for p in culib.keys() if p != "temperature"]
-            for phase in phases:
-                values = [
-                    seq["culib"][phase]["dur"]
-                    for seq in seq_group
-                    if "culib" in seq and phase in seq["culib"]
-                ]
-                agg_culib[phase] = {"dur": summarize_metric(values)}
-            agg_seq["culib"] = agg_culib
+            if event_type != "culib":
+                for metric in event_metrics:
+                    agg_seq[event_type][metric] = agg_event_metric(
+                        seq_group, event_type, metric
+                    )
+            elif event_type == "culib":
+                phases = [p for p in agg_seq["culib"].keys() if p != "temperature"]
+                for phase in phases:
+                    phase_dict = agg_seq["culib"][phase]
+                    for metric in event_metrics:
+                        values = [seq["culib"][phase][metric] for seq in seq_group]
+                        phase_dict[metric] = summarize_metric(values)
+            else: 
+                raise ValueError(f"Invalid event type: {event_type}")
 
         # Clean up; ts has no meaning after aggregation for standard events.
         for event_type in event_types:
-            # Special handling for cuBLASLt culib markers.
-            if event_type == "culib":
-                agg_culib = agg_seq["culib"]
-                for phase in agg_culib:
-                    if phase != "temperature":
-                        agg_culib[phase]["ts"] = None
-            else:
+            # Clean up ts for standard events.
+            if event_type != "culib":
                 agg_seq[event_type]["ts"] = None
+            # Clean up for special case of cuBLASLt culib markers.
+            elif event_type == "culib":
+                for phase in agg_seq["culib"]:
+                    if phase != "temperature":
+                        agg_seq["culib"][phase]["ts"] = None 
+                
 
         # Save aggregated unique sequence.
         unique_sequences.append(agg_seq)
