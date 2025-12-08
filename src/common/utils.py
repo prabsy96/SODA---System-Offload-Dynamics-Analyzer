@@ -466,13 +466,16 @@ def aggregate_sequences(grouped_sequences, metrics: List[str], event_types: List
 
         # Aggregate cuBLASLt culib markers as an event-like payload (per-phase durations).
         if "culib" in event_types:
-            culib = first_seq["culib"]
-            agg_culib = {"temperature": culib["temperature"]}
-            for phase in ("setup", "heur", "run"):
-                values = [seq["culib"][phase]["dur_us"] for seq in seq_group]
-                agg_culib[phase] = {
-                    "dur_us": summarize_metric(values),
-                }
+            culib = first_seq.get("culib", {})
+            agg_culib = {"temperature": culib.get("temperature")}
+            phases = [p for p in culib.keys() if p != "temperature"]
+            for phase in phases:
+                values = [
+                    seq["culib"][phase]["dur"]
+                    for seq in seq_group
+                    if "culib" in seq and phase in seq["culib"]
+                ]
+                agg_culib[phase] = {"dur": summarize_metric(values)}
             agg_seq["culib"] = agg_culib
 
         # Clean up; ts has no meaning after aggregation for standard events.
@@ -480,8 +483,9 @@ def aggregate_sequences(grouped_sequences, metrics: List[str], event_types: List
             # Special handling for cuBLASLt culib markers.
             if event_type == "culib":
                 agg_culib = agg_seq["culib"]
-                for phase in ("setup", "heur", "run"):
-                    agg_culib[phase]["ts"] = None
+                for phase in agg_culib:
+                    if phase != "temperature":
+                        agg_culib[phase]["ts"] = None
             else:
                 agg_seq[event_type]["ts"] = None
 
@@ -960,54 +964,55 @@ def calculate_sequence_metrics(sequences: List[Dict], metrics: List[str]) -> Lis
     for seq in sequences:
         kernel = seq["kernel"]
         aten_op = seq["aten_op"]
-        cuda_launch = seq["cuda_launch"]
+        cuda_launch = seq["cuda_launch"]    
+        torch_op = seq.get("torch_op")
 
-        t_op = aten_op["ts"]
-        t_api = cuda_launch["ts"]
+        # cuBLASLt phases for library translation taxes
+        culib_setup = seq.get("culib", {}).get("setup", {})
+        culib_heur = seq.get("culib", {}).get("heur", {})
+        culib_run = seq.get("culib", {}).get("run", {})
 
         if "xlat_tax" in metrics:
-            # Translation tax captures pre-launch translation from aten_op to CUDA launch (t_op -> t_api).
-            xlat_tax = t_api - t_op
-            assert xlat_tax >= 0, f"Negative xlat tax detected: cu(da)LaunchKernel.ts={t_api}, aten_op.ts={t_op}, tax={xlat_tax}"
+            # Torch translation tax = launch - aten_op
+            # Time spent in the translation from aten_op to culib to launch.
+            xlat_tax = cuda_launch["ts"] - aten_op["ts"]
+            assert xlat_tax >= 0, "Negative xlat tax detected"
             seq["xlat_tax"] = xlat_tax
 
-        if "culib_xlat_tax" in metrics or "culib_shim_tax" in metrics:
-            # cuBLASLt translation tax inside the library path:
-            # - culib_xlat_tax: from entering setup to CUDA launch (t_setup -> t_api).
-            # - culib_shim_tax: from start of cublasLtMatmul call to CUDA launch (t_run -> t_api).
-            # This is the same as the culib translation tax, but we split it into two components
-            # to allow for more detailed analysis (t_setup -> t_run -> t_api)
-            culib = seq.get("culib")
-            assert culib is not None, "culib* metrics requested but 'culib' markers are missing"
+        if "shim_tax" in metrics:
+            # Shim tax = launch - run
+            # Time spent in the thin shim between cublasLtMatmul() and cudaLaunchKernel.
+            shim_tax = cuda_launch["ts"] - culib_run["ts"]
+            assert shim_tax >= 0, "Negative shim_tax detected"
+            seq["shim_tax"] = shim_tax
 
-            t_setup = culib["setup"]["ts"]
-            t_run = culib["run"]["ts"]
+        if "culib_xlat_tax" in metrics:
+            # cuBLASLt translation tax = t_api - t_setup 
+            # It spans the entire cuBLASLt translation process (setup + heur + shim)
+            assert "shim_tax" in metrics, "shim_tax is required for culib_xlat_tax"
 
-            if "culib_xlat_tax" in metrics:
-                # Library translation tax: from entering setup to CUDA launch (t_setup -> t_api).
-                culib_xlat_tax = t_api - t_setup
-                assert culib_xlat_tax >= 0, f"Negative culib_xlat_tax: t_api={t_api}, setup.ts={t_setup}, tax={culib_xlat_tax}"
-                seq["culib_xlat_tax"] = culib_xlat_tax
+            # HACK: culib_xlat_tax = setup + heur + shim 
+            # We do this because the nvtx markers are not contiguous and leaky
+            culib_xlat_tax = culib_setup["dur"] + culib_heur["dur"] + seq["shim_tax"]
+            assert culib_xlat_tax >= 0, "Negative culib_xlat_tax detected"
+            seq["culib_xlat_tax"] = culib_xlat_tax
 
-            if "culib_shim_tax" in metrics:
-                # Launch shim tax: from start of cublasLtMatmul call to CUDA launch (t_run -> t_api).
-                culib_shim_tax = t_api - t_run
-                assert culib_shim_tax >= 0, f"Negative culib_shim_tax: t_api={t_api}, run.ts={t_run}, tax={culib_shim_tax}"
-                seq["culib_shim_tax"] = culib_shim_tax
+            # This should still hold true, but we don't have the shim tax
+            assert cuda_launch["ts"] - culib_run["ts"] >= 0, "Negative run tax detected"
 
         if "launch_tax" in metrics:
-            # Launch tax captures post-launch execution from CUDA launch to kernel start (t_api -> t_kernel).
-            # Caveat: This might also include queue latency if the kernel is not immediately executed.
-            launch_tax = kernel["ts"] - t_api
-            assert launch_tax >= 0, f"Negative launch tax detected: kernel.ts={kernel['ts']}, cu(da)LaunchKernel.ts={t_api}, tax={launch_tax}"
+            # Launch tax = kernel - launch
+            # Time spent after the launch call to the kernel start.
+            # Caveat: This might also include queue latency due to concurrent launches.
+            launch_tax = kernel["ts"] - cuda_launch["ts"]
+            assert launch_tax >= 0, "Negative launch tax detected"
             seq["launch_tax"] = launch_tax
 
         if "py_tax" in metrics:
-            torch_op = seq["torch_op"]
-            assert torch_op is not None, "torch_op missing for py_tax"
-            t_py = torch_op["ts"]
-            py_tax = t_op - t_py
-            assert py_tax >= 0, f"Negative py_tax detected: aten_op.ts={t_op}, torch_op.ts={t_py}, tax={py_tax}"
+            # PyTorch translation tax = aten_op - torch_op
+            # Time spent in the translation from aten_op to torch_op.
+            py_tax = aten_op["ts"] - torch_op["ts"]
+            assert py_tax >= 0, "Negative py_tax detected"
             seq["py_tax"] = py_tax
 
     return sequences

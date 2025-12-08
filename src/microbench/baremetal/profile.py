@@ -16,7 +16,16 @@ import sys
 import subprocess
 import re
 from typing import Dict, Any
-from microbench.baremetal.utils import build_binary, build_base_args, nsys_profile, extract_kernels_sql, extract_launches_sql, extract_nvtx_ranges_sql as extract_nvtx_markers_sql
+from microbench.baremetal.utils import (
+    build_binary,
+    build_base_args,
+    nsys_profile,
+    extract_kernels_sql,
+    extract_launches_sql,
+    extract_culib_markers_sql,
+    link_culib_sequences,
+    annotate_sequences_with_culib_phases,
+)
 
 from soda.common import utils, print_utils
 from soda.common.data import ATenOp
@@ -90,12 +99,12 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
     # Extract CUDA launch events, kernel events, and NVTX ranges
     cuda_launches = extract_launches_sql(trace_file_sql)
     kernels = extract_kernels_sql(trace_file_sql)
-    nvtx_markers = extract_nvtx_markers_sql(trace_file_sql)
+    culib_markers = extract_culib_markers_sql(trace_file_sql)
     # utils.remove_file(trace_file_sql) # DEBUG 
 
     assert cuda_launches, f"No CUDA launch events found in {trace_file_sql}"
     assert kernels, f"No kernel events found in {trace_file_sql}"
-    assert nvtx_markers, f"No NVTX markers found in {trace_file_sql}"
+    assert culib_markers, f"No cuBLASLt markers found in {trace_file_sql}"
     
     # All kernels in this trace belong to the same job/aten_op
     # Handle null kernel vs regular GEMM jobs differently
@@ -156,16 +165,26 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
     # Attach cuBLASLt NVTX markers (culib) to each sequence when applicable,
     # then compute per-sequence taxes.
     if job["name"] != "__null_kernel__":
-        culib_sequences = link_culib_sequences(nvtx_markers)
-        annotate_sequences_with_culib_markers(
-            linked_sequences,
-            culib_sequences,
-            expected_num_sequences=(warmup + runs),
-        )
-        metrics = ["launch_tax", "culib_xlat_tax", "culib_shim_tax"]
+        marker_phases = ["setup", "heur", "run"]
+        metrics = ["launch_tax", "culib_xlat_tax", "shim_tax"]
     else: 
-        metrics = ["launch_tax"]
+        marker_phases = ["run"]
+        # Null kernel job: no cuBLASLt library translation
+        # NOTE: The notion of shim tax is still valid, however, its defined as 
+        # shim_tax = launch - run where run is the time __null_kernel__ is called.
+        metrics = ["launch_tax", "shim_tax"]
 
+    # Link cuBLASLt markers to create culib sequences
+    culib_sequences = link_culib_sequences(culib_markers, marker_phases)
+
+    # Attach culib sequences to recently profiled sequences
+    annotate_sequences_with_culib_phases(
+        linked_sequences,
+        culib_sequences,
+        expected_num_sequences=(warmup + runs),
+    )
+
+    # Compute per-sequence taxes
     linked_sequences_with_tax = utils.calculate_sequence_metrics(
         linked_sequences, metrics=metrics
     )
@@ -180,10 +199,10 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
     grouped_seqs_by_id_dict = utils.group_sequences_by_identity(sequences_after_warmup)
 
     if job["name"] == "__null_kernel__":
-        agg_metrics = ["launch_tax"]
-        event_types = ["kernel", "aten_op", "cuda_launch"]
+        agg_metrics = ["launch_tax", "shim_tax"]
+        event_types = ["kernel", "aten_op", "cuda_launch", "culib"]
     else:
-        agg_metrics = ["launch_tax", "culib_xlat_tax", "culib_shim_tax"]
+        agg_metrics = ["launch_tax", "culib_xlat_tax", "shim_tax"]
         event_types = ["kernel", "aten_op", "cuda_launch", "culib"]
 
     aggregated_sequences = utils.aggregate_sequences(
@@ -191,98 +210,16 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
         metrics=agg_metrics,
         event_types=event_types,
     )
-    
+
     # Baremetal runs same kernel config multiple times, so should have exactly 1 unique kernel
-    if len(aggregated_sequences) != 1:
-        kernel_names = [seq["kernel"]["name"] for seq in aggregated_sequences]
-        raise RuntimeError(
-            f"Expected 1 unique kernel after aggregation, found {len(aggregated_sequences)}: {kernel_names}"
-        )
+    assert len(aggregated_sequences) == 1, (
+        f"Expected 1 unique kernel after aggregation, found {len(aggregated_sequences)}: "
+        f"{[seq['kernel']['name'] for seq in aggregated_sequences]}"
+    )
     
     # Return the single aggregated sequence
     # Format: {launch_tax: {...}, kernel: {...}, cuda_launch: {...}, aten_op: {...}}
     return aggregated_sequences[0]
-
-
-def annotate_sequences_with_culib_markers(sequences, culib_sequences, expected_num_sequences):
-    """
-    Attach pre-linked cuBLASLt NVTX triplets (culib) to each sequence.
-    """
-    # Sanity: expect warmup + measured runs, and 1-1 mapping.
-    assert (
-        len(culib_sequences) == len(sequences) == expected_num_sequences
-    ), f"culib/sequences length mismatch: {len(culib_sequences)} vs {len(sequences)} vs {expected_num_sequences}"
-
-    for seq, culib in zip(sequences, culib_sequences):
-        seq["culib"] = culib
-        seq["culib_temp"] = culib["temperature"]
-
-def get_culib_phase(name: str):
-    """
-    Parse a cuBLASLt NVTX name like 'lib:setup:cold' into (phase, temp).
-    """
-    _, phase, temp = name.split(":")
-    return phase, temp
-
-
-def link_culib_sequences(nvtx_markers):
-    """
-    Link per-run lib markers (setup, heur, run) by temperature and order.
-    Returns a list of culib dicts aligned by time.
-    """
-    phases = ("setup", "heur", "run")
-    markers_by_phase = {phase: [] for phase in phases}
-
-    # Walk all markers once and bucket by phase.
-    for marker in nvtx_markers:
-        phase, _ = get_culib_phase(marker["name"])
-        markers_by_phase[phase].append(marker)
-
-    # Sort each phase by time.
-    for phase in phases:
-        markers_by_phase[phase].sort(key=lambda m: m["ts"])
-
-    setup_markers = markers_by_phase["setup"]
-    heur_markers = markers_by_phase["heur"]
-    run_markers = markers_by_phase["run"]
-
-    def strip(marker):
-        return {
-            "ts": marker["ts"],
-            "dur_us": marker["dur_us"],
-        }
-
-    culib_sequences = []
-    for setup, heur, run in zip(
-        markers_by_phase["setup"], 
-        markers_by_phase["heur"], 
-        markers_by_phase["run"]
-    ):
-        _, temp = get_culib_phase(run["name"])
-
-        # Basic per-range sanity.
-        for phase, marker in (("setup", setup), ("heur", heur), ("run", run)):
-            assert marker["dur_us"] >= 0.0, f"{phase} has negative duration: {marker['dur_us']}"
-
-        # Ordering sanity: setup fully before heur, heur fully before run.
-        setup_end = setup["ts"] + setup["dur_us"]
-        heur_end = heur["ts"] + heur["dur_us"]
-        run_end = run["ts"] + run["dur_us"]
-        assert setup_end <= heur["ts"] <= heur_end <= run["ts"] <= run_end, (
-            f"Unexpected cuBLASLt phase ordering: "
-            f"setup=({setup['ts']},{setup_end}), "
-            f"heur=({heur['ts']},{heur_end}), "
-            f"run=({run['ts']},{run_end})"
-        )
-
-        culib_sequences.append({
-            "temperature": temp,
-            "setup": strip(setup),
-            "heur": strip(heur),
-            "run": strip(run),
-        })
-
-    return culib_sequences
 
 def profile_baremetal_gemm_kernels(
     warmup: int,

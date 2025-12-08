@@ -150,7 +150,7 @@ def extract_launches_sql(trace_file_sql):
         {
             correlationId: {
                 "ts": start_us,
-                "dur": dur_us,
+                "dur": dur,
                 "correlation": correlationId
             }
         }
@@ -181,12 +181,12 @@ def extract_launches_sql(trace_file_sql):
         
     return cuda_launches
 
-def extract_nvtx_ranges_sql(trace_file_sql):
+def extract_culib_markers_sql(trace_file_sql):
     """
     Extract NVTX range stamps from an nsys sqlite trace.
 
     Returns:
-        List of dicts with name, ts, dur_us.
+        List of dicts with name, ts, dur (microseconds).
     """
     ranges = []
     try:
@@ -204,7 +204,7 @@ def extract_nvtx_ranges_sql(trace_file_sql):
                 {
                     "name": name,
                     "ts": start_ns / 1000.0,
-                    "dur_us": (end_ns - start_ns) / 1000.0,
+                    "dur": (end_ns - start_ns) / 1000.0,
                 }
             )
         conn.close()
@@ -272,3 +272,96 @@ def build_binary():
         raise RuntimeError(f"Build failed:\n{result.stderr}")
     
     print("Build successful")
+
+
+def annotate_sequences_with_culib_phases(sequences, culib_sequences, expected_num_sequences):
+    """
+    Attach pre-linked cuBLASLt phases to each sequence.
+    """
+    # Sanity: expect warmup + measured runs, and 1-1 mapping.
+    assert (
+        len(culib_sequences) == len(sequences) == expected_num_sequences
+    ), f"culib/sequences length mismatch: {len(culib_sequences)} vs {len(sequences)} vs {expected_num_sequences}"
+
+    for seq, culib in zip(sequences, culib_sequences):
+        seq["culib"] = culib
+        seq["culib_temp"] = culib["temperature"]
+
+def get_culib_phase(name: str):
+    """
+    Parse a cuBLASLt NVTX name like 'lib:setup:cold' into (phase, temp).
+    """
+    _, phase, temp = name.split(":")
+    return phase, temp
+
+
+def link_culib_sequences(markers, phases):
+    """
+    Link per-run lib markers by phases and order.
+    Returns a list of culib dicts aligned by time.
+    """
+    def strip(marker):
+        return {
+            "ts": marker["ts"],
+            "dur": marker["dur"],
+        }
+
+    assert "run" in phases, "run phase required to derive temperature"
+    
+    markers_by_phase = {phase: [] for phase in phases}
+
+    # Walk all markers once and bucket by phase.
+    for marker in markers:
+        phase, _ = get_culib_phase(marker["name"])
+        markers_by_phase[phase].append(marker)
+
+    # Sort each phase by time.
+    for phase in phases:
+        markers_by_phase[phase].sort(key=lambda m: m["ts"])
+
+    culib_sequences = []
+    phase_marker_lists = [markers_by_phase[phase] for phase in phases]
+    run_idx = phases.index("run")
+
+    # Ensure each phase has the same count to avoid silent truncation.
+    lengths = {phase: len(lst) for phase, lst in zip(phases, phase_marker_lists)}
+    expected_len = next(iter(lengths.values()))
+    for phase, length in lengths.items():
+        assert length == expected_len, (
+            f"cuBLASLt phase count mismatch: {lengths}"
+        )
+
+    for markers in zip(*phase_marker_lists):
+        run_marker = markers[run_idx]
+        _, temp = get_culib_phase(run_marker["name"])
+
+        # All phases should share the same temperature tag.
+        for phase, marker in zip(phases, markers):
+            _, phase_temp = get_culib_phase(marker["name"])
+            assert phase_temp == temp, (
+                f"Temperature mismatch across phases: run={temp}, {phase}={phase_temp}"
+            )
+
+        # Basic per-range sanity.
+        for phase, marker in zip(phases, markers):
+            assert marker["dur"] >= 0.0, f"{phase} has negative duration: {marker['dur']}"
+
+        # Ordering sanity: each phase must fully precede the next.
+        for (prev_phase, prev_marker), (phase, marker) in zip(
+            zip(phases, markers), zip(phases[1:], markers[1:])
+        ):
+            prev_end = prev_marker["ts"] + prev_marker["dur"]
+            marker_end = marker["ts"] + marker["dur"]
+            assert prev_end <= marker["ts"] <= marker_end, (
+                f"Unexpected cuBLASLt phase ordering between {prev_phase} and {phase}: "
+                f"{prev_phase}=({prev_marker['ts']},{prev_end}), "
+                f"{phase}=({marker['ts']},{marker_end})"
+            )
+
+        sequence = {"temperature": temp}
+        for phase, marker in zip(phases, markers):
+            sequence[phase] = strip(marker)
+        culib_sequences.append(sequence)
+
+    return culib_sequences
+
