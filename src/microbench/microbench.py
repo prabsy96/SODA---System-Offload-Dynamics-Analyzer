@@ -1,4 +1,5 @@
 from typing import Dict, Any
+from pathlib import Path
 
 from soda.common import utils
 from soda.common import print_utils
@@ -152,5 +153,8 @@ class SodaMicrobench:
         # Compare PyTorch vs Baremetal
         section = "Report PyTorch vs Baremetal"
         print_utils.section_start(section)
-        report()
+        report(
+            model_name=getattr(self.args, "model", None),
+            dtype=getattr(self.args, "dtype", None),
+        )
         print_utils.section_end(section)

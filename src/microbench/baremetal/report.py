@@ -12,6 +12,9 @@ import json
 import os
 import sys
 from collections import defaultdict
+from pathlib import Path
+
+import matplotlib.pyplot as plt
 
 from soda.common import utils, print_utils
 from soda.common.data import ATenOp, Kernel
@@ -42,7 +45,6 @@ def load_pytorch_results(pytorch_file):
         kernel = Kernel.from_dict(kernel_dict)
         
         op_signature = aten_op.get_signature()
-        kernel_info = kernel.get_signature()
         
         # Extract stats
         stats = launch_tax
@@ -51,12 +53,12 @@ def load_pytorch_results(pytorch_file):
         freq = sequence["freq"]
         
         results[job_id] = {
-            "kernel": kernel_info,
             "freq": freq,
+            "kernel": kernel.get_signature(),
             "op_signature": op_signature,
-            "stats": stats,
-            "xlat_stats": xlat_stats,
-            "py_stats": py_stats,
+            "launch_tax": launch_tax,
+            "xlat_tax": xlat_tax,
+            "py_tax": py_tax,
         }
     
     return results
@@ -65,7 +67,7 @@ def load_baremetal_results(baremetal_file):
     """
     Load baremetal results 
     
-    Returns: dict mapping job_id -> {kernel, stats}
+    Returns: dict mapping job_id -> {kernel, launch_tax, shim_tax, culib_xlat_tax}
     """
     with open(baremetal_file, 'r') as f:
         data = json.load(f)
@@ -82,164 +84,363 @@ def load_baremetal_results(baremetal_file):
 
         results[job_id] = {
             "kernel": sequence["kernel"],
-            "stats": sequence["launch_tax"],
+            "launch_tax": sequence["launch_tax"],
+            "shim_tax": sequence.get("shim_tax"),
+            "culib_xlat_tax": sequence.get("culib_xlat_tax"),
+            "culib_setup": sequence.get("culib", {}).get("setup"),
+            "culib_heur": sequence.get("culib", {}).get("heur"),
+            "freq": sequence.get("freq"),
         }
     
     return results
 
 
-def compare_results(pytorch_results, baremetal_results):
-    """
-    Compare PyTorch and baremetal results.
-    
-    Returns: list of match entries
-    """
-    matches = []
-    
-    # Process all baremetal results (including null kernel)
-    for job_id in sorted(baremetal_results.keys()):
-        baremetal = baremetal_results[job_id]
-        is_null_kernel = baremetal["kernel"]["name"] == "__null_kernel__"
-        
-        if is_null_kernel:
-            # Null kernel: no PyTorch match
-            match_entry = {
-                "job_id": job_id,
-                "op_signature": None,
-                "kernel": {
-                    "name": baremetal["kernel"]["name"],
-                    "grid": baremetal["kernel"].get("grid"),
-                    "block": baremetal["kernel"].get("block"),
-                    "shared_memory": baremetal["kernel"].get("shared_memory"),
-                },
-                "framework": None,
-                "framework_xlat": None,
-                "framework_py": None,
-                "framework_freq": None,
-                "baremetal": baremetal["stats"],
-                "framework_xlat_avg": None,
-                "framework_py_avg": None,
-                "framework_launch_avg": None,
-            }
-        else:
-            # Regular kernel: should have PyTorch match
-            if job_id not in pytorch_results:
-                print(f"Warning: Job {job_id} not found in PyTorch results", file=sys.stderr)
-                continue
-            
-            pytorch = pytorch_results[job_id]
-            
-            # Extract stats (all values in microseconds)
-            fw_stats = pytorch["stats"]
-            fw_xlat_stats = pytorch.get("xlat_stats")
-            fw_py_stats = pytorch.get("py_stats")
-            fw_xlat_avg = fw_xlat_stats["avg"] if fw_xlat_stats else None
-            fw_py_avg = fw_py_stats["avg"] if fw_py_stats else None
-            fw_launch_avg = fw_stats["avg"] if fw_stats else None
-            fw_freq = pytorch["freq"]
-            
-            # Build match entry
-            match_entry = {
-                "job_id": job_id,
-                "op_signature": pytorch["op_signature"],
-                "kernel": {
-                    "name": pytorch["kernel"]["name"],
-                    "grid": pytorch["kernel"]["grid"],
-                    "block": pytorch["kernel"]["block"],
-                    "shared_memory": pytorch["kernel"]["shared_memory"],
-                },
-                "framework": fw_stats,
-                "framework_xlat": fw_xlat_stats,
-                "framework_py": fw_py_stats,
-                "framework_freq": fw_freq,
-                "baremetal": baremetal["stats"],
-                "framework_xlat_avg": fw_xlat_avg,
-                "framework_py_avg": fw_py_avg,
-                "framework_launch_avg": fw_launch_avg,
-            }
-        
-        matches.append(match_entry)
-    
-    return matches
+def get_framework_summary(pytorch_results, show_table: bool = True):
+    """Per GEMM Framework Overhead (μs) @ Pytorch Scope"""
+    def fmt_val(v):
+        return None if v is None else f"{v:.2f}"
 
+    framework_summary_data = []
+    for job_id, job_result in sorted(pytorch_results.items()):
 
-def print_summary(matches):
-    """Print comparison summary as compact tables."""
-    per_kernel_rows = []
-    for match in matches:
-        kernel_name = match["kernel"]["name"]
-        fw_xlat_avg = match.get("framework_xlat_avg")
-        fw_py_avg = match.get("framework_py_avg")
-        fw_launch_avg = match.get("framework_launch_avg")
-        fw_freq = match.get("framework_freq")
-        per_kernel_rows.append([
-            match["job_id"],
-            kernel_name,
-            f"{fw_py_avg:.2f}" if fw_py_avg is not None else "-",
-            f"{fw_xlat_avg:.2f}" if fw_xlat_avg is not None else "-",
-            f"{fw_launch_avg:.2f}" if fw_launch_avg is not None else "-",
-            fw_freq if fw_freq is not None else "-",
+        py_tax = job_result["py_tax"]["avg"]
+        xlat_tax = job_result["xlat_tax"]["avg"]
+        launch_tax = job_result["launch_tax"]["avg"]
+        t_fo = py_tax + xlat_tax + launch_tax
+
+        framework_summary_data.append([
+            job_id,
+            job_result["kernel"]["name"],
+            fmt_val(t_fo),
+            fmt_val(py_tax),
+            fmt_val(xlat_tax),
+            fmt_val(launch_tax),
+            job_result.get("freq"),
         ])
 
-    if per_kernel_rows:
+    if show_table:
         print_utils.comp_table(
             title=f"Per GEMM Framework Overhead (μs) @ Pytorch Scope",
-            headers=["ID", "Kernel", "py", "aten+culib", "sys", "freq"],
-            data=per_kernel_rows,
+            headers=["ID", "Kernel", "T_fo", "T_py", "T_aten+lib", "T_sys", "freq"],
+            data=framework_summary_data,
         )
         print("Notes:")
         print("  - Kernel: CUDA kernel signature")
-        print("  - py: python xlat tax; torch_op -> aten_op")
-        print("  - aten+culib: ATen+cuBLASLt xlat tax; aten_op -> launch")
-        print("  - sys: kernel launch tax; launch -> kernel")
+        print("  - T_fo: framework overhead; T_py + T_aten+lib + T_sys")
+        print("  - T_py: python xlat tax; torch_op -> aten_op")
+        print("  - T_aten+culib: ATen+cuBLASLt xlat tax; aten_op -> launch")
+        print("  - T_sys: kernel launch tax; launch -> kernel")
         print("  - freq: times this aten_op->kernel sequence appears in one forward pass (unique key=name+grid+block+smem+input_dims)")
+    return framework_summary_data
 
-def report():
+
+def get_baremetal_summary(baremetal_results, show_table: bool = True):
+    """Per GEMM Baremetal Overhead (μs)"""
+    def fmt_val(v):
+        return None if v is None else f"{v:.2f}"
+
+    baremetal_summary_data = []
+    for job_id, job_result in sorted(baremetal_results.items()):
+        launch_tax = job_result["launch_tax"]["avg"]
+        shim_tax_dict = job_result.get("shim_tax")
+        culib_xlat_tax_dict = job_result.get("culib_xlat_tax")
+        culib_setup_dict = job_result.get("culib_setup")
+        culib_heur_dict = job_result.get("culib_heur")
+        shim_tax = shim_tax_dict["avg"] if shim_tax_dict else None
+        culib_xlat_tax = culib_xlat_tax_dict["avg"] if culib_xlat_tax_dict else None
+        culib_setup = culib_setup_dict["dur"]["avg"] if culib_setup_dict else None
+        culib_heur = culib_heur_dict["dur"]["avg"] if culib_heur_dict else None
+
+        baremetal_summary_data.append([
+            job_id,
+            job_result["kernel"]["name"],
+            fmt_val(culib_xlat_tax),
+            fmt_val(culib_setup),
+            fmt_val(culib_heur),
+            fmt_val(shim_tax),
+            fmt_val(launch_tax),
+            job_result.get("freq"),
+        ])
+
+    if show_table:
+        print_utils.comp_table(
+            title="Per GEMM Baremetal Overhead (μs)",
+            headers=["ID", "Kernel", "T_culib_xlat", "T_setup", "T_heur", "T_shim", "T_sys", "freq"],
+            data=baremetal_summary_data,
+        )
+        print("Notes:")
+        print("  - Kernel: CUDA kernel signature")
+        print("  - T_culib_xlat: cuBLASLt translation (setup+heur+shim)")
+        print("  - T_setup: cuBLASLt matmul descriptor/config setup")
+        print("  - T_heur: cuBLASLt heuristic search for algorithm")
+        print("  - T_shim: launch - matMul (null kernel uses run == __null_kernel__)")
+        print("  - T_sys: kernel launch tax; launch -> kernel")
+    return baremetal_summary_data
+
+
+def get_final_summary(pytorch_results, baremetal_results, show_table: bool = True):
     """
-    Main comparison function.
+    Combined summary across framework and baremetal.
+    Columns: ID, Kernel, aten_op, T_fo, T_py_xlat, T_aten_xlat, T_lib_setup, T_lib_heur, T_lib_shim, T_sys, freq.
+    """
+    def fmt_val(v):
+        return None if v is None else f"{v:.2f}"
+
+    def avg_or_none(d, key="avg"):
+        return None if d is None else d.get(key)
+
+    final_rows_display = []
+    final_rows_raw = []
+    all_job_ids = sorted(set(pytorch_results.keys()) | set(baremetal_results.keys()))
+
+    for job_id in all_job_ids:
+        fw = pytorch_results.get(job_id)
+        bm = baremetal_results.get(job_id)
+
+        py_avg = avg_or_none(fw.get("py_tax")) if fw else None
+        aten_lib_avg = avg_or_none(fw.get("xlat_tax")) if fw else None
+        sys_fw_avg = avg_or_none(fw.get("launch_tax")) if fw else None
+
+        culib_xlat_avg = avg_or_none(bm.get("culib_xlat_tax")) if bm else None
+        shim_avg = avg_or_none(bm.get("shim_tax")) if bm else None
+        sys_bm_avg = avg_or_none(bm.get("launch_tax")) if bm else None
+
+        setup_avg = None
+        heur_avg = None
+        if bm:
+            culib_setup_dict = bm.get("culib_setup")
+            if culib_setup_dict and isinstance(culib_setup_dict.get("dur"), dict):
+                setup_avg = culib_setup_dict["dur"].get("avg")
+            culib_heur_dict = bm.get("culib_heur")
+            if culib_heur_dict and isinstance(culib_heur_dict.get("dur"), dict):
+                heur_avg = culib_heur_dict["dur"].get("avg")
+
+        # Prefer baremetal T_sys; fall back to framework if needed.
+        sys_avg = sys_bm_avg if sys_bm_avg is not None else sys_fw_avg
+
+        kernel_name = None
+        if fw and fw.get("kernel"):
+            kernel_name = fw["kernel"]["name"]
+        elif bm and bm.get("kernel"):
+            kernel_name = bm["kernel"]["name"]
+
+        aten_op_name = None
+        if fw and fw.get("op_signature"):
+            aten_op_name = fw["op_signature"]["name"]
+
+        freq = None
+        if fw and fw.get("freq") is not None:
+            freq = fw["freq"]
+        elif bm and bm.get("freq") is not None:
+            freq = bm["freq"]
+
+        t_aten_xlat = None
+        if aten_lib_avg is not None and culib_xlat_avg is not None:
+            t_aten_xlat = aten_lib_avg - culib_xlat_avg
+
+        t_fo = None
+        if all(x is not None for x in (py_avg, t_aten_xlat, setup_avg, heur_avg, shim_avg, sys_avg)):
+            t_fo = py_avg + t_aten_xlat + setup_avg + heur_avg + shim_avg + sys_avg
+
+        final_rows_raw.append({
+            "id": job_id,
+            "aten_op": aten_op_name,
+            "kernel": kernel_name,
+            "T_fo": t_fo,
+            "T_py_xlat": py_avg,
+            "T_aten_xlat": t_aten_xlat,
+            "T_lib_setup": setup_avg,
+            "T_lib_heur": heur_avg,
+            "T_lib_shim": shim_avg,
+            "T_sys": sys_avg,
+            "freq": freq,
+        })
+
+        final_rows_display.append([
+            job_id,
+            aten_op_name,
+            kernel_name,
+            fmt_val(t_fo),
+            fmt_val(py_avg),
+            fmt_val(t_aten_xlat),
+            fmt_val(setup_avg),
+            fmt_val(heur_avg),
+            fmt_val(shim_avg),
+            fmt_val(sys_avg),
+            freq,
+        ])
+
+    if show_table:
+        print_utils.comp_table(
+            title="Framework Tax Break (us)",
+            headers=[
+                "ID", "ATen op", "Kernel",
+                "T_fo", "T_py_xlat", "T_aten_xlat",
+                "T_lib_setup", "T_lib_heur", "T_lib_shim",
+                "T_sys", "freq"
+            ],
+            data=final_rows_display,
+        )
+        print("Notes:")
+        print("  - T_fo: framework overhead; T_py_xlat + T_aten+lib + T_sys")
+        print("  - T_py_xlat: python xlat tax; torch_op -> aten_op")
+        print("  - T_aten_xlat: framework aten+lib minus cuBLASLt translation (T_aten+lib - T_lib_xlat)")
+        print("  - T_lib_xlat: cuBLASLt translation (setup+heur+shim)")
+        print("  - T_lib_setup: cuBLASLt matmul descriptor/config setup")
+        print("  - T_lib_heur: cuBLASLt heuristic search for algorithm")
+        print("  - T_lib_shim: launch - matMul (null kernel uses run == __null_kernel__)")
+        print("  - T_sys: kernel launch tax (baremetal if present else framework)")
+        print("  - freq: times this aten_op->kernel sequence appears")
+    return final_rows_display, final_rows_raw
+
+
+def compute_weighted_averages(final_rows_raw):
+    """
+    Weighted averages over rows where all components are present.
+    Weights: freq (defaults to 1 when None).
+    """
+    keys = ["T_py_xlat", "T_aten_xlat", "T_lib_setup", "T_lib_heur", "T_lib_shim", "T_sys", "T_fo"]
+    totals = {k: 0.0 for k in keys}
+    weight_sum = 0.0
+
+    for row in final_rows_raw:
+        if not all(row.get(k) is not None for k in keys):
+            continue
+        w = row["freq"] if row.get("freq") is not None else 1.0
+        weight_sum += w
+        for k in keys:
+            totals[k] += row[k] * w
+
+    if weight_sum == 0.0:
+        return {k: None for k in keys}
+
+    return {k: totals[k] / weight_sum for k in keys}
+
+
+def plot_weighted_average_stacked(averages, output_path: Path):
+    """
+    Plot a stacked bar of weighted averages.
+    """
+    components = [
+        ("T_py_xlat", "#4e79a7"),
+        ("T_aten_xlat", "#59a14f"),
+        ("T_lib_setup", "#f28e2c"),
+        ("T_lib_heur", "#e15759"),
+        ("T_lib_shim", "#edc949"),
+        ("T_sys", "#af7aa1"),
+    ]
+    vals = [averages.get(name) for name, _ in components]
+    if any(v is None for v in vals):
+        return None
+
+    bottoms = []
+    acc = 0.0
+    for v in vals:
+        bottoms.append(acc)
+        acc += v
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    x = [0]
+    for (name, color), v, b in zip(components, vals, bottoms):
+        ax.bar(x, [v], bottom=[b], label=name, color=color)
+
+    ax.set_ylabel("μs")
+    ax.set_xticks([])
+    ax.legend()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    return output_path
+
+
+def plot_per_kernel_taxbreak(final_rows_raw, output_path: Path, title_suffix: str = ""):
+    """
+    Plot one stacked bar per kernel (job_id) for rows with complete data.
+    """
+    components = [
+        ("T_py_xlat", "#4e79a7"),
+        ("T_aten_xlat", "#59a14f"),
+        ("T_lib_setup", "#f28e2c"),
+        ("T_lib_heur", "#e15759"),
+        ("T_lib_shim", "#edc949"),
+        ("T_sys", "#af7aa1"),
+    ]
+
+    filtered = []
+    for row in final_rows_raw:
+        vals = [row.get(name) for name, _ in components]
+        if any(v is None for v in vals):
+            continue
+        filtered.append((row["id"], vals))
+
+    if not filtered:
+        return None
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8, 4))
+    x = list(range(len(filtered)))
+    job_labels = [jid for jid, _ in filtered]
+
+    bottoms = [0.0] * len(filtered)
+    for (name, color), idx_component in zip(components, range(len(components))):
+        heights = [vals[idx_component] for _, vals in filtered]
+        ax.bar(x, heights, bottom=bottoms, label=name, color=color)
+        bottoms = [b + h for b, h in zip(bottoms, heights)]
+
+    ax.set_ylabel("μs")
+    title = "Framework Tax Break (us)"
+    if title_suffix:
+        title = f"{title} | {title_suffix}"
+    ax.set_title(title)
+    ax.set_xlabel("Job ID")
+    ax.set_xticks(x)
+    ax.set_xticklabels(job_labels, rotation=45, ha="right")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    return output_path
+
+def report(model_name: str = None, dtype: str = None, output_path: Path = None):
+    """
+    Main reporting function.
     """
     pytorch_file = utils.get_path("PYTORCH_GEMM_SEQUENCES")
-    baremetal_file = utils.get_path("BAREMETAL_GEMM_KERNELS")
-    output_file = utils.get_path("FINAL_REPORT")
-    
     utils.ensure_file(pytorch_file)
-    utils.ensure_file(baremetal_file)
-    
-    print(f"Loading PyTorch sequences from {pytorch_file}")
     pytorch_results = load_pytorch_results(pytorch_file)
     print(f"Loaded {len(pytorch_results)} PyTorch sequences")
-    
-    print(f"Loading baremetal sequences from {baremetal_file}")
+
+    baremetal_file = utils.get_path("BAREMETAL_GEMM_KERNELS")
+    utils.ensure_file(baremetal_file)
     baremetal_results = load_baremetal_results(baremetal_file)
     print(f"Loaded {len(baremetal_results)} baremetal sequences")
-    
-    # Extract null launch tax for baseline
-    null_launch_tax = None
 
-    baremetal_data = utils.load_json(baremetal_file)
-    for sequence in baremetal_data["sequences"]:
-        # Skip None entries (e.g., skipped batched GEMM jobs)
-        if sequence is None:
-            continue
-        
-        # Extract null launch tax for baseline
-        if sequence["kernel"]["name"] == "__null_kernel__":
-            null_launch_tax = sequence["launch_tax"]["avg"]
-            break
-    
-    # Compare
-    matches = compare_results(pytorch_results, baremetal_results)
-    
-    # Print summary
-    print_summary(matches)
+    print("\n")
+    framework_summary = get_framework_summary(pytorch_results, show_table=True)
+    print("\n")
+    baremetal_summary = get_baremetal_summary(baremetal_results, show_table=True)
+    print("\n")
+    final_summary_display, final_summary_raw = get_final_summary(pytorch_results, baremetal_results, show_table=True)
 
-    
-    # Write output
-    output_data = {
-        "summary": {
-            "total_kernels": len(matches),
-        },
-        "matches": matches,
+    if output_path is None:
+        base_dir = utils.get_path("BAREMETAL_OUTPUT_DIR").parent
+        output_path = base_dir / "taxbreak.png"
+    title_suffix = ""
+    if model_name:
+        title_suffix += f"{model_name}"
+    if dtype:
+        title_suffix += f" [{dtype}]"
+    plot_path = plot_per_kernel_taxbreak(final_summary_raw, output_path, title_suffix=title_suffix)
+    if plot_path:
+        print(f"Saved per-kernel taxbreak plot to {plot_path}")
+    else:
+        print("No plot saved (no rows with complete data).")
+
+    return {
+        "framework_summary": framework_summary,
+        "baremetal_summary": baremetal_summary,
+        "final_summary_display": final_summary_display,
+        "final_summary_raw": final_summary_raw,
+        "plot_path": str(plot_path) if plot_path else None,
     }
-    
-    utils.save_json(output_file, output_data)
