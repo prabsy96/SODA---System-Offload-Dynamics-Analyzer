@@ -57,7 +57,11 @@ enable_language(CUDA)
 find_package(CUDAToolkit REQUIRED)
 
 # Build main binary (compile as CUDA to support kernel launches)
-add_executable(main_gemm_bm main_gemm_bm.cpp)
+set(BM_SOURCES
+    main_gemm_bm.cpp
+)
+
+add_executable(main_gemm_bm ${BM_SOURCES})
 set_source_files_properties(main_gemm_bm.cpp PROPERTIES LANGUAGE CUDA)
 set_property(TARGET main_gemm_bm PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 
@@ -66,6 +70,7 @@ target_link_libraries(main_gemm_bm
     CUDA::cudart
     CUDA::cublas
     CUDA::cublasLt
+    CUDA::nvToolsExt
 )
 
 # Include CUDA headers
@@ -73,3 +78,15 @@ target_include_directories(main_gemm_bm PRIVATE
     ${CUDAToolkit_INCLUDE_DIRS}
 )
 
+# Formatting target (clang-format)
+find_program(CLANG_FORMAT_BIN clang-format)
+if(CLANG_FORMAT_BIN)
+    add_custom_target(format
+        COMMAND ${CLANG_FORMAT_BIN} -i ${BM_SOURCES}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Running clang-format on baremetal sources"
+    )
+    add_dependencies(main_gemm_bm format)
+else()
+    message(WARNING "clang-format not found; skipping format target")
+endif()

@@ -19,9 +19,9 @@ from typing import Optional, Tuple, List
 from soda.common import utils, print_utils
 from soda.common.data import Kernel
 from soda.microbench.baremetal.utils import (
-    nsys_profile_to_sql, 
-    extract_kernels_from_trace, 
-    extract_launches_from_trace,
+    nsys_profile, 
+    extract_kernels_sql, 
+    extract_launches_sql,
     build_binary,
     build_base_args
 )
@@ -99,7 +99,7 @@ def sweep_cublas_algos(job, max_count=200):
         ]
 
         # Test cuBLAS algo index 
-        success, trace_file_sql, message = nsys_profile_to_sql(
+        success, trace_file_sql, message = nsys_profile(
             trace_file_name, args, timeout=100, cleanup=True
         )
 
@@ -110,15 +110,12 @@ def sweep_cublas_algos(job, max_count=200):
             actual_kernel = None
 
             # Extract kernels from trace
-            kernels = extract_kernels_from_trace(trace_file_sql, cleanup=True)
-            if not kernels:
-                # Failed to extract any kernel at all 
-                raise RuntimeError("Failed to extract kernel from trace")
-            else: 
-                if len(kernels) != 1:
-                    raise RuntimeError(f"Multiple kernels found in trace: {[k.name for k in kernels]}")
-                else: 
-                    actual_kernel = kernels[0]
+            kernels = extract_kernels_sql(trace_file_sql)
+            utils.remove_file(trace_file_sql)
+
+            assert kernels, f"No kernels found in trace {trace_file_sql}"
+            assert len(kernels) == 1, f"Multiple kernels found in trace: {[k.name for k in kernels]}"
+            actual_kernel = kernels[0]
 
             # Compare actual kernel with target kernel
             match_result = actual_kernel.compare(

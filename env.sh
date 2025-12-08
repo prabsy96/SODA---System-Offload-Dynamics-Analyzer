@@ -104,6 +104,18 @@ reinstall() {
     echo "Soda package reinstalled"
 }
 
+# Build the baremetal binary using env-provided paths
+build() {
+    local build_dir="${BAREMETAL_BUILD:-$SODA_ROOT/build}"
+    local build_type="${CMAKE_BUILD_TYPE:-Release}"
+    local jobs="${NUM_JOBS:-$(nproc)}"
+
+    mkdir -p "$build_dir"
+    cmake -S "$BAREMETAL_MICROBENCH_DIR" -B "$build_dir" -DCMAKE_BUILD_TYPE="$build_type"
+    cmake --build "$build_dir" -- -j"$jobs"
+    echo "Built binary at ${BAREMETAL_BINARY:-$build_dir/main_gemm_bm}"
+}
+
 # Print SODA banner when sourced
 print_soda_banner() {
     # ANSI color codes for pastel colors
@@ -154,9 +166,9 @@ if [ -z "${SODA_ENV_QUIET:-}" ]; then
     print_soda_banner
     echo ""
     echo "Get started:"
-    echo "  * print_soda_env    - Show all environment variables and paths"
     echo "  * activate_env     - Activate Python virtual environment"
     echo "  * cleanup           - Delete output directory ($SODA_OUTPUT)"
+    echo "  * build            - Build the baremetal binary"
     echo "  * reinstall    - Reinstall the soda package (use after making changes)"
     echo ""
 fi

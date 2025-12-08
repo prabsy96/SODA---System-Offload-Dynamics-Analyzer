@@ -418,11 +418,6 @@ def group_sequences_by_identity(sequences):
 
 def agg_event_metric(seq_group, event_type: str, metric: str):
     """Aggregate event-level metrics (e.g., duration) if available."""
-    first_value = seq_group[0][event_type][metric]
-    # FIXME: Clean up 
-    # Too defensive; we should handle None values.
-    # if first_value is None:
-    #     return None
     values = [seq[event_type][metric] for seq in seq_group]
     return summarize_metric(values)
 
@@ -448,6 +443,9 @@ def aggregate_sequences(grouped_sequences, metrics: List[str], event_types: List
         # Create sequence level template.
         agg_seq = {"count": len(seq_group)}
         for event_type in event_types:
+            if event_type == "culib":
+                # Handled separately below.
+                continue
             agg_seq[event_type] = dict(first_seq[event_type])
 
         # Aggregate sequence-level metrics (e.g., launch/xlat tax).
@@ -455,15 +453,37 @@ def aggregate_sequences(grouped_sequences, metrics: List[str], event_types: List
             if metric in first_seq:
                 agg_seq[metric] = agg_seq_metric(seq_group, metric)
 
-        # Aggregate event-level metrics (e.g., per event durations).
+        # Aggregate event-level metrics (e.g., per-event durations).
         event_metrics = ["dur"]
         for event_type in event_types:
+            if event_type == "culib":
+                continue
+            # Generic path for standard events (kernel, aten_op, cuda_launch, torch_op).
             for metric in event_metrics:
-                agg_seq[event_type][metric] = agg_event_metric(seq_group, event_type, metric)
+                agg_seq[event_type][metric] = agg_event_metric(
+                    seq_group, event_type, metric
+                )
 
-        # Clean up; ts has no meaning after aggregation.
+        # Aggregate cuBLASLt culib markers as an event-like payload (per-phase durations).
+        if "culib" in event_types:
+            culib = first_seq["culib"]
+            agg_culib = {"temperature": culib["temperature"]}
+            for phase in ("setup", "heur", "run"):
+                values = [seq["culib"][phase]["dur_us"] for seq in seq_group]
+                agg_culib[phase] = {
+                    "dur_us": summarize_metric(values),
+                }
+            agg_seq["culib"] = agg_culib
+
+        # Clean up; ts has no meaning after aggregation for standard events.
         for event_type in event_types:
-            agg_seq[event_type]["ts"] = None
+            # Special handling for cuBLASLt culib markers.
+            if event_type == "culib":
+                agg_culib = agg_seq["culib"]
+                for phase in ("setup", "heur", "run"):
+                    agg_culib[phase]["ts"] = None
+            else:
+                agg_seq[event_type]["ts"] = None
 
         # Save aggregated unique sequence.
         unique_sequences.append(agg_seq)
@@ -946,13 +966,37 @@ def calculate_sequence_metrics(sequences: List[Dict], metrics: List[str]) -> Lis
         t_api = cuda_launch["ts"]
 
         if "xlat_tax" in metrics:
-            # Delta xlat captures pre-launch translation from PyTorch op boundary to CUDA launch (t_op -> t_api).
+            # Translation tax captures pre-launch translation from aten_op to CUDA launch (t_op -> t_api).
             xlat_tax = t_api - t_op
             assert xlat_tax >= 0, f"Negative xlat tax detected: cu(da)LaunchKernel.ts={t_api}, aten_op.ts={t_op}, tax={xlat_tax}"
             seq["xlat_tax"] = xlat_tax
 
+        if "culib_xlat_tax" in metrics or "culib_shim_tax" in metrics:
+            # cuBLASLt translation tax inside the library path:
+            # - culib_xlat_tax: from entering setup to CUDA launch (t_setup -> t_api).
+            # - culib_shim_tax: from start of cublasLtMatmul call to CUDA launch (t_run -> t_api).
+            # This is the same as the culib translation tax, but we split it into two components
+            # to allow for more detailed analysis (t_setup -> t_run -> t_api)
+            culib = seq.get("culib")
+            assert culib is not None, "culib* metrics requested but 'culib' markers are missing"
+
+            t_setup = culib["setup"]["ts"]
+            t_run = culib["run"]["ts"]
+
+            if "culib_xlat_tax" in metrics:
+                # Library translation tax: from entering setup to CUDA launch (t_setup -> t_api).
+                culib_xlat_tax = t_api - t_setup
+                assert culib_xlat_tax >= 0, f"Negative culib_xlat_tax: t_api={t_api}, setup.ts={t_setup}, tax={culib_xlat_tax}"
+                seq["culib_xlat_tax"] = culib_xlat_tax
+
+            if "culib_shim_tax" in metrics:
+                # Launch shim tax: from start of cublasLtMatmul call to CUDA launch (t_run -> t_api).
+                culib_shim_tax = t_api - t_run
+                assert culib_shim_tax >= 0, f"Negative culib_shim_tax: t_api={t_api}, run.ts={t_run}, tax={culib_shim_tax}"
+                seq["culib_shim_tax"] = culib_shim_tax
+
         if "launch_tax" in metrics:
-            # Delta launch captures post-launch execution from CUDA launch to kernel execution (t_api -> t_kernel).
+            # Launch tax captures post-launch execution from CUDA launch to kernel start (t_api -> t_kernel).
             # Caveat: This might also include queue latency if the kernel is not immediately executed.
             launch_tax = kernel["ts"] - t_api
             assert launch_tax >= 0, f"Negative launch tax detected: kernel.ts={kernel['ts']}, cu(da)LaunchKernel.ts={t_api}, tax={launch_tax}"

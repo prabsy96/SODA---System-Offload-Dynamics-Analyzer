@@ -10,7 +10,7 @@ from typing import Optional, Tuple, List, Dict, Any
 from soda.common import utils
 from soda.common.data import Kernel
 
-def nsys_profile_to_sql(
+def nsys_profile(
     trace_file_name: str,
     args: List[str],
     timeout: Optional[int] = None,
@@ -32,7 +32,7 @@ def nsys_profile_to_sql(
     args = [
         "nsys",
         "profile",
-        "--trace=cuda,osrt",
+        "--trace=cuda,osrt,nvtx",
         "--output",
         str(trace_file),
         "--force-overwrite=true",
@@ -71,7 +71,8 @@ def nsys_profile_to_sql(
     )
 
     # Clean up trace file if requested
-    if cleanup:
+    ALWAYS = True
+    if cleanup or ALWAYS:
         utils.remove_file(trace_file_rep)
 
     # Check if nsys export was successful
@@ -83,12 +84,11 @@ def nsys_profile_to_sql(
         return False, None, result.stderr or result.stdout
 
 
-def extract_kernels_from_trace(trace_file_sql, cleanup=True):
+def extract_kernels_sql(trace_file_sql):
     """Extract all kernels from nsys sqlite trace.
     
     Args:
         trace_file_sql: Path to SQLite trace file
-        cleanup: If True, delete the trace file after extraction.
     
     Returns: 
         List of Kernel objects.
@@ -137,12 +137,9 @@ def extract_kernels_from_trace(trace_file_sql, cleanup=True):
         print(f"Error extracting kernel from trace: {e}")
         return []
 
-    if cleanup:
-        utils.remove_file(trace_file_sql)
-    
     return kernels
 
-def extract_launches_from_trace(trace_file_sql):
+def extract_launches_sql(trace_file_sql):
     """Extract CUDA launch events from nsys sqlite trace.
     
     Args:
@@ -183,6 +180,39 @@ def extract_launches_from_trace(trace_file_sql):
         return {}
         
     return cuda_launches
+
+def extract_nvtx_ranges_sql(trace_file_sql):
+    """
+    Extract NVTX range stamps from an nsys sqlite trace.
+
+    Returns:
+        List of dicts with name, ts, dur_us.
+    """
+    ranges = []
+    try:
+        conn = sqlite3.connect(trace_file_sql)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT start, end, text
+            FROM NVTX_EVENTS
+            WHERE text IS NOT NULL
+            """
+        )
+        for start_ns, end_ns, name in cursor.fetchall():
+            ranges.append(
+                {
+                    "name": name,
+                    "ts": start_ns / 1000.0,
+                    "dur_us": (end_ns - start_ns) / 1000.0,
+                }
+            )
+        conn.close()
+    except Exception as e:
+        print(f"Warning: Could not extract NVTX ranges: {e}")
+        return []
+
+    return ranges
 
 
 def build_base_args(job):
