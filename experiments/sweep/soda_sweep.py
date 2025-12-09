@@ -17,7 +17,7 @@ import torch
 from soda import ModelTracer, SodaAnalyzer
 from soda.common import utils
 from experiments.sweep.summarize_soda_sweep import summarize as summarize_soda_sweep
-from experiments.sweep.config import PARAMS, SWEEP_CONFIGS
+from experiments.sweep.config import PARAMS, PREF_SWEEP_CONFIG, DEC_SWEEP_CONFIG, DEBUG_SWEEP_CONFIG
 
 def ensure_env_loaded() -> None:
     """Exit early if env.sh was not sourced."""
@@ -52,7 +52,12 @@ def main() -> None:
     device = PARAMS["device"]
     warmup = PARAMS["inference_warmup"]
 
-    for config_name, cfg in SWEEP_CONFIGS.items():
+    # Select the sweep configs to use
+    SWEEP_CONFIG = PREF_SWEEP_CONFIG
+    # SWEEP_CONFIG = DEC_SWEEP_CONFIG
+    # SWEEP_CONFIG = DEBUG_SWEEP_CONFIG
+
+    for config_name, cfg in SWEEP_CONFIG.items():
         model = cfg["model_name"]
         batch_sizes = cfg["batch_sizes"]
         seq_lens = cfg["seq_lens"]
@@ -75,6 +80,7 @@ def main() -> None:
                 "--max-new-tokens", str(max_new_tokens),
                 "--precision", precision,
                 "--compile-type", compile_type,
+                "--device", "cuda",
                 "--device", device,
                 "--warmup", warmup,
                 # Extra parser knobs (fusion + microbench) left at defaults:

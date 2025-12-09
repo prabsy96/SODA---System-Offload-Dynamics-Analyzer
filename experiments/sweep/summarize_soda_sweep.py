@@ -347,27 +347,7 @@ def apply_colorbar(fig, ax, im, data: np.ndarray) -> None:
             cbar.set_ticks([vmin, vmax])
 
 
-def _text_color_for_value(value: Optional[float], im) -> str:
-    """
-    Choose white or black text based on the background tile color.
-
-    We compute relative luminance from the heatmap's colormap and switch to
-    black text only on very bright tiles (e.g., yellow in viridis) to keep
-    numbers legible while keeping white text on darker and mid-tone greens.
-    """
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return "white"
-    rgba = im.cmap(im.norm(value))
-    r, g, b, _ = rgba
-    # Standard relative luminance formula.
-    luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
-    # For viridis, light green is ~0.54 and bright yellow is ~0.87.
-    # Use a threshold in between so light green still uses white text,
-    # but bright yellow/very bright tiles use black text.
-    return "black" if luminance > 0.7 else "white"
-
-
-def annotate_cells(ax, im, x_labels: List, y_labels: List, value_grid: List[List], status_grid: List[List]) -> None:
+def annotate_cells(ax, x_labels: List, y_labels: List, value_grid: List[List], status_grid: List[List]) -> None:
     for i, _ in enumerate(y_labels):
         for j, _ in enumerate(x_labels):
             status = status_grid[i][j]
