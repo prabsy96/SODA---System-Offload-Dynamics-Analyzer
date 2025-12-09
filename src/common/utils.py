@@ -809,7 +809,7 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
             - all: List of all GPU events
     """
     aten_op_events_by_ext_id = {}
-    torch_aten_op_events_by_ext_id = {}
+    torch_op_events_by_ext_id = {}
     torch_op_buffer = []
     cuda_launch_events_by_corr = {}
     kernel_events = []
@@ -840,8 +840,8 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
                 # NOTE: This is a hack: we pair the last buffered torch_op with the next ATen op.
                 torch_event = torch_op_buffer.pop(0)
                 torch_event["external_id"] = external_id
-                assert external_id not in torch_aten_op_events_by_ext_id, "Duplicate torch_op for external_id"
-                torch_aten_op_events_by_ext_id[external_id] = torch_event
+                assert external_id not in torch_op_events_by_ext_id, "Duplicate torch_op for external_id"
+                torch_op_events_by_ext_id[external_id] = torch_event
         elif cat == "user_annotation" and name.startswith("torch_op"):
             torch_op_buffer.append({
                 "type": "torch_op",
@@ -899,8 +899,8 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
     assert not torch_op_buffer, "Unmatched torch_op events remaining after trace scan"
     events = {
         "cpu": {
+            "torch_ops": torch_op_events_by_ext_id,
             "aten_ops": aten_op_events_by_ext_id,
-            "torch_ops": torch_aten_op_events_by_ext_id,
             "launches": cuda_launch_events_by_corr
         },
         "gpu": {
@@ -926,12 +926,11 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
     import logging
     logger = logging.getLogger("soda")
 
-    
-    gpu_events = events["gpu"]
+    # Torch ops are only available during PyTorch microbenchmarking
+    torch_ops = events["cpu"].get("torch_ops", {})
     aten_ops = events["cpu"]["aten_ops"]
     cuda_launches = events["cpu"]["launches"]
-    torch_ops = events["cpu"].get("torch_ops", {})
-    kernel_events = gpu_events["kernels"]
+    kernel_events = events["gpu"]["kernels"]
 
     sequences = []
     skipped_kernels = []
