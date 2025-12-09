@@ -281,66 +281,6 @@ def get_final_summary(pytorch_results, baremetal_results, show_table: bool = Tru
     return final_summary_table, final_summary_data
 
 
-def compute_weighted_averages(final_summary_data):
-    """
-    Weighted averages over entries where all components are present.
-    Weights: freq (defaults to 1 when None).
-    """
-    keys = ["T_py", "T_aten", "T_lib_setup", "T_lib_heur", "T_lib_shim", "T_sys", "T_fo"]
-    totals = {k: 0.0 for k in keys}
-    weight_sum = 0.0
-
-    for row in final_summary_data:
-        if not all(row.get(k) is not None for k in keys):
-            continue
-        w = row["freq"] if row.get("freq") is not None else 1.0
-        weight_sum += w
-        for k in keys:
-            totals[k] += row[k] * w
-
-    if weight_sum == 0.0:
-        return {k: None for k in keys}
-
-    return {k: totals[k] / weight_sum for k in keys}
-
-
-def plot_weighted_average_stacked(averages, output_path: Path):
-    """
-    Plot a stacked bar of weighted averages.
-    """
-    components = [
-        ("T_py", "#4e79a7"),
-        ("T_aten", "#59a14f"),
-        ("T_lib_setup", "#f28e2c"),
-        ("T_lib_heur", "#e15759"),
-        ("T_lib_shim", "#edc949"),
-        ("T_sys", "#af7aa1"),
-    ]
-    vals = [averages.get(name) for name, _ in components]
-    if any(v is None for v in vals):
-        return None
-
-    bottoms = []
-    acc = 0.0
-    for v in vals:
-        bottoms.append(acc)
-        acc += v
-
-    fig, ax = plt.subplots(figsize=(6, 4))
-    x = [0]
-    for (name, color), v, b in zip(components, vals, bottoms):
-        ax.bar(x, [v], bottom=[b], label=name, color=color)
-
-    ax.set_ylabel("μs")
-    ax.set_xticks([])
-    ax.legend()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.tight_layout()
-    fig.savefig(output_path)
-    plt.close(fig)
-    return output_path
-
-
 def plot_per_kernel_taxbreak(final_summary_data, output_path: Path, title_suffix: str = ""):
     """
     Plot one stacked bar per kernel (job_id) for entries with complete data.
