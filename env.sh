@@ -41,7 +41,7 @@ export PYTHON_VENV="$SODA_ROOT/.venv"
 # Environment metadata file
 export ENV_METADATA="env_metadata.json"
 
-# Experiment directory (set by tracer, do not set manually)
+# Experiment directory (set by tracer, DO NOT set manually)
 export EXPERIMENT_DIR=""
 
 # Common data files referenced across scripts (relative to experiment directory)
@@ -59,8 +59,9 @@ export BAREMETAL_JOBS="$BAREMETAL_OUTPUT_DIR/jobs.json"
 export BAREMETAL_GEMM_KERNELS="$BAREMETAL_OUTPUT_DIR/baremetal_gemm_profile.json"
 export BAREMETAL_TRACES="$BAREMETAL_OUTPUT_DIR/traces"
 
-export FINAL_REPORT="microbench/bm_vs_pytorch_report.json"
-# Graphs output (relative to experiment directory)
+# Tax break files (relative to experiment directory)
+export TAX_BREAK_SUMMARY="microbench/taxbreak.json"
+export TAX_BREAK_PLOT="microbench/taxbreak.png"
 
 # Log files (relative to experiment directory)
 export PYTORCH_VERIFY_LOG="$PYTORCH_OUTPUT_DIR/microbench.log"

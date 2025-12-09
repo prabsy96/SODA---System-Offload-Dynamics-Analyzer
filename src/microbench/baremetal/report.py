@@ -12,7 +12,7 @@ import json
 import os
 import sys
 from collections import defaultdict
-from pathlib import Path
+from typing import Any, Dict, List
 
 import matplotlib.pyplot as plt
 
@@ -78,7 +78,7 @@ def load_baremetal_results(baremetal_file):
     return results
 
 
-def get_framework_summary(show_table: bool = True):
+def generate_framework_summary(show_table: bool = True):
     """Per GEMM Framework Overhead (μs) @ Pytorch Scope"""
     def fmt_val(v):
         return None if v is None else f"{v:.2f}"
@@ -88,9 +88,8 @@ def get_framework_summary(show_table: bool = True):
     pytorch_results = load_pytorch_results(pytorch_file)
     print(f"Loaded {len(pytorch_results)} PyTorch sequences")
 
-    framework_summary_data = []
+    framework_summary_table = []
     for job_id, job_result in sorted(pytorch_results.items()):
-
         py_tax = job_result["py_tax"]
         aten_xlat_tax = job_result["aten_xlat_tax"]
         launch_tax = job_result["launch_tax"]
@@ -100,7 +99,7 @@ def get_framework_summary(show_table: bool = True):
         # and kernel is start of kernel execution
         fo = py_tax + aten_xlat_tax + launch_tax
 
-        framework_summary_data.append([
+        framework_summary_table.append([
             job_id,
             job_result["kernel"],
             fmt_val(fo),
@@ -113,20 +112,19 @@ def get_framework_summary(show_table: bool = True):
     if show_table:
         print_utils.comp_table(
             title=f"Per GEMM Framework Overhead (μs) @ Pytorch Scope",
-            headers=["ID", "Kernel", "T_fo", "T_py", "T_aten+lib", "T_sys", "freq"],
-            data=framework_summary_data,
+            headers=["ID", "Kernel", "T_fo", "T_py", "T_aten_xlat", "T_sys", "freq"],
+            data=framework_summary_table,
         )
         print("Notes:")
         print(" * Kernel: CUDA kernel signature")
-        print(" * T_fo: framework overhead; T_py + T_aten+lib + T_sys")
-        print(" * T_py: python xlat tax; torch_op -> aten_op")
+        print(" * T_fo: framework overhead; T_py + T_aten_xlat + T_sys")
+        print(" * T_py: python tax; torch_op -> aten_op")
         print(" * T_aten+culib: ATen+cuBLASLt xlat tax; aten_op -> launch")
         print(" * T_sys: kernel launch tax; launch -> kernel")
         print(" * freq: times this aten_op->kernel sequence appears in one forward pass (unique key=name+grid+block+smem+input_dims)")
-    return framework_summary_data, pytorch_results
 
 
-def get_baremetal_summary(show_table: bool = True):
+def generate_baremetal_summary(show_table: bool = True):
     """Per GEMM Baremetal Overhead (μs)"""
     def fmt_val(v):
         return None if v is None else f"{v:.2f}"
@@ -162,23 +160,29 @@ def get_baremetal_summary(show_table: bool = True):
         print(" * T_heur: cuBLASLt heuristic search for algorithm")
         print(" * T_shim: launch - matMul (null kernel uses run == __null_kernel__)")
         print(" * T_sys: kernel launch tax; launch -> kernel")
-    return baremetal_summary_data, baremetal_results
 
-
-def get_final_summary(pytorch_results, baremetal_results, show_table: bool = True):
+def generate_final_summary(show_table: bool = True) -> List[Dict[str, Any]]:
     """
     Combined summary across framework and baremetal.
-    Columns: ID, Kernel, aten_op, T_fo, T_py, T_aten, T_lib_setup, T_lib_heur, T_lib_shim, T_sys, freq.
+    Columns: ID, Kernel, aten_op, T_fo, T_py_xlat, T_aten_xlat, T_lib_setup, T_lib_heur, T_lib_shim, T_sys, freq.
     """
     def fmt_val(v):
         return None if v is None else f"{v:.2f}"
+
+    pytorch_file = utils.get_path("PYTORCH_GEMM_SEQUENCES")
+    baremetal_file = utils.get_path("BAREMETAL_GEMM_KERNELS")
+    utils.ensure_file(pytorch_file)
+    utils.ensure_file(baremetal_file)
+    pytorch_results = load_pytorch_results(pytorch_file)
+    baremetal_results = load_baremetal_results(baremetal_file)
+    print(f"Loaded {len(pytorch_results)} PyTorch sequences")
+    print(f"Loaded {len(baremetal_results)} baremetal sequences")
 
     final_summary_table = []
     final_summary_data = []
     all_job_ids = sorted(set(pytorch_results.keys()) | set(baremetal_results.keys()))
 
     for job_id in all_job_ids:
-        # Get framework and baremetal results for this job
         fw = pytorch_results.get(job_id)
         bm = baremetal_results.get(job_id)
 
@@ -232,7 +236,9 @@ def get_final_summary(pytorch_results, baremetal_results, show_table: bool = Tru
             "T_fo_bm": fo_bm,
             "T_fo_fw": fo_fw,
             "T_py": py,
+            "T_aten_xlat": aten_xlat,  
             "T_aten": aten,
+            "T_lib_xlat": culib_xlat,
             "T_lib_setup": setup,
             "T_lib_heur": heur,
             "T_lib_shim": shim,
@@ -268,20 +274,20 @@ def get_final_summary(pytorch_results, baremetal_results, show_table: bool = Tru
             data=final_summary_table,
         )
         print("Notes:")
-        print(" * T_fo (fw): framework overhead; T_py + T_aten+lib + T_sys (fm) (but we're using the bm flavor)")
+        print(" * T_fo (fw): framework overhead; T_py + T_aten_xlat + T_sys (fm) (but we're using the bm flavor)")
         print(" * T_fo (bm): framework overhead; T_py + T_aten + T_lib_setup + T_lib_heur + T_lib_shim + T_sys (bm)")
         print(" * T_py: python xlat tax; torch_op -> aten_op")
-        print(" * T_aten: framework aten+lib minus cuBLASLt translation (T_aten+lib - T_lib_xlat)")
+        print(" * T_aten: framework aten_xlat minus cuBLASLt translation (T_aten_xlat - T_lib_xlat)")
         print(" * T_lib_xlat: cuBLASLt translation (setup+heur+shim)")
         print(" * T_lib_setup: cuBLASLt matmul descriptor/config setup")
         print(" * T_lib_heur: cuBLASLt heuristic search for algorithm")
         print(" * T_lib_shim: launch - matMul (null kernel uses run == __null_kernel__)")
         print(" * freq: times this aten_op->kernel sequence appears")
 
-    return final_summary_table, final_summary_data
+    return final_summary_data
 
 
-def plot_per_kernel_taxbreak(final_summary_data, output_path: Path, title_suffix: str = ""):
+def plot_per_kernel_taxbreak(final_summary_data, title_suffix: str):
     """
     Plot one stacked bar per kernel (job_id) for entries with complete data.
     """
@@ -294,15 +300,19 @@ def plot_per_kernel_taxbreak(final_summary_data, output_path: Path, title_suffix
         ("T_sys", "#af7aa1"),
     ]
 
+    output_path = utils.get_path("TAX_BREAK_PLOT")
+
     filtered = []
     for row in final_summary_data:
-        vals = [row.get(name) for name, _ in components]
+        vals = [row[name] for name, _ in components]
+        # Skip rows with incomplete data to avoid None in plot math.
         if any(v is None for v in vals):
             continue
         filtered.append((row["id"], vals))
 
     if not filtered:
-        return None
+        print("No complete per-kernel taxbreak data to plot.")
+        return
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(8, 4))
@@ -316,10 +326,7 @@ def plot_per_kernel_taxbreak(final_summary_data, output_path: Path, title_suffix
         bottoms = [b + h for b, h in zip(bottoms, heights)]
 
     ax.set_ylabel("μs")
-    title = "Framework Tax Break (us)"
-    if title_suffix:
-        title = f"{title} | {title_suffix}"
-    ax.set_title(title)
+    ax.set_title(f"Framework Tax Break (us) | {title_suffix}")
     ax.set_xlabel("Job ID")
     ax.set_xticks(x)
     ax.set_xticklabels(job_labels, rotation=45, ha="right")
@@ -327,37 +334,34 @@ def plot_per_kernel_taxbreak(final_summary_data, output_path: Path, title_suffix
     fig.tight_layout()
     fig.savefig(output_path)
     plt.close(fig)
-    return output_path
+    print(f"Saved per-kernel taxbreak plot to {output_path}")
 
-def summarize(model_name: str = None, dtype: str = None, output_path: Path = None):
+def summarize(model: str, precision: str):
     """
     Main reporting function.
     """
-    print("\n")
-    framework_summary, pytorch_results = get_framework_summary(show_table=True)
-    print("\n")
-    baremetal_summary, baremetal_results = get_baremetal_summary(show_table=True)
-    print("\n")
-    final_summary_table, final_summary_data = get_final_summary(pytorch_results, baremetal_results, show_table=True)
 
-    if output_path is None:
-        base_dir = utils.get_path("BAREMETAL_OUTPUT_DIR").parent
-        output_path = base_dir / "taxbreak.png"
-    title_suffix = ""
-    if model_name:
-        title_suffix += f"{model_name}"
-    if dtype:
-        title_suffix += f" [{dtype}]"
-    plot_path = plot_per_kernel_taxbreak(final_summary_data, output_path, title_suffix=title_suffix)
-    if plot_path:
-        print(f"Saved per-kernel taxbreak plot to {plot_path}")
-    else:
-        print("No plot saved (no entries with complete data).")
+    # Generate framework summary: T_fo, T_py, T_aten_xlat, T_sys
+    generate_framework_summary(show_table=True)
 
-    return {
-        "framework_summary": framework_summary,
-        "baremetal_summary": baremetal_summary,
-        "final_summary_table": final_summary_table,
-        "final_summary_data": final_summary_data,
-        "plot_path": str(plot_path) if plot_path else None,
-    }
+    # Generate baremetal summary: T_culib_xlat, T_culib_setup, T_culib_heur, T_shim, T_sys
+    generate_baremetal_summary(show_table=True)
+
+    # Generate final summary: T_fo, T_py, T_aten, T_lib_setup, T_lib_heur, T_lib_shim, T_sys
+    final_summary_data = generate_final_summary(show_table=True)
+
+    summary_path = utils.get_path("TAX_BREAK_SUMMARY")
+    utils.save_json(
+        summary_path,
+        {
+            "summary": {"count": len(final_summary_data)},
+            "data": final_summary_data,
+        },
+    )
+    print(f"Saved taxbreak summary to {summary_path}")
+
+    # Plot per-kernel taxbreak
+    model = model or "<unknown_model>"
+    precision = precision or "<unknown_precision>"
+    title_suffix = f"{model} [{precision}]"
+    plot_per_kernel_taxbreak(final_summary_data, title_suffix=title_suffix)

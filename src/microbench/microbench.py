@@ -154,7 +154,7 @@ class SodaMicrobench:
         section = "TaxBreak Report"
         print_utils.section_start(section)
         summarize(
-            model_name=getattr(self.args, "model", None),
-            dtype=getattr(self.args, "dtype", None),
+            model=self.args.model,
+            precision=self.args.precision,
         )
         print_utils.section_end(section)
