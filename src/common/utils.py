@@ -849,8 +849,18 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
                 "ts": event["ts"],
                 "dur": event["dur"],
             })
-        elif (cat == "cuda_runtime" and name == "cudaLaunchKernel") or \
-             (cat == "cuda_driver" and name == "cuLaunchKernel"):
+        # @shreesh
+        # FIX1: Llama 3 model uses cuLaunchKernel instead of cudaLaunchKernel.
+        # elif (cat == "cuda_runtime" and name == "cudaLaunchKernel") or \
+        #      (cat == "cuda_driver" and name == "cuLaunchKernel"):
+        # @prabhu
+        # FIX2: Broaden CUDA launch detection to catch all launch variants
+        # This includes: cudaLaunchKernel, cudaLaunchKernelExC, cudaLaunchCooperativeKernel,
+        #                cuLaunchKernel, cuLaunchKernel_ptsz, etc.
+        # elif (cat in ("cuda_runtime", "cuda_driver")) and "LaunchKernel" in name:
+        # @shreesh
+        # FIX3: A more general approach. The goal is to catch all launch variants.
+        elif ("cuda" in cat.lower()) and ("launch" in name.lower() and "kernel" in name.lower()):
             if external_id is not None and correlation is not None:
                 cuda_launch_events_by_corr[correlation] = {
                     "type": "cuda_launch",
@@ -933,11 +943,20 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
     kernel_events = events["gpu"]["kernels"]
 
     sequences = []
-    skipped_kernels = []
+    orphan_kernels = []
 
     for kernel in kernel_events:
         external_id = kernel["external_id"]
         correlation = kernel["correlation"]
+
+        if external_id not in aten_ops or correlation not in cuda_launches:
+            orphan_kernels.append({
+                "name": kernel["name"],
+                "ext_id": external_id,
+                "corr": correlation,
+            })
+            continue
+
         aten_op = aten_ops[external_id]
         cuda_launch = cuda_launches[correlation]
         torch_op = torch_ops.get(external_id)
@@ -948,11 +967,13 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
             "aten_op": aten_op,
             "torch_op": torch_op,
         })
-    if skipped_kernels:
-        logger.debug(
-            f"Skipped {len(skipped_kernels)} kernels with unmatched events: "
-            f"{skipped_kernels[:5]}{'...' if len(skipped_kernels) > 5 else ''}"
-        )
+
+    # NOTE: This should *never* happen. We're missing the expected aten/launch events. 
+    # Check collect_events() for missing aten/launch events for the given orphan kernels below. 
+    for ok in orphan_kernels:
+        print(f"Orphan kernel: {ok['name']} (expected ext_id: {ok['ext_id']}, corr: {ok['corr']})")
+    assert not orphan_kernels, f"Found {len(orphan_kernels)} orphan kernels with unmatched aten/launch events."
+
     validate_sequences(sequences)
     return sequences
 
