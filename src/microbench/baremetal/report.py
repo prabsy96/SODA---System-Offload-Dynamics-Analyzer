@@ -39,7 +39,7 @@ def load_pytorch_results(pytorch_file):
             "kernel": sequence["kernel"]["name"],
             "aten_op": sequence["aten_op"]["name"],
             "launch_tax": sequence["launch_tax"]["avg"],
-            "xlat_tax": sequence["xlat_tax"]["avg"],
+            "aten_xlat_tax": sequence["aten_xlat_tax"]["avg"],
             "py_tax": sequence["py_tax"]["avg"],
         }
     
@@ -92,20 +92,20 @@ def get_framework_summary(show_table: bool = True):
     for job_id, job_result in sorted(pytorch_results.items()):
 
         py_tax = job_result["py_tax"]
-        xlat_tax = job_result["xlat_tax"]
+        aten_xlat_tax = job_result["aten_xlat_tax"]
         launch_tax = job_result["launch_tax"]
         # Framework overhead is everything from torch_op to kernel 
         # torch_op -> aten_op -> launch -> kernel
         # where torch_op is start of torch.mm() call 
         # and kernel is start of kernel execution
-        t_fo = py_tax + xlat_tax + launch_tax
+        fo = py_tax + aten_xlat_tax + launch_tax
 
         framework_summary_data.append([
             job_id,
             job_result["kernel"],
-            fmt_val(t_fo),
+            fmt_val(fo),
             fmt_val(py_tax),
-            fmt_val(xlat_tax),
+            fmt_val(aten_xlat_tax),
             fmt_val(launch_tax),
             job_result["freq"],
         ])
@@ -117,12 +117,12 @@ def get_framework_summary(show_table: bool = True):
             data=framework_summary_data,
         )
         print("Notes:")
-        print("  - Kernel: CUDA kernel signature")
-        print("  - T_fo: framework overhead; T_py + T_aten+lib + T_sys")
-        print("  - T_py: python xlat tax; torch_op -> aten_op")
-        print("  - T_aten+culib: ATen+cuBLASLt xlat tax; aten_op -> launch")
-        print("  - T_sys: kernel launch tax; launch -> kernel")
-        print("  - freq: times this aten_op->kernel sequence appears in one forward pass (unique key=name+grid+block+smem+input_dims)")
+        print(" * Kernel: CUDA kernel signature")
+        print(" * T_fo: framework overhead; T_py + T_aten+lib + T_sys")
+        print(" * T_py: python xlat tax; torch_op -> aten_op")
+        print(" * T_aten+culib: ATen+cuBLASLt xlat tax; aten_op -> launch")
+        print(" * T_sys: kernel launch tax; launch -> kernel")
+        print(" * freq: times this aten_op->kernel sequence appears in one forward pass (unique key=name+grid+block+smem+input_dims)")
     return framework_summary_data, pytorch_results
 
 
@@ -156,33 +156,34 @@ def get_baremetal_summary(show_table: bool = True):
             data=baremetal_summary_data,
         )
         print("Notes:")
-        print("  - Kernel: CUDA kernel signature")
-        print("  - T_culib_xlat: cuBLASLt translation (setup+heur+shim)")
-        print("  - T_setup: cuBLASLt matmul descriptor/config setup")
-        print("  - T_heur: cuBLASLt heuristic search for algorithm")
-        print("  - T_shim: launch - matMul (null kernel uses run == __null_kernel__)")
-        print("  - T_sys: kernel launch tax; launch -> kernel")
+        print(" * Kernel: CUDA kernel signature")
+        print(" * T_culib_xlat: cuBLASLt translation (setup+heur+shim)")
+        print(" * T_setup: cuBLASLt matmul descriptor/config setup")
+        print(" * T_heur: cuBLASLt heuristic search for algorithm")
+        print(" * T_shim: launch - matMul (null kernel uses run == __null_kernel__)")
+        print(" * T_sys: kernel launch tax; launch -> kernel")
     return baremetal_summary_data, baremetal_results
 
 
 def get_final_summary(pytorch_results, baremetal_results, show_table: bool = True):
     """
     Combined summary across framework and baremetal.
-    Columns: ID, Kernel, aten_op, T_fo, T_py_xlat, T_aten_xlat, T_lib_setup, T_lib_heur, T_lib_shim, T_sys, freq.
+    Columns: ID, Kernel, aten_op, T_fo, T_py, T_aten, T_lib_setup, T_lib_heur, T_lib_shim, T_sys, freq.
     """
     def fmt_val(v):
         return None if v is None else f"{v:.2f}"
 
-    final_rows_display = []
-    final_rows_raw = []
+    final_summary_table = []
+    final_summary_data = []
     all_job_ids = sorted(set(pytorch_results.keys()) | set(baremetal_results.keys()))
 
     for job_id in all_job_ids:
+        # Get framework and baremetal results for this job
         fw = pytorch_results.get(job_id)
         bm = baremetal_results.get(job_id)
 
         py = fw["py_tax"] if fw else None
-        aten_lib = fw["xlat_tax"] if fw else None
+        aten_xlat = fw["aten_xlat_tax"] if fw else None
         sys_fw = fw["launch_tax"] if fw else None
 
         culib_xlat = bm["culib_xlat_tax"] if bm else None
@@ -211,27 +212,27 @@ def get_final_summary(pytorch_results, baremetal_results, show_table: bool = Tru
 
         freq = fw["freq"] if fw and fw.get("freq") is not None else None
 
-        t_aten_xlat = None
-        if aten_lib is not None and culib_xlat is not None:
-            t_aten_xlat = aten_lib - culib_xlat
+        aten = None
+        if aten_xlat is not None and culib_xlat is not None:
+            aten = aten_xlat - culib_xlat
 
-        t_fo_bm = None
-        if all(x is not None for x in (py, t_aten_xlat, setup, heur, shim, sys)):
-            t_fo_bm = py + t_aten_xlat + setup + heur + shim + sys
+        fo_bm = None
+        if all(x is not None for x in (py, aten, setup, heur, shim, sys)):
+            fo_bm = py + aten + setup + heur + shim + sys
 
-        t_fo_fw = None
-        if all(x is not None for x in (py, t_aten_xlat, sys)):
-            t_fo_fw = py + t_aten_xlat + sys
+        fo_fw = None
+        if all(x is not None for x in (py, aten, sys)):
+            fo_fw = py + aten + sys
 
-        final_rows_raw.append({
+        final_summary_data.append({
             "id": job_id,
             "aten_op": aten_op_name,
             "kernel": kernel_name,
-            "T_fo": t_fo_bm,
-            "T_fo_bm": t_fo_bm,
-            "T_fo_fw": t_fo_fw,
-            "T_py_xlat": py,
-            "T_aten_xlat": t_aten_xlat,
+            "T_fo": fo_bm,
+            "T_fo_bm": fo_bm,
+            "T_fo_fw": fo_fw,
+            "T_py": py,
+            "T_aten": aten,
             "T_lib_setup": setup,
             "T_lib_heur": heur,
             "T_lib_shim": shim,
@@ -241,13 +242,13 @@ def get_final_summary(pytorch_results, baremetal_results, show_table: bool = Tru
             "freq": freq,
         })
 
-        final_rows_display.append([
+        final_summary_table.append([
             job_id,
             aten_op_name,
             kernel_name,
-            fmt_val(t_fo_bm),
+            fmt_val(fo_bm),
             fmt_val(py),
-            fmt_val(t_aten_xlat),
+            fmt_val(aten),
             fmt_val(setup),
             fmt_val(heur),
             fmt_val(shim),
@@ -260,35 +261,36 @@ def get_final_summary(pytorch_results, baremetal_results, show_table: bool = Tru
             title="Framework Tax Break (us)",
             headers=[
                 "ID", "ATen op", "Kernel",
-                "T_fo", "T_py_xlat", "T_aten_xlat",
+                "T_fo", "T_py", "T_aten",
                 "T_lib_setup", "T_lib_heur", "T_lib_shim",
                 "T_sys", "freq"
             ],
-            data=final_rows_display,
+            data=final_summary_table,
         )
         print("Notes:")
-        print("  - T_fo (fw): framework overhead; T_py_xlat + T_aten+lib + T_sys (fm) (but we're using the bm flavor)")
-        print("  - T_fo (bm): framework overhead; T_py_xlat + T_aten_xlat + T_lib_setup + T_lib_heur + T_lib_shim + T_sys (bw)")
-        print("  - T_py_xlat: python xlat tax; torch_op -> aten_op")
-        print("  - T_aten_xlat: framework aten+lib minus cuBLASLt translation (T_aten+lib - T_lib_xlat)")
-        print("  - T_lib_xlat: cuBLASLt translation (setup+heur+shim)")
-        print("  - T_lib_setup: cuBLASLt matmul descriptor/config setup")
-        print("  - T_lib_heur: cuBLASLt heuristic search for algorithm")
-        print("  - T_lib_shim: launch - matMul (null kernel uses run == __null_kernel__)")
-        print("  - freq: times this aten_op->kernel sequence appears")
-    return final_rows_display, final_rows_raw
+        print(" * T_fo (fw): framework overhead; T_py + T_aten+lib + T_sys (fm) (but we're using the bm flavor)")
+        print(" * T_fo (bm): framework overhead; T_py + T_aten + T_lib_setup + T_lib_heur + T_lib_shim + T_sys (bm)")
+        print(" * T_py: python xlat tax; torch_op -> aten_op")
+        print(" * T_aten: framework aten+lib minus cuBLASLt translation (T_aten+lib - T_lib_xlat)")
+        print(" * T_lib_xlat: cuBLASLt translation (setup+heur+shim)")
+        print(" * T_lib_setup: cuBLASLt matmul descriptor/config setup")
+        print(" * T_lib_heur: cuBLASLt heuristic search for algorithm")
+        print(" * T_lib_shim: launch - matMul (null kernel uses run == __null_kernel__)")
+        print(" * freq: times this aten_op->kernel sequence appears")
+
+    return final_summary_table, final_summary_data
 
 
-def compute_weighted_averages(final_rows_raw):
+def compute_weighted_averages(final_summary_data):
     """
-    Weighted averages over rows where all components are present.
+    Weighted averages over entries where all components are present.
     Weights: freq (defaults to 1 when None).
     """
-    keys = ["T_py_xlat", "T_aten_xlat", "T_lib_setup", "T_lib_heur", "T_lib_shim", "T_sys", "T_fo"]
+    keys = ["T_py", "T_aten", "T_lib_setup", "T_lib_heur", "T_lib_shim", "T_sys", "T_fo"]
     totals = {k: 0.0 for k in keys}
     weight_sum = 0.0
 
-    for row in final_rows_raw:
+    for row in final_summary_data:
         if not all(row.get(k) is not None for k in keys):
             continue
         w = row["freq"] if row.get("freq") is not None else 1.0
@@ -307,8 +309,8 @@ def plot_weighted_average_stacked(averages, output_path: Path):
     Plot a stacked bar of weighted averages.
     """
     components = [
-        ("T_py_xlat", "#4e79a7"),
-        ("T_aten_xlat", "#59a14f"),
+        ("T_py", "#4e79a7"),
+        ("T_aten", "#59a14f"),
         ("T_lib_setup", "#f28e2c"),
         ("T_lib_heur", "#e15759"),
         ("T_lib_shim", "#edc949"),
@@ -339,13 +341,13 @@ def plot_weighted_average_stacked(averages, output_path: Path):
     return output_path
 
 
-def plot_per_kernel_taxbreak(final_rows_raw, output_path: Path, title_suffix: str = ""):
+def plot_per_kernel_taxbreak(final_summary_data, output_path: Path, title_suffix: str = ""):
     """
-    Plot one stacked bar per kernel (job_id) for rows with complete data.
+    Plot one stacked bar per kernel (job_id) for entries with complete data.
     """
     components = [
-        ("T_py_xlat", "#4e79a7"),
-        ("T_aten_xlat", "#59a14f"),
+        ("T_py", "#4e79a7"),
+        ("T_aten", "#59a14f"),
         ("T_lib_setup", "#f28e2c"),
         ("T_lib_heur", "#e15759"),
         ("T_lib_shim", "#edc949"),
@@ -353,7 +355,7 @@ def plot_per_kernel_taxbreak(final_rows_raw, output_path: Path, title_suffix: st
     ]
 
     filtered = []
-    for row in final_rows_raw:
+    for row in final_summary_data:
         vals = [row.get(name) for name, _ in components]
         if any(v is None for v in vals):
             continue
@@ -396,7 +398,7 @@ def summarize(model_name: str = None, dtype: str = None, output_path: Path = Non
     print("\n")
     baremetal_summary, baremetal_results = get_baremetal_summary(show_table=True)
     print("\n")
-    final_summary_display, final_summary_raw = get_final_summary(pytorch_results, baremetal_results, show_table=True)
+    final_summary_table, final_summary_data = get_final_summary(pytorch_results, baremetal_results, show_table=True)
 
     if output_path is None:
         base_dir = utils.get_path("BAREMETAL_OUTPUT_DIR").parent
@@ -406,16 +408,16 @@ def summarize(model_name: str = None, dtype: str = None, output_path: Path = Non
         title_suffix += f"{model_name}"
     if dtype:
         title_suffix += f" [{dtype}]"
-    plot_path = plot_per_kernel_taxbreak(final_summary_raw, output_path, title_suffix=title_suffix)
+    plot_path = plot_per_kernel_taxbreak(final_summary_data, output_path, title_suffix=title_suffix)
     if plot_path:
         print(f"Saved per-kernel taxbreak plot to {plot_path}")
     else:
-        print("No plot saved (no rows with complete data).")
+        print("No plot saved (no entries with complete data).")
 
     return {
         "framework_summary": framework_summary,
         "baremetal_summary": baremetal_summary,
-        "final_summary_display": final_summary_display,
-        "final_summary_raw": final_summary_raw,
+        "final_summary_table": final_summary_table,
+        "final_summary_data": final_summary_data,
         "plot_path": str(plot_path) if plot_path else None,
     }

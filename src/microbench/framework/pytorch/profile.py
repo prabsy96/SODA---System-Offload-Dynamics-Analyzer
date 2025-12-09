@@ -193,12 +193,12 @@ def replay_sequences_from_aten_ops(
         linked_sequences = utils.link_sequences(events)
 
         # Calculate launch/xlat taxes for event sequences
-        linked_sequences_with_tax = utils.calculate_sequence_metrics(linked_sequences, metrics=["launch_tax", "xlat_tax", "py_tax"])
+        linked_sequences_with_tax = utils.calculate_sequence_metrics(linked_sequences, metrics=["launch_tax", "aten_xlat_tax", "py_tax"])
 
         grouped_seqs_by_id_dict = utils.group_sequences_by_identity(linked_sequences_with_tax)
         agg_sequence = utils.aggregate_sequences(
             grouped_seqs_by_id_dict,
-            metrics=["launch_tax", "xlat_tax", "py_tax"],
+            metrics=["launch_tax", "aten_xlat_tax", "py_tax"],
             event_types=["kernel", "aten_op", "cuda_launch", "torch_op"],
         )
         sequence_by_idx[i] = agg_sequence

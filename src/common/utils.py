@@ -432,7 +432,7 @@ def aggregate_sequences(grouped_sequences, metrics: List[str], event_types: List
 
     Args:
         grouped_sequences: Dict mapping identity key -> list[sequence dict]
-        metrics: Sequence-level metrics to summarize (e.g., ["launch_tax", "xlat_tax"])
+        metrics: Sequence-level metrics to summarize (e.g., ["launch_tax", "aten_xlat_tax"])
         event_types: Event types to aggregate (e.g., ["kernel", "aten_op", "cuda_launch", "torch_op"])
     """
     unique_sequences = []
@@ -960,11 +960,11 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
 
 def calculate_sequence_metrics(sequences: List[Dict], metrics: List[str]) -> List[Dict]:
     """
-    Calculates per-sequence metrics (e.g., launch_tax, xlat_tax) and adds them to the sequence dict.
+    Calculates per-sequence metrics (e.g., launch_tax, aten_xlat_tax) and adds them to the sequence dict.
 
     Args:
         sequences: List of event sequence dictionaries.
-        metrics: Metrics to compute (e.g., ["launch_tax", "xlat_tax"])
+        metrics: Metrics to compute (e.g., ["launch_tax", "aten_xlat_tax"])
 
     Returns:
         Modified event sequences with requested metric keys added to each.
@@ -980,12 +980,12 @@ def calculate_sequence_metrics(sequences: List[Dict], metrics: List[str]) -> Lis
         culib_heur = seq.get("culib", {}).get("heur", {})
         culib_run = seq.get("culib", {}).get("run", {})
 
-        if "xlat_tax" in metrics:
+        if "aten_xlat_tax" in metrics:
             # Torch translation tax = launch - aten_op
             # Time spent in the translation from aten_op to culib to launch.
-            xlat_tax = cuda_launch["ts"] - aten_op["ts"]
-            assert xlat_tax >= 0, "Negative xlat tax detected"
-            seq["xlat_tax"] = xlat_tax
+            aten_xlat_tax = cuda_launch["ts"] - aten_op["ts"]
+            assert aten_xlat_tax >= 0, "Negative xlat tax detected"
+            seq["aten_xlat_tax"] = aten_xlat_tax
 
         if "shim_tax" in metrics:
             # Shim tax = launch - run

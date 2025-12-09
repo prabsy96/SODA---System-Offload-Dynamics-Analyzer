@@ -92,7 +92,7 @@ class SodaAnalyzer:
         """
         print("=== Analyzing Trace Data ===")
         print(f"Analyzing {len(self.sequences)} event sequences")
-        sequences = utils.calculate_sequence_metrics(list(self.sequences), metrics=["launch_tax", "xlat_tax"])
+        sequences = utils.calculate_sequence_metrics(list(self.sequences), metrics=["launch_tax", "aten_xlat_tax"])
         
         # Analyze per-stream metrics
         stream_info = utils.analyze_per_stream(self.events)
