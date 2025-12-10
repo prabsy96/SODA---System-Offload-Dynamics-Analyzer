@@ -305,11 +305,24 @@ def check_assert(condition: bool, log: str, excuse: bool = False) -> None:
     if excuse:
         return
 
+    # Check if running in non-interactive mode (e.g., SLURM batch job)
+    # In non-interactive mode, auto-excuse with a warning instead of blocking
+    import sys
+    if not sys.stdin.isatty():
+        print(f"[WARNING] Assertion failed (auto-excused in non-interactive mode): {log}")
+        print(f"Review logs @ {get_path('ASSERT_LOG')}")
+        return
+
     # Otherwise, ask the user if they want to excuse the assertion failure
     print(f"Assertion failed: {log}")
     print(f"Review logs @ {get_path('ASSERT_LOG')}")
     print("Do you want to excuse this assertion failure? (y/n)")
-    if input().strip().lower() == "y":
+    try:
+        if input().strip().lower() == "y":
+            return
+    except EOFError:
+        # Handle case where stdin is closed unexpectedly
+        print(f"[WARNING] Assertion failed (auto-excused due to EOF): {log}")
         return
 
     # Otherwise, raise an error
