@@ -65,6 +65,7 @@ export TAX_BREAK_PLOT="microbench/taxbreak.png"
 
 # Log files (relative to experiment directory)
 export PYTORCH_VERIFY_LOG="$PYTORCH_OUTPUT_DIR/microbench.log"
+export ASSERT_LOG="assertions.log"
 
 # HuggingFace cache (set default if not already set)
 # export HF_HOME="${HF_HOME:-/tmp/hf_cache_$USER}"
