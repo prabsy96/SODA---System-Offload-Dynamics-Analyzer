@@ -80,11 +80,17 @@ PREF_SWEEP_CONFIG = {
 
 # DECODE
 DEC_SWEEP_CONFIG = {
+    "gpt_oss_20b": {
+    "model_name": "openai/gpt-oss-20b",
+    "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),  # lightweight MoE, smaller active params
+    "seq_lens": sorted([512, 1024, 2048, 4096], reverse=True),  # supports up to 4k context
+    "max_new_toks": [10],
+    },
     "gpt2_short_ctx": {
         "model_name": "gpt2",
         "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
         "seq_lens":  sorted([128, 256, 512, 1024], reverse=True),
-        "max_new_toks": [1], # FIXME: @prabhu should this be 10? 
+        "max_new_toks": [10], # FIXME: @prabhu should this be 10? 
     },
     "llama_3.2_1b_short_ctx": {
         "model_name": "meta-llama/Llama-3.2-1B",
@@ -141,4 +147,14 @@ DEBUG_SWEEP_CONFIG = {
     #     # "seq_lens": sorted([512, 1024, 2048], reverse=True),
     #     "max_new_toks": [1],
     # },
+}
+
+FP8_SWEEP_CONFIG = {
+    "gpt_oss_20b_fp8": {
+        "model_name": "openai/gpt-oss-20b",
+        "batch_sizes": sorted([8, 16]),
+        "seq_lens": sorted([512, 1024, 2048, 4096]),
+        "max_new_toks": [1],
+        "precision": "float8_e4m3fn",  # Override default precision
+    },
 }

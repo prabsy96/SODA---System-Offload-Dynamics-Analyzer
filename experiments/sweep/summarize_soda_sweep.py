@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Tuple, Set
 import matplotlib.pyplot as plt
 import numpy as np
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-
+from typing import Dict, List, Optional, Tuple, Set, Union
 
 METRIC_LABEL = "inference time (ms)"
 T_EXPOSED_LABEL = "T_exposed (ms)"
@@ -38,15 +38,27 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def safe_inference_time(report: Dict) -> Optional[float]:
+def safe_inference_time(report: Dict) -> Union[float, str, None]:
     perf = report.get("performance_metrics") or report.get("metrics") or {}
     value = perf.get("inference_time_ms")
+    
+    # FIX: Handle "OOM" string explicitly
+    if value == "OOM":
+        return "OOM"
+        
     if value is not None:
-        return float(value)
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            pass
+
     timing = perf.get("inference_time_breakdown") or perf.get("inference_time") or {}
     for key in ("torch_measured_inference_time_ms", "trace_calculated_inference_time_ms"):
         if key in timing:
-            return float(timing[key])
+            try:
+                return float(timing[key])
+            except (ValueError, TypeError):
+                continue
     return None
 
 def safe_t_exposed(report: Dict) -> Optional[float]:
@@ -152,8 +164,13 @@ def collect_reports(root: Path) -> List[Dict]:
 
         model_name = metadata.get("model_name") or infer_model_name(report_path.parent.name, compile_type, precision)
         inference_time_ms = safe_inference_time(data)
+        status = "ok"
+        if inference_time_ms == "OOM":
+            status = "oom"
+            inference_time_ms = None
+
         t_exposed_ms = safe_t_exposed(data)
-        gpu_name = get_gpu_name(data)  # FIX: Extract GPU name from report
+        gpu_name = get_gpu_name(data)
 
         rows.append(
             {
@@ -161,12 +178,12 @@ def collect_reports(root: Path) -> List[Dict]:
                 "compile_type": compile_type,
                 "precision": precision,
                 "device": device,
-                "gpu_name": gpu_name,  # FIX: Add gpu_name to row
+                "gpu_name": gpu_name,
                 "batch_size": batch_size,
                 "seq_len": seq_len,
                 "inference_time_ms": inference_time_ms,
                 "t_exposed_ms": t_exposed_ms,
-                "status": "ok",
+                "status": status,
             }
         )
         seen_dirs.add(report_path.parent.resolve())

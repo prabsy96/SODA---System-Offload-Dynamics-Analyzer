@@ -405,10 +405,13 @@ class ModelTracer:
         self.model_name = args.model
         self.device = torch.device(args.device)
         self.compile_type = args.compile_type
+        # DEBUG: Print precision settings
+        print(f"DEBUG: args.precision='{args.precision}'")
         self.is_fp8 = args.precision == "float8_e4m3fn"
+        print(f"DEBUG: self.is_fp8={self.is_fp8}")
+        
         self.precision = utils.parse_dtype_to_torch(args.precision)
         self.load_precision = torch.bfloat16 if self.is_fp8 else self.precision
-
         # Set random seeds
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
@@ -503,8 +506,8 @@ class ModelTracer:
             "trust_remote_code": True,
         }
         
-        if self.is_fp8 and FP8_CONFIG_AVAILABLE:
-            kwargs["quantization_config"] = FP8Config(fp8_format="e4m3")
+        if self.is_fp8 and FP8_CONFIG_AVAILABLE and not self.is_decoder:
+            pass
 
         return kwargs
 
@@ -525,6 +528,116 @@ class ModelTracer:
 
         print(f"Converted {converted_count} linear layers to FP8 E4M3.")
         return model
+
+    def _replace_linear_with_te(self, module: torch.nn.Module) -> None:
+        """
+        Recursively replace nn.Linear with transformer_engine.pytorch.Linear.
+        """
+        import transformer_engine.pytorch as te
+        
+        import transformer_engine.pytorch as te
+        import gc
+        
+        for name, child in module.named_children():
+            if isinstance(child, torch.nn.Linear):
+                has_bias = child.bias is not None
+                
+                # Create TE layer
+                # We keep params in BF16 (master weights) and let fp8_autocast handle the cast
+                te_linear = te.Linear(
+                    child.in_features,
+                    child.out_features,
+                    bias=has_bias,
+                    params_dtype=child.weight.dtype
+                )
+                
+                # Copy weights
+                with torch.no_grad():
+                    te_linear.weight.copy_(child.weight)
+                    if has_bias:
+                        te_linear.bias.copy_(child.bias)
+                
+                # Move to correct device
+                te_linear.to(child.weight.device)
+                
+                # Replace the layer
+                setattr(module, name, te_linear)
+                
+                # OPTIONAL: Explicitly delete original child to free memory immediately
+                del child
+            else:
+                self._replace_linear_with_te(child)
+        
+        # Force GC to reclaim memory after replacements
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+            
+    def _load_model_fp8(self, model_name: str) -> Any:
+        """Load model with FP8 quantization using transformer-engine or fallback."""
+        print(f"DEBUG: Entering _load_model_fp8 for {model_name}")
+        try:
+            # Option 1: Use Transformer Engine (recommended for H100)
+            import transformer_engine.pytorch as te
+            from transformer_engine.common.recipe import DelayedScaling, Format
+            from transformers import AutoModelForCausalLM, AutoConfig
+            
+            config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+            print("DEBUG: Loading model in BFloat16 before TE replacement...")
+            
+            # Load in bfloat16 first
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                config=config,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+                trust_remote_code=True,
+            )
+            
+            # Replace nn.Linear with TE Linear layers to enable FP8 autocast
+            LOGGER.info("Replacing nn.Linear with TransformerEngine Linear layers...")
+            self._replace_linear_with_te(model)
+            
+            # Apply FP8 recipe using correct API import
+            fp8_recipe = DelayedScaling(
+                margin=0,
+                fp8_format=Format.E4M3,
+                amax_history_len=16,
+                amax_compute_algo="max",
+            )
+            
+            LOGGER.info(f"Loaded {model_name} with Transformer Engine FP8")
+            # NOTE: Do NOT manually convert to FP8 here. TE handles it via autocast.
+            return model, fp8_recipe
+            
+        except ImportError:
+            # Option 2: Fallback to manual FP8 casting (limited support)
+            LOGGER.warning("Transformer Engine not available. Using manual FP8 casting.")
+            from transformers import AutoModelForCausalLM
+            
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=torch.bfloat16,  # Load as bf16, cast later
+                device_map="auto",
+                trust_remote_code=True,
+            )
+            # Convert weights manually
+            model = self._convert_to_fp8(model)
+            return model, None
+        except AttributeError:
+             # Option 3: Fallback if TE API is different/older
+            LOGGER.warning("Transformer Engine API mismatch. Using manual FP8 casting.")
+            from transformers import AutoModelForCausalLM
+            
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+                trust_remote_code=True,
+            )
+            model = self._convert_to_fp8(model)
+            return model, None
 
     def load_encoder(self) -> Tuple[transformers.PreTrainedModel, transformers.PreTrainedTokenizer]:
         """Loads an encoder-only model (e.g., BERT)."""
@@ -572,12 +685,17 @@ class ModelTracer:
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         
-        # Load config and set pad_token_id before model initialization to prevent warning
-        # FIX: Add trust_remote_code=True here for models like DeepSeek-MoE
+        # Load config and set pad_token_id before model initialization
         config = transformers.AutoConfig.from_pretrained(self.model_name, trust_remote_code=True)
         if hasattr(config, 'pad_token_id') and config.pad_token_id is None:
             config.pad_token_id = tokenizer.eos_token_id
         
+        # FP8 path: Use Transformer Engine if available
+        if self.is_fp8:
+            model, self.fp8_recipe = self._load_model_fp8(self.model_name)
+            return model, tokenizer
+        
+        # Non-FP8 paths (existing code)
         kwargs = self.get_kwargs()
         if self.compile_type == "torch.compile":
             kwargs.update({"attn_implementation": "sdpa"})
@@ -585,23 +703,17 @@ class ModelTracer:
                 self.model_name, config=config, **kwargs
             ).eval()
             model.generation_config.cache_implementation = "static"
-            if self.is_fp8 and "quantization_config" not in kwargs:
-                model = self._convert_to_fp8(model)
             model.forward = torch.compile(model.forward, mode="reduce-overhead", backend="inductor")
         elif self.compile_type == "flash-attention":
             kwargs.update({"attn_implementation": "flash_attention_2"})
             model = transformers.AutoModelForCausalLM.from_pretrained(
                 self.model_name, config=config, **kwargs
             ).eval()
-            if self.is_fp8 and "quantization_config" not in kwargs:
-                model = self._convert_to_fp8(model)
         else:  # eager
             kwargs.update({"attn_implementation": "eager"})
             model = transformers.AutoModelForCausalLM.from_pretrained(
                 self.model_name, config=config, **kwargs
             ).eval()
-            if self.is_fp8 and "quantization_config" not in kwargs:
-                model = self._convert_to_fp8(model)
         
         return model, tokenizer
     
@@ -805,12 +917,25 @@ class ModelTracer:
                 end_time = torch.cuda.Event(enable_timing=True)
                 
                 start_time.record()
-                self.model.generate(
-                    **self.model_inputs,
-                    max_new_tokens=self.max_new_tokens,
-                    do_sample=False,
-                    pad_token_id=self.tokenizer.pad_token_id,
-                )
+                
+                # FIX: Use TE FP8 autocast if recipe is available
+                if self.is_fp8 and getattr(self, 'fp8_recipe', None):
+                    import transformer_engine.pytorch as te
+                    with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
+                        self.model.generate(
+                            **self.model_inputs,
+                            max_new_tokens=self.max_new_tokens,
+                            do_sample=False,
+                            pad_token_id=self.tokenizer.pad_token_id,
+                        )
+                else:
+                    self.model.generate(
+                        **self.model_inputs,
+                        max_new_tokens=self.max_new_tokens,
+                        do_sample=False,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                    )
+                
                 end_time.record()
                 
                 torch.cuda.synchronize()
