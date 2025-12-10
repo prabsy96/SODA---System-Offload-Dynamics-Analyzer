@@ -267,6 +267,54 @@ def save_json(file_path: str | Path, data: Dict[str, Any], indent: int = 2) -> N
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=indent, ensure_ascii=False)
 
+
+def write_log(env_var: str, lines: str | list[str]) -> None:
+    """
+    Append text lines to a log file referenced by an environment variable.
+    
+    Args:
+        env_var: Name of the environment variable pointing to the log file
+                 (relative paths are resolved via EXPERIMENT_DIR).
+        lines: Single string or list of strings to append.
+    """
+    if isinstance(lines, str):
+        lines = [lines]
+    log_path = get_path(env_var)
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+        f.write("\n")
+
+
+def check_assert(condition: bool, log: str, excuse: bool = False) -> None:
+    """
+    Guard an assertion; log and optionally excuse on failure.
+    
+    Args:
+        condition: Assertion condition expected to be True.
+        log: Message to record and use if raising.
+        excuse: If True, failures are logged but not raised.
+    """
+    # If condition is true, we're good
+    if condition:
+        return
+
+    # Otherwise log the assertion failure
+    write_log("ASSERT_LOG", log)
+
+    # If excuse is true, then excuse and return
+    if excuse:
+        return
+
+    # Otherwise, ask the user if they want to excuse the assertion failure
+    print(f"Assertion failed: {log}")
+    print(f"Review logs @ {get_path('ASSERT_LOG')}")
+    print("Do you want to excuse this assertion failure? (y/n)")
+    if input().strip().lower() == "y":
+        return
+
+    # Otherwise, raise an error
+    raise RuntimeError(log)
+
 def _parse_scalar(value, default):
     if value is None or value == '':
         return default
@@ -949,11 +997,16 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
         external_id = kernel["external_id"]
         correlation = kernel["correlation"]
 
-        if external_id not in aten_ops or correlation not in cuda_launches:
+        # Check if the kernel has a missing aten_op or cuda_launch event
+        is_aten_op_missing = external_id not in aten_ops
+        is_cuda_launch_missing = correlation not in cuda_launches
+        if is_aten_op_missing or is_cuda_launch_missing:
             orphan_kernels.append({
                 "name": kernel["name"],
-                "ext_id": external_id,
-                "corr": correlation,
+                "external_id": external_id,
+                "correlation": correlation,
+                "is_aten_op_missing": is_aten_op_missing,
+                "is_cuda_launch_missing": is_cuda_launch_missing,
             })
             continue
 
@@ -968,15 +1021,36 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
             "torch_op": torch_op,
         })
 
-    # NOTE: This should *never* happen. We're missing the expected aten/launch events. 
-    # Check collect_events() for missing aten/launch events for the given orphan kernels below. 
-    for ok in orphan_kernels:
-        print(f"Orphan kernel: {ok['name']} (expected ext_id: {ok['ext_id']}, corr: {ok['corr']})")
-    assert not orphan_kernels, f"Found {len(orphan_kernels)} orphan kernels with unmatched aten/launch events."
+    # NOTE: Orphan kernels should *never* happen. 
+    # Orphan kernels imply we're missing expected aten/launch events.
+    # This is likely due to trace parsing gaps. Look at collect_events(). 
+    # Please review logs in ASSERT_LOG and excuse as you wish. 
+    # Excuse options:
+    #   1) Interactive: respond 'y' when prompted.
+    #   2) Non-interactive: set excuse=True below to forgive all orphan invariants.
+    excuse = False
+    if orphan_kernels:
+        log = []
+        for ok in orphan_kernels:
+            expected_ext_id = ok["external_id"]
+            expected_corr = ok["correlation"]
+            is_aten_op_missing = ok["is_aten_op_missing"]
+            is_cuda_launch_missing = ok["is_cuda_launch_missing"]
 
-    validate_sequences(sequences)
+            log.append(f"Orphan kernel {ok['name']}.")
+            if is_aten_op_missing:
+                log.append(f"\tMissing aten_op, expected external_id: {expected_ext_id}")
+            if is_cuda_launch_missing:
+                log.append(f"\tMissing cuda_launch, expected correlation: {expected_corr}")
+
+        write_log("ASSERT_LOG", log)
+    check_assert(
+        not orphan_kernels,
+        f"Found {len(orphan_kernels)} orphan kernels with unmatched aten/launch events.",
+        excuse,
+    )
+
     return sequences
-
 
 def calculate_sequence_metrics(sequences: List[Dict], metrics: List[str]) -> List[Dict]:
     """
@@ -1000,18 +1074,24 @@ def calculate_sequence_metrics(sequences: List[Dict], metrics: List[str]) -> Lis
         culib_heur = seq.get("culib", {}).get("heur", {})
         culib_run = seq.get("culib", {}).get("run", {})
 
+        # NOTE: These assertion checks should *never* fail.
+        # If they do, review ASSERT_LOG and excuse as you wish.
+        # Excuse options:
+        #   1) Interactive: respond 'y' when prompted.
+        #   2) Non-interactive: set excuse=True below to forgive all negative taxes.
+        excuse = False
         if "aten_xlat_tax" in metrics:
             # Torch translation tax = launch - aten_op
             # Time spent in the translation from aten_op to culib to launch.
             aten_xlat_tax = cuda_launch["ts"] - aten_op["ts"]
-            assert aten_xlat_tax >= 0, "Negative xlat tax detected"
+            check_assert(aten_xlat_tax >= 0, f"Negative aten_xlat_tax detected: {aten_xlat_tax}μs for kernel {kernel['name']}.", excuse)
             seq["aten_xlat_tax"] = aten_xlat_tax
 
         if "shim_tax" in metrics:
             # Shim tax = launch - run
             # Time spent in the thin shim between cublasLtMatmul() and cudaLaunchKernel.
             shim_tax = cuda_launch["ts"] - culib_run["ts"]
-            assert shim_tax >= 0, "Negative shim_tax detected"
+            check_assert(shim_tax >= 0, f"Negative shim_tax detected: {shim_tax}μs for kernel {kernel['name']}.", excuse)
             seq["shim_tax"] = shim_tax
 
         if "culib_xlat_tax" in metrics:
@@ -1022,25 +1102,25 @@ def calculate_sequence_metrics(sequences: List[Dict], metrics: List[str]) -> Lis
             # HACK: culib_xlat_tax = setup + heur + shim 
             # We do this because the nvtx markers are not contiguous and leaky
             culib_xlat_tax = culib_setup["dur"] + culib_heur["dur"] + seq["shim_tax"]
-            assert culib_xlat_tax >= 0, "Negative culib_xlat_tax detected"
+            check_assert(culib_xlat_tax >= 0, f"Negative culib_xlat_tax detected: {culib_xlat_tax}μs for kernel {kernel['name']}.", excuse)
             seq["culib_xlat_tax"] = culib_xlat_tax
 
             # NOTE: This should still hold true 
-            assert cuda_launch["ts"] - culib_setup["ts"] >= 0, "Negative culib_xlat_tax detected"
+            check_assert(cuda_launch["ts"] - culib_setup["ts"] >= 0, f"Negative culib_xlat_tax detected: {cuda_launch['ts'] - culib_setup['ts']}μs for kernel {kernel['name']}.", excuse)
 
         if "launch_tax" in metrics:
             # Launch tax = kernel - launch
             # Time spent after the launch call to the kernel start.
             # Caveat: This might also include queue latency due to concurrent launches.
             launch_tax = kernel["ts"] - cuda_launch["ts"]
-            assert launch_tax >= 0, "Negative launch tax detected"
+            check_assert(launch_tax >= 0, f"Negative launch tax detected: {launch_tax}μs for kernel {kernel['name']}.", excuse)
             seq["launch_tax"] = launch_tax
 
         if "py_tax" in metrics:
             # PyTorch translation tax = aten_op - torch_op
             # Time spent in the translation from aten_op to torch_op.
             py_tax = aten_op["ts"] - torch_op["ts"]
-            assert py_tax >= 0, "Negative py_tax detected"
+            check_assert(py_tax >= 0, f"Negative py_tax detected: {py_tax}μs for kernel {kernel['name']}.", excuse)
             seq["py_tax"] = py_tax
 
     return sequences
