@@ -15,7 +15,7 @@ import torch
 from soda import ModelTracer
 from soda.microbench.microbench import SodaMicrobench
 from soda.common import utils
-from experiments.sweep.config import PARAMS, SWEEP_CONFIGS
+from experiments.sweep.config import PARAMS, PREF_SWEEP_CONFIGS, DEC_SWEEP_CONFIGS, DEBUG_SWEEP_CONFIGS
 
 def ensure_env_loaded() -> None:
     """Exit early if env.sh was not sourced."""
@@ -33,6 +33,11 @@ def main() -> None:
     device = PARAMS["device"]
     warmup = PARAMS["microbench_warmup"]
     runs = PARAMS["microbench_runs"]
+
+    # Select the sweep configs to use
+    SWEEP_CONFIGS = PREF_SWEEP_CONFIGS
+    # SWEEP_CONFIGS = DEC_SWEEP_CONFIGS
+    # SWEEP_CONFIGS = DEBUG_SWEEP_CONFIGS
 
     for config_name, cfg in SWEEP_CONFIGS.items():
         model = cfg["model_name"]

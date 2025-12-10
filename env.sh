@@ -41,7 +41,7 @@ export PYTHON_VENV="$SODA_ROOT/.venv"
 # Environment metadata file
 export ENV_METADATA="env_metadata.json"
 
-# Experiment directory (set by tracer, do not set manually)
+# Experiment directory (set by tracer, DO NOT set manually)
 export EXPERIMENT_DIR=""
 
 # Common data files referenced across scripts (relative to experiment directory)
@@ -59,11 +59,13 @@ export BAREMETAL_JOBS="$BAREMETAL_OUTPUT_DIR/jobs.json"
 export BAREMETAL_GEMM_KERNELS="$BAREMETAL_OUTPUT_DIR/baremetal_gemm_profile.json"
 export BAREMETAL_TRACES="$BAREMETAL_OUTPUT_DIR/traces"
 
-export FINAL_REPORT="microbench/bm_vs_pytorch_report.json"
-# Graphs output (relative to experiment directory)
+# Tax break files (relative to experiment directory)
+export TAX_BREAK_SUMMARY="microbench/taxbreak.json"
+export TAX_BREAK_PLOT="microbench/taxbreak.png"
 
 # Log files (relative to experiment directory)
 export PYTORCH_VERIFY_LOG="$PYTORCH_OUTPUT_DIR/microbench.log"
+export ASSERT_LOG="assertions.log"
 
 # HuggingFace cache (set default if not already set)
 # export HF_HOME="${HF_HOME:-/tmp/hf_cache_$USER}"
@@ -102,6 +104,18 @@ reinstall() {
     echo "Reinstalling soda package"
     pip install --ignore-installed --force-reinstall --no-deps -e "$SODA_ROOT"
     echo "Soda package reinstalled"
+}
+
+# Build the baremetal binary using env-provided paths
+build() {
+    local build_dir="${BAREMETAL_BUILD:-$SODA_ROOT/build}"
+    local build_type="${CMAKE_BUILD_TYPE:-Release}"
+    local jobs="${NUM_JOBS:-$(nproc)}"
+
+    mkdir -p "$build_dir"
+    cmake -S "$BAREMETAL_MICROBENCH_DIR" -B "$build_dir" -DCMAKE_BUILD_TYPE="$build_type"
+    cmake --build "$build_dir" -- -j"$jobs"
+    echo "Built binary at ${BAREMETAL_BINARY:-$build_dir/main_gemm_bm}"
 }
 
 # Print SODA banner when sourced
@@ -154,9 +168,9 @@ if [ -z "${SODA_ENV_QUIET:-}" ]; then
     print_soda_banner
     echo ""
     echo "Get started:"
-    echo "  * print_soda_env    - Show all environment variables and paths"
     echo "  * activate_env     - Activate Python virtual environment"
     echo "  * cleanup           - Delete output directory ($SODA_OUTPUT)"
+    echo "  * build            - Build the baremetal binary"
     echo "  * reinstall    - Reinstall the soda package (use after making changes)"
     echo ""
 fi

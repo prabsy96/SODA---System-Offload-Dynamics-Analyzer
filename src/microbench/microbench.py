@@ -1,4 +1,5 @@
 from typing import Dict, Any
+from pathlib import Path
 
 from soda.common import utils
 from soda.common import print_utils
@@ -11,7 +12,7 @@ from soda.microbench.framework.pytorch.verify import compare_sequences
 from soda.microbench.baremetal.generate import generate_jobs
 from soda.microbench.baremetal.search import search_cublas_algos_offline
 from soda.microbench.baremetal.profile import profile_baremetal_gemm_kernels
-from soda.microbench.baremetal.report import report
+from soda.microbench.baremetal.report import summarize
 
 class SodaMicrobench:
     
@@ -29,7 +30,7 @@ class SodaMicrobench:
             Dictionary with unique GEMM sequences data.
         """
         # Calculate launch/xlat taxes for event sequences
-        sequences = utils.calculate_sequence_metrics(list(self.tracer.sequences), metrics=["launch_tax", "xlat_tax"])
+        sequences = utils.calculate_sequence_metrics(list(self.tracer.sequences), metrics=["launch_tax", "aten_xlat_tax"])
 
         # Save all sequences
         all_sequences_file = utils.get_path("ALL_SEQUENCES")
@@ -53,7 +54,7 @@ class SodaMicrobench:
         grouped_seqs_by_id_dict = utils.group_sequences_by_identity(gemm_sequences)
         unique_gemm_sequences = utils.aggregate_sequences(
             grouped_seqs_by_id_dict,
-            metrics=["launch_tax", "xlat_tax"],
+            metrics=["launch_tax", "aten_xlat_tax"],
             event_types=["kernel", "aten_op", "cuda_launch"],
         )
         unique_gemm_sequences_file = utils.get_path("UNIQUE_GEMM_SEQUENCES")
@@ -149,8 +150,11 @@ class SodaMicrobench:
             print("Skipping baremetal GEMM kernel profiling (--skip-baremetal-profile).")
             print_utils.section_end(section)
         
-        # Compare PyTorch vs Baremetal
-        section = "Report PyTorch vs Baremetal"
+        # TaxBreak Report
+        section = "TaxBreak Report"
         print_utils.section_start(section)
-        report()
+        summarize(
+            model=self.args.model,
+            precision=self.args.precision,
+        )
         print_utils.section_end(section)

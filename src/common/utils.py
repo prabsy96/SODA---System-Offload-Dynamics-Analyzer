@@ -267,6 +267,54 @@ def save_json(file_path: str | Path, data: Dict[str, Any], indent: int = 2) -> N
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=indent, ensure_ascii=False)
 
+
+def write_log(env_var: str, lines: str | list[str]) -> None:
+    """
+    Append text lines to a log file referenced by an environment variable.
+    
+    Args:
+        env_var: Name of the environment variable pointing to the log file
+                 (relative paths are resolved via EXPERIMENT_DIR).
+        lines: Single string or list of strings to append.
+    """
+    if isinstance(lines, str):
+        lines = [lines]
+    log_path = get_path(env_var)
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+        f.write("\n")
+
+
+def check_assert(condition: bool, log: str, excuse: bool = False) -> None:
+    """
+    Guard an assertion; log and optionally excuse on failure.
+    
+    Args:
+        condition: Assertion condition expected to be True.
+        log: Message to record and use if raising.
+        excuse: If True, failures are logged but not raised.
+    """
+    # If condition is true, we're good
+    if condition:
+        return
+
+    # Otherwise log the assertion failure
+    write_log("ASSERT_LOG", log)
+
+    # If excuse is true, then excuse and return
+    if excuse:
+        return
+
+    # Otherwise, ask the user if they want to excuse the assertion failure
+    print(f"Assertion failed: {log}")
+    print(f"Review logs @ {get_path('ASSERT_LOG')}")
+    print("Do you want to excuse this assertion failure? (y/n)")
+    if input().strip().lower() == "y":
+        return
+
+    # Otherwise, raise an error
+    raise RuntimeError(log)
+
 def _parse_scalar(value, default):
     if value is None or value == '':
         return default
@@ -418,11 +466,6 @@ def group_sequences_by_identity(sequences):
 
 def agg_event_metric(seq_group, event_type: str, metric: str):
     """Aggregate event-level metrics (e.g., duration) if available."""
-    first_value = seq_group[0][event_type][metric]
-    # FIXME: Clean up 
-    # Too defensive; we should handle None values.
-    # if first_value is None:
-    #     return None
     values = [seq[event_type][metric] for seq in seq_group]
     return summarize_metric(values)
 
@@ -437,7 +480,7 @@ def aggregate_sequences(grouped_sequences, metrics: List[str], event_types: List
 
     Args:
         grouped_sequences: Dict mapping identity key -> list[sequence dict]
-        metrics: Sequence-level metrics to summarize (e.g., ["launch_tax", "xlat_tax"])
+        metrics: Sequence-level metrics to summarize (e.g., ["launch_tax", "aten_xlat_tax"])
         event_types: Event types to aggregate (e.g., ["kernel", "aten_op", "cuda_launch", "torch_op"])
     """
     unique_sequences = []
@@ -445,25 +488,62 @@ def aggregate_sequences(grouped_sequences, metrics: List[str], event_types: List
         # Use first sequence as template for aggregation.
         first_seq = seq_group[0]
 
-        # Create sequence level template.
+        # Create template for aggregated sequence.
         agg_seq = {"count": len(seq_group)}
         for event_type in event_types:
-            agg_seq[event_type] = dict(first_seq[event_type])
+            # Generic path for standard events (kernel, aten_op, cuda_launch, torch_op).
+            if event_type !="culib":
+                agg_seq[event_type] = dict(first_seq[event_type])
 
-        # Aggregate sequence-level metrics (e.g., launch/xlat tax).
+            # Special handling for cuBLASLt culib markers.
+            elif event_type == "culib":
+                culib = first_seq["culib"]
+                # Create template for culib sequence 
+                agg_culib = {"temperature": culib.get("temperature")}
+                for phase in culib:
+                    # Skip temperature since it not a phase and doens't have numeric metrics
+                    if phase != "temperature":
+                        agg_culib[phase] = {}
+                agg_seq["culib"] = agg_culib
+            else: 
+                raise ValueError(f"Invalid event type: {event_type}")
+        ##########
+
+        # Aggregate sequence-level metrics (eg launch tax, xlat tax, shim tax etc)
         for metric in metrics:
             if metric in first_seq:
                 agg_seq[metric] = agg_seq_metric(seq_group, metric)
 
-        # Aggregate event-level metrics (e.g., per event durations).
+        # Aggregate event-level metrics (eg dur, ts, etc)
         event_metrics = ["dur"]
         for event_type in event_types:
-            for metric in event_metrics:
-                agg_seq[event_type][metric] = agg_event_metric(seq_group, event_type, metric)
+            # Generic path for standard events (kernel, aten_op, cuda_launch, torch_op).
+            if event_type != "culib":
+                for metric in event_metrics:
+                    agg_seq[event_type][metric] = agg_event_metric(
+                        seq_group, event_type, metric
+                    )
+            elif event_type == "culib":
+                phases = [p for p in agg_seq["culib"].keys() if p != "temperature"]
+                for phase in phases:
+                    phase_dict = agg_seq["culib"][phase]
+                    for metric in event_metrics:
+                        values = [seq["culib"][phase][metric] for seq in seq_group]
+                        phase_dict[metric] = summarize_metric(values)
+            else: 
+                raise ValueError(f"Invalid event type: {event_type}")
 
-        # Clean up; ts has no meaning after aggregation.
+        # Clean up; ts has no meaning after aggregation for standard events.
         for event_type in event_types:
-            agg_seq[event_type]["ts"] = None
+            # Clean up ts for standard events.
+            if event_type != "culib":
+                agg_seq[event_type]["ts"] = None
+            # Clean up for special case of cuBLASLt culib markers.
+            elif event_type == "culib":
+                for phase in agg_seq["culib"]:
+                    if phase != "temperature":
+                        agg_seq["culib"][phase]["ts"] = None 
+                
 
         # Save aggregated unique sequence.
         unique_sequences.append(agg_seq)
@@ -777,7 +857,7 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
             - all: List of all GPU events
     """
     aten_op_events_by_ext_id = {}
-    torch_aten_op_events_by_ext_id = {}
+    torch_op_events_by_ext_id = {}
     torch_op_buffer = []
     cuda_launch_events_by_corr = {}
     kernel_events = []
@@ -808,8 +888,8 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
                 # NOTE: This is a hack: we pair the last buffered torch_op with the next ATen op.
                 torch_event = torch_op_buffer.pop(0)
                 torch_event["external_id"] = external_id
-                assert external_id not in torch_aten_op_events_by_ext_id, "Duplicate torch_op for external_id"
-                torch_aten_op_events_by_ext_id[external_id] = torch_event
+                assert external_id not in torch_op_events_by_ext_id, "Duplicate torch_op for external_id"
+                torch_op_events_by_ext_id[external_id] = torch_event
         elif cat == "user_annotation" and name.startswith("torch_op"):
             torch_op_buffer.append({
                 "type": "torch_op",
@@ -817,8 +897,18 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
                 "ts": event["ts"],
                 "dur": event["dur"],
             })
-        elif (cat == "cuda_runtime" and name == "cudaLaunchKernel") or \
-             (cat == "cuda_driver" and name == "cuLaunchKernel"):
+        # @shreesh
+        # FIX1: Llama 3 model uses cuLaunchKernel instead of cudaLaunchKernel.
+        # elif (cat == "cuda_runtime" and name == "cudaLaunchKernel") or \
+        #      (cat == "cuda_driver" and name == "cuLaunchKernel"):
+        # @prabhu
+        # FIX2: Broaden CUDA launch detection to catch all launch variants
+        # This includes: cudaLaunchKernel, cudaLaunchKernelExC, cudaLaunchCooperativeKernel,
+        #                cuLaunchKernel, cuLaunchKernel_ptsz, etc.
+        # elif (cat in ("cuda_runtime", "cuda_driver")) and "LaunchKernel" in name:
+        # @shreesh
+        # FIX3: A more general approach. The goal is to catch all launch variants.
+        elif ("cuda" in cat.lower()) and ("launch" in name.lower() and "kernel" in name.lower()):
             if external_id is not None and correlation is not None:
                 cuda_launch_events_by_corr[correlation] = {
                     "type": "cuda_launch",
@@ -867,8 +957,8 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
     assert not torch_op_buffer, "Unmatched torch_op events remaining after trace scan"
     events = {
         "cpu": {
+            "torch_ops": torch_op_events_by_ext_id,
             "aten_ops": aten_op_events_by_ext_id,
-            "torch_ops": torch_aten_op_events_by_ext_id,
             "launches": cuda_launch_events_by_corr
         },
         "gpu": {
@@ -894,19 +984,32 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
     import logging
     logger = logging.getLogger("soda")
 
-    
-    gpu_events = events["gpu"]
+    # Torch ops are only available during PyTorch microbenchmarking
+    torch_ops = events["cpu"].get("torch_ops", {})
     aten_ops = events["cpu"]["aten_ops"]
     cuda_launches = events["cpu"]["launches"]
-    torch_ops = events["cpu"].get("torch_ops", {})
-    kernel_events = gpu_events["kernels"]
+    kernel_events = events["gpu"]["kernels"]
 
     sequences = []
-    skipped_kernels = []
+    orphan_kernels = []
 
     for kernel in kernel_events:
         external_id = kernel["external_id"]
         correlation = kernel["correlation"]
+
+        # Check if the kernel has a missing aten_op or cuda_launch event
+        is_aten_op_missing = external_id not in aten_ops
+        is_cuda_launch_missing = correlation not in cuda_launches
+        if is_aten_op_missing or is_cuda_launch_missing:
+            orphan_kernels.append({
+                "name": kernel["name"],
+                "external_id": external_id,
+                "correlation": correlation,
+                "is_aten_op_missing": is_aten_op_missing,
+                "is_cuda_launch_missing": is_cuda_launch_missing,
+            })
+            continue
+
         aten_op = aten_ops[external_id]
         cuda_launch = cuda_launches[correlation]
         torch_op = torch_ops.get(external_id)
@@ -917,22 +1020,45 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
             "aten_op": aten_op,
             "torch_op": torch_op,
         })
-    if skipped_kernels:
-        logger.debug(
-            f"Skipped {len(skipped_kernels)} kernels with unmatched events: "
-            f"{skipped_kernels[:5]}{'...' if len(skipped_kernels) > 5 else ''}"
-        )
-    validate_sequences(sequences)
-    return sequences
 
+    # NOTE: Orphan kernels should *never* happen. 
+    # Orphan kernels imply we're missing expected aten/launch events.
+    # This is likely due to trace parsing gaps. Look at collect_events(). 
+    # Please review logs in ASSERT_LOG and excuse as you wish. 
+    # Excuse options:
+    #   1) Interactive: respond 'y' when prompted.
+    #   2) Non-interactive: set excuse=True below to forgive all orphan invariants.
+    excuse = False
+    if orphan_kernels:
+        log = []
+        for ok in orphan_kernels:
+            expected_ext_id = ok["external_id"]
+            expected_corr = ok["correlation"]
+            is_aten_op_missing = ok["is_aten_op_missing"]
+            is_cuda_launch_missing = ok["is_cuda_launch_missing"]
+
+            log.append(f"Orphan kernel {ok['name']}.")
+            if is_aten_op_missing:
+                log.append(f"\tMissing aten_op, expected external_id: {expected_ext_id}")
+            if is_cuda_launch_missing:
+                log.append(f"\tMissing cuda_launch, expected correlation: {expected_corr}")
+
+        write_log("ASSERT_LOG", log)
+    check_assert(
+        not orphan_kernels,
+        f"Found {len(orphan_kernels)} orphan kernels with unmatched aten/launch events.",
+        excuse,
+    )
+
+    return sequences
 
 def calculate_sequence_metrics(sequences: List[Dict], metrics: List[str]) -> List[Dict]:
     """
-    Calculates per-sequence metrics (e.g., launch_tax, xlat_tax) and adds them to the sequence dict.
+    Calculates per-sequence metrics (e.g., launch_tax, aten_xlat_tax) and adds them to the sequence dict.
 
     Args:
         sequences: List of event sequence dictionaries.
-        metrics: Metrics to compute (e.g., ["launch_tax", "xlat_tax"])
+        metrics: Metrics to compute (e.g., ["launch_tax", "aten_xlat_tax"])
 
     Returns:
         Modified event sequences with requested metric keys added to each.
@@ -940,30 +1066,61 @@ def calculate_sequence_metrics(sequences: List[Dict], metrics: List[str]) -> Lis
     for seq in sequences:
         kernel = seq["kernel"]
         aten_op = seq["aten_op"]
-        cuda_launch = seq["cuda_launch"]
+        cuda_launch = seq["cuda_launch"]    
+        torch_op = seq.get("torch_op")
 
-        t_op = aten_op["ts"]
-        t_api = cuda_launch["ts"]
+        # cuBLASLt phases for library translation taxes
+        culib_setup = seq.get("culib", {}).get("setup", {})
+        culib_heur = seq.get("culib", {}).get("heur", {})
+        culib_run = seq.get("culib", {}).get("run", {})
 
-        if "xlat_tax" in metrics:
-            # Delta xlat captures pre-launch translation from PyTorch op boundary to CUDA launch (t_op -> t_api).
-            xlat_tax = t_api - t_op
-            assert xlat_tax >= 0, f"Negative xlat tax detected: cu(da)LaunchKernel.ts={t_api}, aten_op.ts={t_op}, tax={xlat_tax}"
-            seq["xlat_tax"] = xlat_tax
+        # NOTE: These assertion checks should *never* fail.
+        # If they do, review ASSERT_LOG and excuse as you wish.
+        # Excuse options:
+        #   1) Interactive: respond 'y' when prompted.
+        #   2) Non-interactive: set excuse=True below to forgive all negative taxes.
+        excuse = False
+        if "aten_xlat_tax" in metrics:
+            # Torch translation tax = launch - aten_op
+            # Time spent in the translation from aten_op to culib to launch.
+            aten_xlat_tax = cuda_launch["ts"] - aten_op["ts"]
+            check_assert(aten_xlat_tax >= 0, f"Negative aten_xlat_tax detected: {aten_xlat_tax}μs for kernel {kernel['name']}.", excuse)
+            seq["aten_xlat_tax"] = aten_xlat_tax
+
+        if "shim_tax" in metrics:
+            # Shim tax = launch - run
+            # Time spent in the thin shim between cublasLtMatmul() and cudaLaunchKernel.
+            shim_tax = cuda_launch["ts"] - culib_run["ts"]
+            check_assert(shim_tax >= 0, f"Negative shim_tax detected: {shim_tax}μs for kernel {kernel['name']}.", excuse)
+            seq["shim_tax"] = shim_tax
+
+        if "culib_xlat_tax" in metrics:
+            # cuBLASLt translation tax = t_api - t_setup 
+            # It spans the entire cuBLASLt translation process (setup + heur + shim)
+            assert "shim_tax" in metrics, "shim_tax is required for culib_xlat_tax"
+
+            # HACK: culib_xlat_tax = setup + heur + shim 
+            # We do this because the nvtx markers are not contiguous and leaky
+            culib_xlat_tax = culib_setup["dur"] + culib_heur["dur"] + seq["shim_tax"]
+            check_assert(culib_xlat_tax >= 0, f"Negative culib_xlat_tax detected: {culib_xlat_tax}μs for kernel {kernel['name']}.", excuse)
+            seq["culib_xlat_tax"] = culib_xlat_tax
+
+            # NOTE: This should still hold true 
+            check_assert(cuda_launch["ts"] - culib_setup["ts"] >= 0, f"Negative culib_xlat_tax detected: {cuda_launch['ts'] - culib_setup['ts']}μs for kernel {kernel['name']}.", excuse)
 
         if "launch_tax" in metrics:
-            # Delta launch captures post-launch execution from CUDA launch to kernel execution (t_api -> t_kernel).
-            # Caveat: This might also include queue latency if the kernel is not immediately executed.
-            launch_tax = kernel["ts"] - t_api
-            assert launch_tax >= 0, f"Negative launch tax detected: kernel.ts={kernel['ts']}, cu(da)LaunchKernel.ts={t_api}, tax={launch_tax}"
+            # Launch tax = kernel - launch
+            # Time spent after the launch call to the kernel start.
+            # Caveat: This might also include queue latency due to concurrent launches.
+            launch_tax = kernel["ts"] - cuda_launch["ts"]
+            check_assert(launch_tax >= 0, f"Negative launch tax detected: {launch_tax}μs for kernel {kernel['name']}.", excuse)
             seq["launch_tax"] = launch_tax
 
         if "py_tax" in metrics:
-            torch_op = seq["torch_op"]
-            assert torch_op is not None, "torch_op missing for py_tax"
-            t_py = torch_op["ts"]
-            py_tax = t_op - t_py
-            assert py_tax >= 0, f"Negative py_tax detected: aten_op.ts={t_op}, torch_op.ts={t_py}, tax={py_tax}"
+            # PyTorch translation tax = aten_op - torch_op
+            # Time spent in the translation from aten_op to torch_op.
+            py_tax = aten_op["ts"] - torch_op["ts"]
+            check_assert(py_tax >= 0, f"Negative py_tax detected: {py_tax}μs for kernel {kernel['name']}.", excuse)
             seq["py_tax"] = py_tax
 
     return sequences

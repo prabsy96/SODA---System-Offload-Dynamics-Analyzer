@@ -92,7 +92,7 @@ class SodaAnalyzer:
         """
         print("=== Analyzing Trace Data ===")
         print(f"Analyzing {len(self.sequences)} event sequences")
-        sequences = utils.calculate_sequence_metrics(list(self.sequences), metrics=["launch_tax", "xlat_tax"])
+        sequences = utils.calculate_sequence_metrics(list(self.sequences), metrics=["launch_tax", "aten_xlat_tax"])
         
         # Analyze per-stream metrics
         stream_info = utils.analyze_per_stream(self.events)
@@ -110,9 +110,9 @@ class SodaAnalyzer:
         kernel_exec_time = utils.calculate_kernel_exec_time(self.events)
         total_launch_tax = utils.calculate_total_tax(sequences, "launch")
         avg_launch_tax = utils.calculate_avg_tax(sequences, "launch")
-        total_xlat_tax = utils.calculate_total_tax(sequences, "xlat")
-        avg_xlat_tax = utils.calculate_avg_tax(sequences, "xlat")
-        avg_kernel_dur = utils.get_average_kernel_duration(self.events)
+        total_xlat_tax = utils.calculate_total_tax(sequences, "aten_xlat")
+        avg_xlat_tax = utils.calculate_avg_tax(sequences, "aten_xlat")
+        avg_kernel_dur = utils.get_average_kernel_duration(self.events) 
         top_k_kernels = utils.get_top_k_kernels(self.events, k=3)
         
         # Fusion analysis
@@ -192,12 +192,12 @@ class SodaAnalyzer:
         print(f"\t* Inference runtime (ms): {metrics['inference_time_ms']:.4f}")
         
         # Framework Tax Analysis
-        framework = metrics["framework_overhead"]
+        framework_overhead = metrics["framework_overhead"]
         timing = metrics["inference_time_breakdown"]
         print("")
         print("=== Framework Tax Analysis ===")
-        print(f"\t* T_exposed (Framework Tax): {framework['T_exposed_ms']:.4f} ms ({framework['T_exposed_percent']:.1f}%)")
-        print(f"\t* T_gpu_busy (GPU Active Time): {metrics['gpu_busy_time_ms']:.4f} ms ({framework['T_gpu_busy_percent']:.1f}%)")
+        print(f"\t* T_exposed (Framework Tax): {framework_overhead['T_exposed_ms']:.4f} ms ({framework_overhead['T_exposed_percent']:.1f}%)")
+        print(f"\t* T_gpu_busy (GPU Active Time): {metrics['gpu_busy_time_ms']:.4f} ms ({framework_overhead['T_gpu_busy_percent']:.1f}%)")
         
         # Timing breakdown
         print(f"\t  - Torch measured inference time (ms): {timing['torch_measured_inference_time_ms']:.4f}")
@@ -483,13 +483,13 @@ class ModelTracer:
             self.model_inputs = self.generate_audio_inputs()
         elif self.is_decoder:
             self.model, self.tokenizer = self.load_decoder()
-            print(f"Generating synthetic input: batch_size={self.batch_size}, seq_len={self.seq_len}")
+            # print(f"Generating synthetic input: batch_size={self.batch_size}, seq_len={self.seq_len}")
             self.model_inputs = utils.generate_synthetic_inputs(
                 self.tokenizer, self.device, self.batch_size, self.seq_len
             )
         else:
             self.model, self.tokenizer = self.load_encoder()
-            print(f"Generating synthetic input: batch_size={self.batch_size}, seq_len={self.seq_len}")
+            # print(f"Generating synthetic input: batch_size={self.batch_size}, seq_len={self.seq_len}")
             self.model_inputs = utils.generate_synthetic_inputs(
                 self.tokenizer, self.device, self.batch_size, self.seq_len
             )
