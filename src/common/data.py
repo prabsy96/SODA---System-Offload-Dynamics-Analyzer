@@ -10,44 +10,77 @@ from . import print_utils
 def clean_kernel_name(kernel_name: str) -> str:
     """
     Extract a clean kernel name from the full signature.
-    
-    Args:
-        kernel_name: Full kernel name (may be a C++ function signature).
-    
-    Returns:
-        Clean kernel name (just the kernel name, no namespace or template parameters).
-    
-    Examples:
-        "void at::native::vectorized_elementwise_kernel<4, ...>" 
-        -> "vectorized_elementwise_kernel"
-        
-        "void at::native::(anonymous namespace)::elementwise_kernel<...>"
-        -> "elementwise_kernel"
-        
-        "turing_fp16_s1688gemm_fp16_128x128_ldg8_f2f_stages_32x1_nn"
-        -> "turing_fp16_s1688gemm_fp16_128x128_ldg8_f2f_stages_32x1_nn"
+    Handles T4, A100, H100 (Hopper), and GB200 (Blackwell) naming conventions.
     """
-    # Extract everything before '<' (removes template parameters)
-    # This handles cases where '(' appears in template params like "(anonymous namespace)"
+
     if not kernel_name:
-        return None
+        return "unknown"
+
+    # Save original raw name to check for keywords later
+    raw_name = kernel_name
+
+    # 1. Remove return type
+    if kernel_name.startswith("void "):
+        kernel_name = kernel_name[5:].strip()
+
+    # 2. Extract base name (remove templates and args)
+    # We split by '<' and '(' to remove C++ templates and function args
+    base_name = kernel_name.split('<')[0].split('(')[0].strip()
     
-    if '<' in kernel_name:
-        clean_kernel_name = kernel_name.split('<')[0].strip()
-    elif '(' in kernel_name:
-        # If no '<' but has '(', extract before '(' (function parameters)
-        clean_kernel_name = kernel_name.split('(')[0].strip()
+    # 3. Handle Namespaces
+    if '::' in base_name:
+        parts = base_name.split('::')
+        clean_name = parts[-1]
+        
+        # Context preservation: If name is generic (e.g. "Kernel"), prepend namespace
+        # Example: "cutlass::Kernel" -> "cutlass_Kernel"
+        if clean_name in ["Kernel", "Run", "launch", "kernel", "operator()", "run"]:
+            if len(parts) >= 2:
+                clean_name = f"{parts[-2]}_{clean_name}"
     else:
-        clean_kernel_name = kernel_name
+        clean_name = base_name
+
+    # 4. Architecture/Library Specific Enhancements
+    lower_raw = raw_name.lower()
+    lower_clean = clean_name.lower()
+
+    # List of substrings that indicate a GEMM-like kernel on NVIDIA GPUs
+    gemm_indicators = [
+        "gemm",       # Standard
+        "wgmma",      # Hopper/Blackwell Tensor Cores
+        "sm90",       # Hopper Architecture
+        "sm100",      # Blackwell Architecture
+        "cutlass",    # CUTLASS Library
+        "cublas",     # cuBLAS Library
+        "cudnn",      # cuDNN (often convolutions/GEMMs)
+        "xmma",       # Matrix Multiply Accumulate
+        "hgemm", "sgemm", "bgemm", "igemm" # Precision specific
+    ]
     
-    # Remove 'void' prefix if present
-    clean_kernel_name = clean_kernel_name.replace('void', '').strip()
-    
-    # Extract just the kernel name (last part after '::')
-    if '::' in clean_kernel_name:
-        clean_kernel_name = clean_kernel_name.split('::')[-1]
-    
-    return clean_kernel_name.strip()
+    # Check if any indicator is present in the RAW name
+    is_gemm_candidate = any(ind in lower_raw for ind in gemm_indicators)
+
+    if is_gemm_candidate:
+        # FIX: Force "_gemm" suffix so the SODA analyzer recognizes it
+        if "gemm" not in lower_clean:
+            clean_name += "_gemm"
+        
+        # Preserve specific architecture tags for readability
+        if "wgmma" in lower_raw and "wgmma" not in lower_clean:
+            clean_name += "_wgmma"
+        if "sm90" in lower_raw and "sm90" not in lower_clean:
+            clean_name += "_sm90"
+        if "sm100" in lower_raw and "sm100" not in lower_clean:
+            clean_name += "_sm100"
+
+    # Flash Attention handling
+    if "flash" in lower_raw and "flash" not in lower_clean:
+        if "fwd" in lower_raw:
+            clean_name += "_flash_fwd"
+        elif "bwd" in lower_raw:
+            clean_name += "_flash_bwd"
+
+    return clean_name.strip()
 
 def to_tuple_int(x):
     """Convert list/tuple to tuple of ints for normalized comparison."""

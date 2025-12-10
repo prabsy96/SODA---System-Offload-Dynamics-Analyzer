@@ -103,6 +103,13 @@ def parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup=0):
     culib_markers = extract_culib_markers_sql(trace_file_sql)
     # utils.remove_file(trace_file_sql) # DEBUG 
 
+    if not kernels:
+        print(f"Warning: No kernel events found in {trace_file_sql}. This job may have failed to execute.")
+        print(f"  - Job ID: {job.get('id')}")
+        print(f"  - heur_idx: {job.get('heur_idx')}")
+        print(f"  - This can happen if no matching cuBLAS algorithm was found for this kernel.")
+        return None
+
     assert cuda_launches, f"No CUDA launch events found in {trace_file_sql}"
     assert kernels, f"No kernel events found in {trace_file_sql}"
     assert culib_markers, f"No cuBLASLt markers found in {trace_file_sql}"
@@ -260,8 +267,15 @@ def profile_baremetal_gemm_kernels(
         else:
             raise RuntimeError("Offline cublas algorithm search has not been completed.")
     
+    matched_jobs = [j for j in jobs if j.get("heur_idx") is not None and j.get("name") != "__null_kernel__"]
+    print(f"Using {len(matched_jobs)} matched algorithms")
+    
     # Build binary
+    print("Building C++ binary")
     build_binary()
+    print("Build successful")
+    
+    results = []
     binary_path = utils.get_path("BAREMETAL_BINARY")
     utils.ensure_file(binary_path)
     
@@ -275,29 +289,48 @@ def profile_baremetal_gemm_kernels(
             print(f"Skipping job {job['id']} (TODO: batched GEMM)")
             sequences.append(None)  # Append None to maintain alignment
             continue
+
+        # FIX: Check heur_idx BEFORE running the job, not after
+        # This prevents running jobs that will produce empty traces
+        if job.get("heur_idx") is None and job.get("name") != "__null_kernel__":
+            print(f"Skipping job {job['id']}: No cuBLAS algorithm found (PyTorch internal kernel).")
+            print(f"  - Kernel '{job.get('name')}' is not a cuBLAS kernel.")
+            print(f"  - This is common on H100/H200/GB200 where PyTorch uses optimized internal kernels.")
+            sequences.append(None)  # Append None to maintain alignment
+            continue
         
+        # Now safe to run the job
         trace_file_sql = run_job(job, warmup, runs)
-        assert trace_file_sql is not None, f"No trace file found for job {job['id']}"
+        if trace_file_sql is None:
+            print(f"Warning: No trace file generated for job {job['id']}. Skipping.")
+            sequences.append(None)
+            continue
         
         # Parse trace and compute stats (returns aggregated sequence with aten_op already included)
         sequence = parse_trace_and_compute_stats(job, trace_file_sql, runs, warmup)
-        assert sequence is not None, f"No kernel events found for job {job['id']}"
+        if sequence is None:
+            print(f"Warning: Could not parse trace for job {job['id']}. Skipping.")
+            sequences.append(None)
+            continue
 
         # Attach job_id for downstream reporting
         sequence["job_id"] = job["id"]
 
         sequences.append(sequence)
     
+    # Filter out None entries for the saved output
+    valid_sequences = [s for s in sequences if s is not None]
+    
     baremetal_gemm_sequences_file = utils.get_path("BAREMETAL_GEMM_KERNELS")
     baremetal_gemm_sequences_data = {
-        "summary": {"count": len(sequences)},
-        "sequences": sequences,
+        "summary": {"count": len(valid_sequences)},
+        "sequences": valid_sequences,
     }
     utils.save_json(baremetal_gemm_sequences_file, baremetal_gemm_sequences_data)
     print(f"Saved {baremetal_gemm_sequences_data['summary']['count']} baremetal GEMM sequences to {baremetal_gemm_sequences_file}")
     
     # Print a summary table with % delta over null kernel 
-    print_summary(sequences)
+    print_summary(valid_sequences)
     
     return baremetal_gemm_sequences_data
 

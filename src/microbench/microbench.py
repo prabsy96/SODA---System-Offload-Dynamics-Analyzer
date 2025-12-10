@@ -32,6 +32,19 @@ class SodaMicrobench:
         # Calculate launch/xlat taxes for event sequences
         sequences = utils.calculate_sequence_metrics(list(self.tracer.sequences), metrics=["launch_tax", "aten_xlat_tax"])
 
+        print("\n[DEBUG] ATen Op Distribution in Trace (Pre-Filter):")
+        from collections import Counter
+        op_counts = Counter()
+        for s in sequences:
+            if s.get("aten_op") and "name" in s["aten_op"]:
+                op_counts[s["aten_op"]["name"]] += 1
+            else:
+                op_counts["<unknown/null>"] += 1
+        
+        for op, count in op_counts.most_common():
+            print(f"  {op}: {count}")
+        print("---------------------------------------------------\n")
+
         # Save all sequences
         all_sequences_file = utils.get_path("ALL_SEQUENCES")
         all_sequences_data = {
@@ -132,17 +145,47 @@ class SodaMicrobench:
                 runs=self.runs,
                 skip_offline_cublas_algo_search=self.args.skip_offline_cublas_algo_search
             )
+
+            baremetal_valid_sequences = [s for s in baremetal_gemm_sequences.get("sequences", []) 
+                                         if s is not None and s.get("job_id") != "0000"]
+
+            if not baremetal_valid_sequences:
+                print("Warning: No baremetal GEMM sequences were profiled.")
+                print("         This can happen when PyTorch uses internal kernels instead of cuBLAS.")
+                print("         This is common on H100/H200/GB200 where PyTorch uses optimized internal kernels.")
+                print_utils.section_end(section)
+                
+                # Skip comparison but still generate report
+                section = "TaxBreak Report"
+                print_utils.section_start(section)
+                summarize(model=self.args.model, precision=self.args.precision)
+                print_utils.section_end(section)
+                return
+
             print_utils.section_end(section)
             
             # Verify baremetal sequences
             section = "Verify Baremetal GEMM Sequences"
             print_utils.section_start(section)
-            # Align: target[i] -> baremetal[i+1] (skip null kernel at index 0)
-            # Convert to Sequence objects (None stays None for skipped jobs)
-            target_seq_objects = [Sequence.from_dict(seq_dict) for seq_dict in target_gemm_sequences["sequences"]]
-            baremetal_seq_objects = [Sequence.from_dict(seq_dict) 
-                                    for seq_dict in baremetal_gemm_sequences["sequences"][1:]]  # Skip null kernel
-            compare_sequences(target_seq_objects, baremetal_seq_objects, title="Baremetal vs Target", full=False)
+
+            baremetal_by_job_id = {s["job_id"]: s for s in baremetal_valid_sequences}
+
+            # Pair target sequences with their baremetal counterparts
+            matched_targets = []
+            matched_baremetals = []
+
+            for i, seq_dict in enumerate(target_gemm_sequences["sequences"]):
+                job_id = f"{i+1:04d}"  # Jobs start at 0001 (0000 is null kernel)
+                if job_id in baremetal_by_job_id:
+                    matched_targets.append(Sequence.from_dict(seq_dict))
+                    matched_baremetals.append(Sequence.from_dict(baremetal_by_job_id[job_id]))
+            
+            if matched_targets:
+                compare_sequences(matched_targets, matched_baremetals, title="Baremetal vs Target", full=False)
+            else:
+                print("No matched sequences to compare.")
+                print("All target kernels appear to be PyTorch internal kernels (not cuBLAS).")
+            
             print_utils.section_end(section)
         else:
             section = "Profile Baremetal GEMM Kernels (skipped)"

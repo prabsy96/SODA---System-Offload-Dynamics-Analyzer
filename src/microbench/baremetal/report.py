@@ -290,8 +290,10 @@ def generate_final_summary(show_table: bool = True) -> List[Dict[str, Any]]:
 def plot_per_kernel_taxbreak(final_summary_data, title_suffix: str):
     """
     Plot one stacked bar per kernel (job_id) for entries with complete data.
+    Falls back to PyTorch-only plot if baremetal data is unavailable.
     """
-    components = [
+    # Full components (requires baremetal)
+    full_components = [
         ("T_py", "#4e79a7"),
         ("T_aten", "#59a14f"),
         ("T_lib_setup", "#f28e2c"),
@@ -299,35 +301,56 @@ def plot_per_kernel_taxbreak(final_summary_data, title_suffix: str):
         ("T_lib_shim", "#edc949"),
         ("T_sys", "#af7aa1"),
     ]
+    
+    # PyTorch-only components (fallback)
+    pytorch_components = [
+        ("T_py", "#4e79a7"),
+        ("T_aten_xlat", "#59a14f"),
+        ("T_sys_fw", "#af7aa1"),
+    ]
 
     output_path = utils.get_path("TAX_BREAK_PLOT")
 
+    # Try full components first
     filtered = []
     for row in final_summary_data:
-        vals = [row[name] for name, _ in components]
-        # Skip rows with incomplete data to avoid None in plot math.
-        if any(v is None for v in vals):
+        # Skip null kernel
+        if row.get("kernel") == "__null_kernel__":
             continue
-        filtered.append((row["id"], vals))
+        vals = [row.get(name) for name, _ in full_components]
+        if all(v is not None for v in vals):
+            filtered.append((row["id"], row["kernel"], vals, full_components))
+
+    # Fallback to PyTorch-only if no full data
+    if not filtered:
+        for row in final_summary_data:
+            if row.get("kernel") == "__null_kernel__":
+                continue
+            vals = [row.get(name) for name, _ in pytorch_components]
+            if all(v is not None for v in vals):
+                filtered.append((row["id"], row["kernel"], vals, pytorch_components))
 
     if not filtered:
         print("No complete per-kernel taxbreak data to plot.")
         return
 
+    # Use the components from the first entry (all entries use the same)
+    components = filtered[0][3]
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(8, 4))
     x = list(range(len(filtered)))
-    job_labels = [jid for jid, _ in filtered]
+    job_labels = [f"{jid}\n{kernel[:15]}" for jid, kernel, _, _ in filtered]
 
     bottoms = [0.0] * len(filtered)
-    for (name, color), idx_component in zip(components, range(len(components))):
-        heights = [vals[idx_component] for _, vals in filtered]
+    for idx_component, (name, color) in enumerate(components):
+        heights = [vals[idx_component] for _, _, vals, _ in filtered]
         ax.bar(x, heights, bottom=bottoms, label=name, color=color)
         bottoms = [b + h for b, h in zip(bottoms, heights)]
 
     ax.set_ylabel("μs")
-    ax.set_title(f"Framework Tax Break (us) | {title_suffix}")
-    ax.set_xlabel("Job ID")
+    ax.set_title(f"Framework Tax Break (μs) | {title_suffix}")
+    ax.set_xlabel("Kernel")
     ax.set_xticks(x)
     ax.set_xticklabels(job_labels, rotation=45, ha="right")
     ax.legend()
