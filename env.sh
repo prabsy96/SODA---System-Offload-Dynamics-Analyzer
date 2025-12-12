@@ -74,6 +74,37 @@ export HF_HOME="/scratch/$USER/hf_cache"
 # Python path setup for imports
 export PYTHONPATH="$SODA_SRC:$PYTHONPATH"
 
+# ============================================================
+# Microbench paths
+# ============================================================
+
+# Raw sequences from trace
+export ALL_SEQUENCES="microbench/all_sequences.json"
+
+# All kernel sequences (GEMM + non-GEMM)
+export ALL_KERNEL_SEQUENCES="microbench/all_kernel_sequences.json"
+export UNIQUE_ALL_SEQUENCES="microbench/unique_all_sequences.json"
+
+# GEMM-only sequences (for baremetal comparison)
+export ALL_GEMM_SEQUENCES="microbench/all_gemm_sequences.json"
+export UNIQUE_GEMM_SEQUENCES="microbench/unique_gemm_sequences.json"
+
+# PyTorch profiling outputs
+export PYTORCH_TRACES="microbench/framework/pytorch/traces"
+export PYTORCH_GEMM_SEQUENCES="microbench/framework/pytorch/output/pytorch_gemm_sequences.json"
+export PYTORCH_ALL_SEQUENCES="microbench/framework/pytorch/output/pytorch_all_sequences.json"
+
+# Baremetal outputs (GEMM only - cuBLAS comparison)
+export BAREMETAL_JOBS="microbench/baremetal/output/jobs.json"
+export BAREMETAL_GEMM_KERNELS="microbench/baremetal/output/baremetal_gemm_kernels.json"
+
+# TaxBreak report outputs
+export TAX_BREAK_SUMMARY="microbench/taxbreak.json"
+export TAX_BREAK_PLOT="microbench/taxbreak_plot.png"
+
+# Logs
+export ASSERT_LOG="microbench/assert.log"
+
 # Helper function to activate Python environment (supports conda or venv)
 activate_env() {
     if [ -n "$CONDA_DEFAULT_ENV" ] && [ "$CONDA_DEFAULT_ENV" != "base" ]; then

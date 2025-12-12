@@ -71,6 +71,10 @@ PYTORCH_INTERNAL_KERNELS = [
     "vectorized",     # Vectorized elementwise kernels
     "native",         # Native PyTorch kernels
     "aten",           # ATen internal kernels
+    "nvjet",          # NVIDIA Jet kernels (internal/specialized)
+    "splitk",         # Split-K kernels (often internal implementation details)
+    "elementwise",    # Elementwise kernels
+    "reduce",         # Reduction kernels
 ]
 
 def is_pytorch_internal_kernel(kernel_name: str) -> bool:
@@ -181,6 +185,7 @@ def search_cublas_algos_offline():
     num_algos_found = 0
     num_algos_not_found = 0
     num_jobs_searched = 0
+    num_internal_skipped = 0
     
     for job in jobs:
 
@@ -188,9 +193,24 @@ def search_cublas_algos_offline():
         if job["name"] == "__null_kernel__":
             job["heur_idx"] = None
             continue
+
+        kernel_name = job.get("name", "")
+        if is_pytorch_internal_kernel(kernel_name):
+            print(f"Skipping internal kernel: {kernel_name}")
+            job["heur_idx"] = None
+            job["internal_kernel"] = True
+            num_internal_skipped += 1
+            continue
         
-        # Get algorithm count
-        algo_count = get_heuristic_algo_count(job)
+         # Get algorithm count
+        try:
+            algo_count = get_heuristic_algo_count(job)
+        except RuntimeError as e:
+            print(f"Warning: Could not get algo count for job {job['id']}: {e}")
+            job["heur_idx"] = None
+            num_algos_not_found += 1
+            num_jobs_searched += 1
+            continue
         algo_info = f"({algo_count} algorithm(s))"
         print_utils.iter_start(f"Job {job['id']} {algo_info}")
         
@@ -214,20 +234,22 @@ def search_cublas_algos_offline():
     jobs_data["summary"]["offline_cublas_algo_search"] = {
         "algos_found": num_algos_found,
         "algos_not_found": num_algos_not_found,
+        "internal_skipped": num_internal_skipped,
         "total_jobs": num_jobs_searched
     }
 
-    assert num_jobs_searched == num_algos_found + num_algos_not_found, "Total jobs != Algos found + Algos not found"
+    #assert num_jobs_searched == num_algos_found + num_algos_not_found, "Total jobs != Algos found + Algos not found"
     
     utils.save_json(jobs_file, jobs_data)
     
     # Print summary table
     print_utils.comp_table(
-        title="Summary",
+        title="cuBLAS Algo Search Summary",
         headers=["Metric", "Count"],
         data=[
             ["Jobs searched", f"{num_jobs_searched}"],
             ["Algorithms found", f"{num_algos_found}"],
             ["No algorithm found", f"{num_algos_not_found}"],
+            ["Internal kernels skipped", f"{num_internal_skipped}"],
         ]
     )

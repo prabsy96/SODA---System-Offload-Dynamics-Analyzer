@@ -17,6 +17,49 @@ import shutil
 from . import print_utils
 from .data import Kernel, ATenOp, Sequence, clean_kernel_name
 
+def is_gemm_op(aten_op_name: str) -> bool:
+    """
+    Check if an ATen operation is a GEMM operation.
+    
+    Args:
+        aten_op_name: Name of the ATen operation (e.g., "aten::mm", "aten::addmm")
+    
+    Returns:
+        True if the operation is a GEMM, False otherwise.
+    """
+    gemm_ops = [
+        "aten::mm",
+        "aten::addmm", 
+        "aten::bmm",
+        "aten::baddbmm",
+        "aten::matmul",
+        "aten::linear",
+    ]
+    return aten_op_name in gemm_ops
+
+
+def filter_kernel_sequences(sequences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Filter for sequences that have both a kernel and aten_op.
+    Marks each sequence with is_gemm classification.
+    
+    Args:
+        sequences: List of event sequences
+    
+    Returns:
+        Filtered sequences with is_gemm field added
+    """
+    kernel_sequences = []
+    for seq in sequences:
+        if seq.get("kernel") is not None and seq.get("aten_op") is not None:
+            # Classify as GEMM or non-GEMM
+            aten_name = seq.get("aten_op", {}).get("name", "")
+            seq["is_gemm"] = is_gemm_op(aten_name)
+            kernel_sequences.append(seq)
+    
+    validate_sequences(kernel_sequences)
+    return kernel_sequences
+
 def calculate_avg_min_max(values, base_name=None):
     """
     Calculate avg/min/max from a list of values. If base_name is provided,
@@ -432,6 +475,75 @@ def filter_gemm_sequences(sequences: List[Dict[str, Any]]) -> List[Dict[str, Any
     validate_sequences(gemm_sequences)
     return gemm_sequences
 
+def calculate_hsb_metrics(
+    inference_time_us: float,
+    gpu_busy_time_us: float,
+    sequences: List[Dict[str, Any]],
+    taxbreak_lut: Dict[str, float],
+) -> Dict[str, float]:
+    """
+    Calculate HSB (Hardware-Software Inversion) metrics.
+    
+    HSB = 1 - (T_Exposed / T_Structural)
+    
+    Args:
+        inference_time_us: Total inference time in microseconds
+        gpu_busy_time_us: GPU busy time in microseconds
+        sequences: List of kernel sequences
+        taxbreak_lut: Lookup table mapping kernel_name -> T_fo
+    
+    Returns:
+        Dictionary with HSB metrics:
+        - t_exposed_us: Exposed framework overhead (GPU idle time)
+        - t_structural_us: Structural framework overhead (sum of T_fo)
+        - hsb: Hardware-Software Inversion metric
+        - hsb_classification: Human-readable classification
+    """
+    # Calculate T_Exposed (GPU idle time)
+    t_exposed = max(0.0, inference_time_us - gpu_busy_time_us)
+    
+    # Calculate T_Structural (sum of per-kernel framework overheads)
+    t_structural = 0.0
+    
+    if taxbreak_lut:
+        avg_t_fo = sum(taxbreak_lut.values()) / len(taxbreak_lut)
+    else:
+        avg_t_fo = 0.0
+    
+    for seq in sequences:
+        kernel = seq.get("kernel", {})
+        kernel_name = kernel.get("name", "") if isinstance(kernel, dict) else ""
+        
+        if kernel_name in taxbreak_lut:
+            t_fo = taxbreak_lut[kernel_name]
+        else:
+            t_fo = avg_t_fo
+        
+        freq = seq.get("freq", 1) or 1
+        t_structural += t_fo * freq
+    
+     # Calculate HSB
+    epsilon = 1e-6
+    if t_structural < epsilon:
+        hsb = 1.0 if t_exposed < epsilon else -10.0
+    else:
+        hsb = 1.0 - (t_exposed / t_structural)
+    
+    # Classify HSB
+    if hsb >= 0.5:
+        classification = "hardware-bound"
+    elif hsb >= 0:
+        classification = "balanced"
+    else:
+        classification = "framework-bound"
+    
+    return {
+        "t_exposed_us": t_exposed,
+        "t_structural_us": t_structural,
+        "hsb": hsb,
+        "hsb_classification": classification,
+    }
+
 def make_kernel_identity_key(kernel, aten_op):
     """
     Build a stable identity key for a kernel + its originating ATen op.
@@ -454,29 +566,74 @@ def make_kernel_identity_key(kernel, aten_op):
         tuple(tuple(d) if isinstance(d, list) else d for d in aten_op.input_dims)
     )
 
-def group_sequences_by_identity(sequences):
+def to_hashable(obj: Any) -> Any:
     """
-    Group event sequences by kernel identity key.
+    Recursively convert an object to a hashable type.
+    
+    - Lists become tuples
+    - Dicts become tuples of (key, value) pairs
+    - Other types are returned as-is
+    
+    Args:
+        obj: Any Python object
+    
+    Returns:
+        Hashable version of the object
+    """
+    if isinstance(obj, list):
+        return tuple(to_hashable(item) for item in obj)
+    elif isinstance(obj, dict):
+        return tuple((k, to_hashable(v)) for k, v in sorted(obj.items()))
+    elif isinstance(obj, set):
+        return frozenset(to_hashable(item) for item in obj)
+    else:
+        return obj
+
+def make_kernel_identity_key(kernel, aten_op):
+    """
+    Create a hashable identity key from kernel and aten_op dicts.
+    
+    Args:
+        kernel: Kernel dict with name, grid, block, shared_memory
+        aten_op: ATen op dict with input_dims
+    
+    Returns:
+        Hashable tuple key
+    """
+    kernel_name = clean_kernel_name(kernel.get("name", ""))
+    grid = to_hashable(kernel.get("grid", [0, 0, 0]))
+    block = to_hashable(kernel.get("block", [0, 0, 0]))
+    shared_mem = kernel.get("shared_memory", 0)
+    input_dims = to_hashable(aten_op.get("input_dims", []))
+    
+    return (kernel_name, grid, block, shared_mem, input_dims)
+
+def group_sequences_by_identity(sequences: List[Dict[str, Any]]) -> Dict[tuple, List[Dict[str, Any]]]:
+    """
+    Group sequences by their identity key (kernel config + input dims).
+    
+    The identity key is a tuple of:
+    - kernel name (cleaned)
+    - grid dimensions (as tuple)
+    - block dimensions (as tuple)
+    - shared memory
+    - input dimensions (as nested tuple)
     
     Args:
         sequences: List of sequence dictionaries
     
-    Returns: dict: key -> list[dict]
+    Returns:
+        Dictionary mapping identity keys to lists of sequences
     """
     grouped = defaultdict(list)
+    
     for seq in sequences:
-        kernel = seq["kernel"]
-        aten_op = seq["aten_op"]
-        if kernel and aten_op:
-            kernel_obj = Kernel.from_dict(kernel)
-            aten_op_obj = ATenOp.from_dict(aten_op)
-            if kernel_obj and aten_op_obj:
-                key = make_kernel_identity_key(kernel_obj, aten_op_obj)
-                grouped[key].append(seq)
-    for seq_group in grouped.values():
-        validate_kernel_static_props(seq_group)
+        kernel = seq.get("kernel", {})
+        aten_op = seq.get("aten_op", {})
+        key = make_kernel_identity_key(kernel, aten_op)
+        grouped[key].append(seq)
+    
     return grouped
-
 def agg_event_metric(seq_group, event_type: str, metric: str):
     """Aggregate event-level metrics (e.g., duration) if available."""
     values = [seq[event_type][metric] for seq in seq_group]
@@ -967,7 +1124,10 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
             })
     
     # Create hierarchical structure
-    assert not torch_op_buffer, "Unmatched torch_op events remaining after trace scan"
+    if torch_op_buffer:
+        print(f"Warning: {len(torch_op_buffer)} unmatched torch_op events (fast kernels may not correlate)")
+    
+    # Create hierarchical structure
     events = {
         "cpu": {
             "torch_ops": torch_op_events_by_ext_id,

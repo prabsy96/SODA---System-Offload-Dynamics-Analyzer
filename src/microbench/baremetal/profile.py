@@ -10,13 +10,15 @@ By default, this phase assumes search_cublas_algos_offline.py has already
 been run, but the caller can choose to skip that requirement.
 """
 
-import sqlite3
-import json
+import os
 import sys
-import subprocess
-import re
-from typing import Dict, Any
-from microbench.baremetal.utils import (
+from pathlib import Path
+from typing import Dict, Any, List, Optional
+
+import torch
+from torch.profiler import profile, ProfilerActivity, record_function as record
+
+from soda.microbench.baremetal.utils import (
     build_binary,
     build_base_args,
     nsys_profile,
@@ -28,8 +30,258 @@ from microbench.baremetal.utils import (
 )
 
 from soda.common import utils, print_utils
-from soda.common.data import ATenOp
+from soda.common.data import ATenOp, clean_kernel_name
 
+SUPPORTED_OPS = {
+    # GEMM operations
+    "aten::addmm": lambda inputs: torch.addmm(inputs[0], inputs[1], inputs[2]) if len(inputs) >= 3 else None,
+    "aten::mm": lambda inputs: torch.mm(inputs[0], inputs[1]) if len(inputs) >= 2 else None,
+    "aten::bmm": lambda inputs: torch.bmm(inputs[0], inputs[1]) if len(inputs) >= 2 else None,
+    "aten::matmul": lambda inputs: torch.matmul(inputs[0], inputs[1]) if len(inputs) >= 2 else None,
+    "aten::linear": lambda inputs: torch.nn.functional.linear(inputs[0], inputs[1], inputs[2] if len(inputs) > 2 else None) if len(inputs) >= 2 else None,
+    
+    # Elementwise operations
+    "aten::add": lambda inputs: torch.add(inputs[0], inputs[1]) if len(inputs) >= 2 else inputs[0],
+    "aten::mul": lambda inputs: torch.mul(inputs[0], inputs[1]) if len(inputs) >= 2 else inputs[0],
+    "aten::div": lambda inputs: torch.div(inputs[0], inputs[1]) if len(inputs) >= 2 else inputs[0],
+    "aten::sub": lambda inputs: torch.sub(inputs[0], inputs[1]) if len(inputs) >= 2 else inputs[0],
+    
+    # Reduction operations
+    "aten::sum": lambda inputs: torch.sum(inputs[0]),
+    "aten::mean": lambda inputs: torch.mean(inputs[0].float()).to(inputs[0].dtype),
+    "aten::max": lambda inputs: torch.max(inputs[0]),
+    "aten::min": lambda inputs: torch.min(inputs[0]),
+    
+    # Normalization
+    "aten::layer_norm": lambda inputs: torch.nn.functional.layer_norm(inputs[0], inputs[0].shape[-1:]) if len(inputs) >= 1 else None,
+    "aten::softmax": lambda inputs: torch.softmax(inputs[0], dim=-1) if len(inputs) >= 1 else None,
+    "aten::_softmax": lambda inputs: torch.softmax(inputs[0], dim=-1) if len(inputs) >= 1 else None,
+    
+    # Activation functions
+    "aten::relu": lambda inputs: torch.relu(inputs[0]),
+    "aten::gelu": lambda inputs: torch.nn.functional.gelu(inputs[0]),
+    "aten::silu": lambda inputs: torch.nn.functional.silu(inputs[0]),
+    "aten::tanh": lambda inputs: torch.tanh(inputs[0]),
+    "aten::sigmoid": lambda inputs: torch.sigmoid(inputs[0]),
+    
+    # Reshape operations
+    "aten::view": lambda inputs: inputs[0].view(-1) if len(inputs) >= 1 else None,
+    "aten::reshape": lambda inputs: inputs[0].reshape(-1) if len(inputs) >= 1 else None,
+    "aten::transpose": lambda inputs: inputs[0].transpose(0, 1) if len(inputs) >= 1 and inputs[0].dim() >= 2 else inputs[0],
+    "aten::permute": lambda inputs: inputs[0].permute(*range(inputs[0].dim()-1, -1, -1)) if len(inputs) >= 1 else None,
+    "aten::contiguous": lambda inputs: inputs[0].contiguous(),
+    "aten::flatten": lambda inputs: inputs[0].flatten(),
+    
+    # Copy/memory operations
+    "aten::copy_": lambda inputs: inputs[0].clone() if len(inputs) >= 1 else None,
+    "aten::clone": lambda inputs: inputs[0].clone(),
+    "aten::to": lambda inputs: inputs[0].clone(),
+    "aten::_to_copy": lambda inputs: inputs[0].clone(),
+    
+    # Embedding operations
+    "aten::embedding": lambda inputs: torch.nn.functional.embedding(inputs[0].long() % 1000, torch.randn(1000, inputs[1].shape[-1] if len(inputs) > 1 else 768, device=inputs[0].device)) if len(inputs) >= 1 else None,
+    
+    # Attention-related (common on H100/H200)
+    "aten::scaled_dot_product_attention": lambda inputs: torch.nn.functional.scaled_dot_product_attention(inputs[0], inputs[1], inputs[2]) if len(inputs) >= 3 else None,
+    "aten::_scaled_dot_product_flash_attention": lambda inputs: torch.nn.functional.scaled_dot_product_attention(inputs[0], inputs[1], inputs[2]) if len(inputs) >= 3 else None,
+}
+
+
+def is_op_supported(aten_op_name: str) -> bool:
+    """Check if an ATen operation is supported for replay."""
+    if aten_op_name in SUPPORTED_OPS:
+        return True
+    # Try base name match (strip aten:: and trailing _)
+    op_base = aten_op_name.split("::")[-1].rstrip("_")
+    return any(op_base in supported_op for supported_op in SUPPORTED_OPS)
+
+
+def execute_any_operation(
+    aten_op_name: str,
+    inputs: List[torch.Tensor],
+) -> Optional[torch.Tensor]:
+    """Execute any supported ATen operation."""
+    if aten_op_name in SUPPORTED_OPS:
+        with record(f"torch_op:{aten_op_name}"):
+            return SUPPORTED_OPS[aten_op_name](inputs)
+    
+    # Fallback: try base name match
+    op_base = aten_op_name.split("::")[-1].rstrip("_")
+    for supported_op, func in SUPPORTED_OPS.items():
+        if op_base in supported_op:
+            with record(f"torch_op:{aten_op_name}"):
+                return func(inputs)
+    
+    raise ValueError(f"Unsupported operation: {aten_op_name}")
+
+
+def profile_any_operation(
+    aten_op_name: str,
+    inputs: List[torch.Tensor],
+    warmup: int,
+    runs: int,
+    trace_file: Path,
+) -> None:
+    """Profile any supported PyTorch operation N times."""
+    # Warmup
+    with torch.no_grad():
+        for _ in range(warmup):
+            try:
+                execute_any_operation(aten_op_name, inputs)
+            except Exception:
+                pass
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+    
+    # Profile
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+        with torch.no_grad():
+            for _ in range(runs):
+                try:
+                    execute_any_operation(aten_op_name, inputs)
+                except Exception:
+                    pass
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+    
+    prof.export_chrome_trace(str(trace_file))
+
+
+def replay_all_sequences_from_aten_ops(
+    sequences: List[Dict[str, Any]], 
+    warmup: int,
+    runs: int
+) -> List[Dict[str, Any]]:
+    """Replay all event sequences (GEMM and non-GEMM)."""
+    kernel_traces_dir = utils.get_path("PYTORCH_TRACES")
+    utils.ensure_dir(kernel_traces_dir)
+
+    sequence_by_idx = {}
+    supported_count = 0
+    skipped_count = 0
+    
+    print(f"Profiling {len(sequences)} PyTorch kernels with {runs} run{'s' if runs > 1 else ''} each (warmup={warmup})")
+    
+    for i, event_sequence in enumerate(sequences):
+        aten_op = event_sequence["aten_op"]
+        kernel = event_sequence["kernel"]
+        aten_op_name = aten_op["name"]
+        expected_kernel = clean_kernel_name(kernel["name"])
+        seq_idx = i + 1
+        is_gemm = event_sequence.get("is_gemm", False)
+        
+        # Check if operation is supported
+        if not is_op_supported(aten_op_name):
+            print(f"[{seq_idx}/{len(sequences)}] SKIP (unsupported): {aten_op_name} -> {expected_kernel}")
+            skipped_count += 1
+            continue
+        
+        kernel_type = "GEMM" if is_gemm else "other"
+        print(f"[{seq_idx}/{len(sequences)}] [{kernel_type}] {aten_op_name} -> {expected_kernel}")
+        
+        # Generate trace filename
+        trace_file_name = utils.format_sequence_filename(
+            seq_idx, 
+            aten_op['name'], 
+            expected_kernel, 
+            extension="json"
+        )
+        trace_file = kernel_traces_dir / trace_file_name
+
+        try:
+            # Create input tensors
+            inputs = create_input_tensors(aten_op)
+            
+            # Profile the operation
+            profile_any_operation(
+                aten_op_name=aten_op_name,
+                inputs=inputs,
+                warmup=warmup,
+                runs=runs,
+                trace_file=trace_file,
+            )
+
+            # Load and process trace
+            trace_data = utils.load_json(trace_file)
+            events = utils.collect_events(trace_data)
+            linked_sequences = utils.link_sequences(events)
+            linked_sequences_with_tax = utils.calculate_sequence_metrics(
+                linked_sequences, 
+                metrics=["launch_tax", "aten_xlat_tax", "py_tax"]
+            )
+
+            grouped_seqs_by_id_dict = utils.group_sequences_by_identity(linked_sequences_with_tax)
+            agg_sequence = utils.aggregate_sequences(
+                grouped_seqs_by_id_dict,
+                metrics=["launch_tax", "aten_xlat_tax", "py_tax"],
+                event_types=["kernel", "aten_op", "cuda_launch", "torch_op"],
+            )
+            
+            # Mark GEMM status
+            for seq in agg_sequence:
+                seq["is_gemm"] = is_gemm
+            
+            sequence_by_idx[i] = agg_sequence
+            supported_count += 1
+            
+        except Exception as e:
+            print(f"  Error profiling {aten_op_name}: {e}")
+            skipped_count += 1
+            continue
+
+    # Flatten results
+    all_replayed_sequences = []
+    for kernel_idx in sorted(sequence_by_idx.keys()):
+        all_replayed_sequences.extend(sequence_by_idx[kernel_idx])
+
+    print(f"Successfully profiled {supported_count} operations, skipped {skipped_count} unsupported")
+    
+    if all_replayed_sequences:
+        utils.validate_sequences(all_replayed_sequences)
+    
+    return all_replayed_sequences
+
+
+def profile_pytorch_all_sequences(
+    target_sequences: Dict[str, Any],
+    warmup: int,
+    runs: int
+) -> Dict[str, Any]:
+    """Profile all PyTorch kernel sequences (GEMM and non-GEMM)."""
+    kernel_traces_dir = utils.get_path("PYTORCH_TRACES")
+    utils.ensure_dir(kernel_traces_dir, cleanup=True)
+    
+    replayed_sequences = replay_all_sequences_from_aten_ops(
+        target_sequences["sequences"],
+        warmup=warmup, 
+        runs=runs
+    )
+    
+    # Match frequencies from target sequences
+    target_seqs = target_sequences["sequences"]
+    for i, replayed_seq in enumerate(replayed_sequences):
+        if i < len(target_seqs):
+            replayed_seq["freq"] = target_seqs[i].get("count", 1)
+
+    # Count GEMM vs non-GEMM
+    gemm_count = sum(1 for s in replayed_sequences if s.get("is_gemm", False))
+    non_gemm_count = len(replayed_sequences) - gemm_count
+
+    pytorch_all_sequences_file = utils.get_path("PYTORCH_ALL_SEQUENCES")
+    pytorch_all_sequences_data = {
+        "summary": {
+            "count": len(replayed_sequences),
+            "gemm_count": gemm_count,
+            "non_gemm_count": non_gemm_count,
+        },
+        "sequences": replayed_sequences
+    }
+    utils.save_json(pytorch_all_sequences_file, pytorch_all_sequences_data)
+    print(f"Saved {len(replayed_sequences)} PyTorch sequences to {pytorch_all_sequences_file}")
+    print(f"  - {gemm_count} GEMM sequences")
+    print(f"  - {non_gemm_count} non-GEMM sequences")
+    
+    return pytorch_all_sequences_data
 
 def run_job(job, warmup: int, runs: int):
     """
@@ -333,6 +585,8 @@ def profile_baremetal_gemm_kernels(
     print_summary(valid_sequences)
     
     return baremetal_gemm_sequences_data
+
+
 
 def print_summary(sequences):
     """Print a compact table summary of profiled sequences, with % delta over null kernel."""

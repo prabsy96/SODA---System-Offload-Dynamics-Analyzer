@@ -158,3 +158,53 @@ FP8_SWEEP_CONFIG = {
         "precision": "float8_e4m3fn",  # Override default precision
     },
 }
+
+
+# HSB Analysis Configuration
+HSB_CONFIG = {
+    # Default T_fo (framework overhead) for kernels not in LUT (in microseconds)
+    # If None, uses average of known kernels
+    "default_t_fo": None,
+    
+    # Minimum T_Structural threshold to avoid division issues
+    "t_structural_epsilon": 1e-6,
+    
+    # HSB classification thresholds
+    "hsb_thresholds": {
+        "hardware_bound": 0.5,      # HSB >= 0.5 is hardware-bound
+        "balanced_upper": 0.5,      # HSB < 0.5 and >= 0 is balanced
+        "framework_bound": 0.0,     # HSB < 0 is framework-bound
+    },
+    
+    # Whether to generate reference taxbreak LUT if not found
+    "auto_generate_lut": True,
+    
+    # Reference configuration for LUT generation
+    "lut_reference_config": {
+        "batch_size": 1,
+        "seq_len": 128,
+        "max_new_tokens": 1,
+    },
+}
+
+# HSB Sweep Configuration
+HSB_SWEEP_CONFIG = {
+    "gpt2_hsb": {
+        "model_name": "gpt2",
+        "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
+        "seq_lens": sorted([128, 256, 512, 1024], reverse=True),
+        "max_new_toks": [1],
+    },
+    "llama_3.2_1b_hsb": {
+        "model_name": "meta-llama/Llama-3.2-1B",
+        "batch_sizes": sorted([1, 2, 4, 8], reverse=True),
+        "seq_lens": sorted([512, 1024, 2048, 4096], reverse=True),
+        "max_new_toks": [1],
+    },
+    "tinyllama_1.1b_hsb": {
+        "model_name": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
+        "seq_lens": sorted([128, 256, 512, 1024, 2048], reverse=True),
+        "max_new_toks": [1],
+    },
+}
