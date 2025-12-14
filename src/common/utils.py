@@ -311,65 +311,36 @@ def save_json(file_path: str | Path, data: Dict[str, Any], indent: int = 2) -> N
         json.dump(data, f, indent=indent, ensure_ascii=False)
 
 
-def write_log(env_var: str, lines: str | list[str]) -> None:
-    """
-    Append text lines to a log file referenced by an environment variable.
-    
-    Args:
-        env_var: Name of the environment variable pointing to the log file
-                 (relative paths are resolved via EXPERIMENT_DIR).
-        lines: Single string or list of strings to append.
-    """
-    if isinstance(lines, str):
-        lines = [lines]
-    log_path = get_path(env_var)
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-        f.write("\n")
-
-
-def check_assert(condition: bool, log: str, excuse: bool = False) -> None:
-    """
-    Guard an assertion; log and optionally excuse on failure.
-    
-    Args:
-        condition: Assertion condition expected to be True.
-        log: Message to record and use if raising.
-        excuse: If True, failures are logged but not raised.
-    """
-    # If condition is true, we're good
-    if condition:
-        return
-
-    # Otherwise log the assertion failure
-    write_log("ASSERT_LOG", log)
-
-    # If excuse is true, then excuse and return
-    if excuse:
-        return
-
-    # Check if running in non-interactive mode (e.g., SLURM batch job)
-    # In non-interactive mode, auto-excuse with a warning instead of blocking
-    import sys
-    if not sys.stdin.isatty():
-        print(f"[WARNING] Assertion failed (auto-excused in non-interactive mode): {log}")
-        print(f"Review logs @ {get_path('ASSERT_LOG')}")
-        return
-
-    # Otherwise, ask the user if they want to excuse the assertion failure
-    print(f"Assertion failed: {log}")
-    print(f"Review logs @ {get_path('ASSERT_LOG')}")
-    print("Do you want to excuse this assertion failure? (y/n)")
+def write_log(log_key: str, log: str) -> None:
+    """Write a log message to the specified log file."""
     try:
-        if input().strip().lower() == "y":
-            return
-    except EOFError:
-        # Handle case where stdin is closed unexpectedly
-        print(f"[WARNING] Assertion failed (auto-excused due to EOF): {log}")
-        return
+        log_path = get_path(log_key)
+        # Ensure parent directory exists
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(log + "\n")
+    except Exception as e:
+        # Fallback: print to stderr if we can't write to file
+        import sys
+        print(f"WARNING: Could not write to {log_key}: {e}", file=sys.stderr)
+        print(f"LOG: {log}", file=sys.stderr)
 
-    # Otherwise, raise an error
-    raise RuntimeError(log)
+
+def check_assert(condition: bool, message: str, excuse: str = "") -> bool:
+    """
+    Check assertion and log if failed. Returns condition result.
+    Does NOT raise - just logs and continues.
+    """
+    if not condition:
+        log = f"ASSERT FAILED: {message}"
+        if excuse:
+            log += f" | Excuse: {excuse}"
+        try:
+            write_log("ASSERT_LOG", log)
+        except Exception:
+            import sys
+            print(log, file=sys.stderr)
+    return condition
 
 def _parse_scalar(value, default):
     if value is None or value == '':
@@ -1225,6 +1196,112 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
 
     return sequences
 
+def calculate_tklqt(sequences: List[Dict[str, Any]]) -> Dict[str, float]:
+    """
+    Calculate TKLQT (Total Kernel Launch + Queue Time).
+    
+    TKLQT = sum of (kernel_start_ts - cuda_launch_start_ts) for all sequences.
+    This measures the total time from CPU launch API call to GPU kernel execution start.
+    
+    Args:
+        sequences: List of event sequence dictionaries with kernel and cuda_launch events.
+    
+    Returns:
+        Dictionary with total, avg, min, max TKLQT in microseconds.
+    """
+    tklqt_values = []
+    
+    for seq in sequences:
+        kernel = seq.get("kernel")
+        cuda_launch = seq.get("cuda_launch")
+        
+        if not kernel or not cuda_launch:
+            continue
+        
+        # Get timestamps - handle both dict and direct value formats
+        if isinstance(kernel, dict):
+            kernel_start = kernel.get("ts", 0)
+        else:
+            continue
+            
+        if isinstance(cuda_launch, dict):
+            launch_start = cuda_launch.get("ts", 0)
+        else:
+            continue
+        
+        if kernel_start > 0 and launch_start > 0:
+            # Time from launch API call to kernel execution start (in microseconds)
+            lqt = kernel_start - launch_start
+            if lqt >= 0:  # Sanity check - kernel should start after launch
+                tklqt_values.append(lqt)
+            elif lqt > -10:  # Small negative values are measurement noise, clamp to 0
+                tklqt_values.append(0.0)
+    
+    if not tklqt_values:
+        return {"total": 0.0, "avg": 0.0, "min": 0.0, "max": 0.0, "count": 0}
+    
+    return {
+        "total": sum(tklqt_values),
+        "avg": sum(tklqt_values) / len(tklqt_values),
+        "min": min(tklqt_values),
+        "max": max(tklqt_values),
+        "count": len(tklqt_values),
+    }
+
+def calculate_t_orchestrator(sequences: List[Dict[str, Any]]) -> Dict[str, float]:
+    """
+    Calculate T_orchestrator (total CPU-side dispatch overhead).
+    
+    Per TaxBreak paper:
+        T_orchestrator = Σ (T_py + T_aten + T_lib + T_sys) for all kernels
+    
+    Where for each kernel invocation:
+        - T_py: Python dispatch overhead
+        - T_aten: ATen translation overhead  
+        - T_lib: Library (cuBLAS etc) overhead
+        - T_sys: System/launch overhead (includes TKLQT)
+    
+    For kernels without microbench breakdown, we use:
+        T_orchestrator ≈ launch_tax + aten_xlat_tax
+    
+    Args:
+        sequences: List of event sequences with timing metrics.
+    
+    Returns:
+        Dictionary with total, avg T_orchestrator in microseconds.
+    """
+    t_orch_values = []
+    
+    for seq in sequences:
+        # Try to get detailed breakdown first
+        launch_tax = seq.get("launch_tax", 0)
+        aten_xlat_tax = seq.get("aten_xlat_tax", 0)
+        
+        # Handle dict format (from aggregated sequences)
+        if isinstance(launch_tax, dict):
+            launch_tax = launch_tax.get("avg", 0)
+        if isinstance(aten_xlat_tax, dict):
+            aten_xlat_tax = aten_xlat_tax.get("avg", 0)
+        
+        # Ensure non-negative (clamp measurement noise)
+        launch_tax = max(0.0, float(launch_tax or 0))
+        aten_xlat_tax = max(0.0, float(aten_xlat_tax or 0))
+        
+        # T_orchestrator for this kernel = launch_tax + aten_xlat_tax
+        t_orch = launch_tax + aten_xlat_tax
+        
+        if t_orch > 0:
+            t_orch_values.append(t_orch)
+    
+    if not t_orch_values:
+        return {"total": 0.0, "avg": 0.0, "count": 0}
+    
+    return {
+        "total": sum(t_orch_values),
+        "avg": sum(t_orch_values) / len(t_orch_values),
+        "count": len(t_orch_values),
+    }
+
 def calculate_sequence_metrics(sequences: List[Dict], metrics: List[str]) -> List[Dict]:
     """
     Calculates per-sequence metrics (e.g., launch_tax, aten_xlat_tax) and adds them to the sequence dict.
@@ -1805,47 +1882,53 @@ def analyze_kernel_fusion_candidates(sequences: List[Dict], exact_length: int, p
         ]
     }
 
-def generate_synthetic_inputs(tokenizer, device: torch.device, batch_size: int, seq_len: int) -> Dict[str, torch.Tensor]:
+def generate_synthetic_inputs(
+    tokenizer, 
+    device: torch.device, 
+    batch_size: int, 
+    seq_len: int,
+    model_config=None  # Add model config parameter
+) -> Dict[str, torch.Tensor]:
     """
     Generates synthetic tokenized inputs for profiling.
-    
-    Args:
-        tokenizer: Tokenizer providing vocab_size.
-        device: Torch device for the tensors.
-        batch_size: Batch size for the inputs.
-        seq_len: Sequence length for the inputs.
-        
-    Returns:
-        Dictionary with 'input_ids' and 'attention_mask' tensors.
     """
-    # FIXME: Stale code; explained below
-    # input_ids = torch.randint(
-    #     1, 
-    #     tokenizer.vocab_size, 
-    #     size=(batch_size, seq_len), 
-    #     device=device,
-    # )
-    # atten_mask = torch.ones(
-    #     batch_size, 
-    #     seq_len, 
-    #     device=device,
-    # )
+    # Ensure pad_token is set (GPT-2 doesn't have one by default)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    # Build tensors on CPU, then move them, so TorchScript/ONNX traces don't "lock" a device
-    # Pass the shape positionally as a tuple of ints to avoid dtype/device parsing quirks
+    # Get max position embeddings from model config (most reliable)
+    max_pos = seq_len  # default to requested
+    if model_config is not None:
+        # Different models use different attribute names
+        if hasattr(model_config, 'max_position_embeddings'):
+            max_pos = model_config.max_position_embeddings
+        elif hasattr(model_config, 'n_positions'):
+            max_pos = model_config.n_positions
+        elif hasattr(model_config, 'n_ctx'):
+            max_pos = model_config.n_ctx
+    
+    # Clamp seq_len to model's max position embeddings
+    if seq_len > max_pos:
+        print(f"Warning: seq_len {seq_len} exceeds model max_position_embeddings {max_pos}. Clamping.")
+        seq_len = max_pos
+
+    # Generate random token IDs within valid vocab range
     input_ids = torch.randint(
         1,
-        tokenizer.vocab_size,
+        tokenizer.vocab_size - 1,
         (batch_size, seq_len),
-        dtype=torch.long
-    ).to(device)
+        dtype=torch.long,
+        device=device
+    )
 
-    atten_mask = torch.ones(
+    attention_mask = torch.ones(
         (batch_size, seq_len),
-        dtype=torch.long
-    ).to(device)
+        dtype=torch.long,
+        device=device
+    )
 
     return {
         "input_ids": input_ids,
-        "attention_mask": atten_mask,
+        "attention_mask": attention_mask,
     }

@@ -25,6 +25,8 @@ from typing import Dict, List, Optional, Tuple, Set, Union
 
 METRIC_LABEL = "inference time (ms)"
 T_EXPOSED_LABEL = "T_exposed (ms)"
+GPU_ACTIVE_LABEL = "GPU Active Time (ms)"
+TKLQT_LABEL = "TKLQT (µs)"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Summarize a SODA sweep directory.")
@@ -172,6 +174,13 @@ def collect_reports(root: Path) -> List[Dict]:
         t_exposed_ms = safe_t_exposed(data)
         gpu_name = get_gpu_name(data)
 
+        perf = data.get("performance_metrics") or data.get("metrics") or {}
+        gpu_active_us = perf.get("true_gpu_busy_time_us") or perf.get("gpu_busy_time_us") or 0
+        gpu_active_ms = gpu_active_us / 1000.0 if gpu_active_us else None
+
+        tklqt_data = perf.get("tklqt", {})
+        tklqt_us = tklqt_data.get("total", None) if isinstance(tklqt_data, dict) else None
+
         rows.append(
             {
                 "model_name": model_name,
@@ -183,6 +192,8 @@ def collect_reports(root: Path) -> List[Dict]:
                 "seq_len": seq_len,
                 "inference_time_ms": inference_time_ms,
                 "t_exposed_ms": t_exposed_ms,
+                "gpu_active_ms": gpu_active_ms,  # ADD
+                "tklqt_us": tklqt_us,            # ADD
                 "status": status,
             }
         )
@@ -234,36 +245,50 @@ def build_sections(rows: List[Dict]) -> List[Dict]:
 
         values = []
         statuses = []
-        t_exposed_values = [] 
+        gpu_active_values = [] 
+        t_exposed_values = []
+        tklqt_values = []   
+
         for sl in seq_lens:
             value_row: List[Optional[float]] = []
             status_row: List[Optional[str]] = []
-            t_exposed_row: List[Optional[float]] = [] 
+            t_exposed_row: List[Optional[float]] = []
+            gpu_active_row: List[Optional[float]] = []  # ADD
+            tklqt_row: List[Optional[float]] = []       # ADD
+            
             for bs in batch_sizes:
                 entry = lookup.get((sl, bs))
                 if entry is None:
                     value_row.append(None)
                     status_row.append(None)
-                    t_exposed_row.append(None) 
+                    t_exposed_row.append(None)
+                    gpu_active_row.append(None)  # ADD
+                    tklqt_row.append(None)       # ADD
                 else:
                     value_row.append(entry.get("inference_time_ms"))
                     status_row.append(entry.get("status"))
                     t_exposed_row.append(entry.get("t_exposed_ms"))
+                    gpu_active_row.append(entry.get("gpu_active_ms"))  # ADD
+                    tklqt_row.append(entry.get("tklqt_us"))            # ADD
             values.append(value_row)
             statuses.append(status_row)
             t_exposed_values.append(t_exposed_row)
+            gpu_active_values.append(gpu_active_row)  # ADD
+            tklqt_values.append(tklqt_row)            # ADD
 
         sections.append(
             {
                 "model_name": model,
                 "compile_type": compile_type,
                 "precision": precision,
-                "gpu_name": gpu_name, # Ensure this is passed to section dict
+                "gpu_name": gpu_name,
                 "batch_sizes": batch_sizes,
                 "seq_lens": seq_lens,
                 "values": values,
                 "statuses": statuses,
                 "t_exposed_values": t_exposed_values,
+                "gpu_active_values": gpu_active_values,  # ADD
+                "tklqt_values": tklqt_values,            # ADD
             }
         )
     return sections
@@ -483,7 +508,7 @@ def summarize(root: Path, gpu_name_override: Optional[str] = None, max_tok_overr
         
         slug = slugify(slug_str)
         
-        # Inference time outputs
+        # 1. Inference time outputs
         csv_path = summary_dir / f"{slug}_pivot.csv"
         png_path = summary_dir / f"{slug}_heatmap.png"
         pdf_path = summary_dir / f"{slug}_heatmap.pdf"
@@ -491,7 +516,7 @@ def summarize(root: Path, gpu_name_override: Optional[str] = None, max_tok_overr
         write_pivot(section, csv_path, metric_key="values", metric_name="inference_time_ms")
         plot_heatmap(section, [png_path, pdf_path], metric_key="values", metric_label=METRIC_LABEL)
         
-        # T_exposed outputs (ADD THIS BLOCK)
+        # 2. T_exposed (GPU Idle) outputs
         t_exposed_csv = summary_dir / f"{slug}_t_exposed_pivot.csv"
         t_exposed_png = summary_dir / f"{slug}_t_exposed_heatmap.png"
         t_exposed_pdf = summary_dir / f"{slug}_t_exposed_heatmap.pdf"
@@ -499,11 +524,27 @@ def summarize(root: Path, gpu_name_override: Optional[str] = None, max_tok_overr
         write_pivot(section, t_exposed_csv, metric_key="t_exposed_values", metric_name="t_exposed_ms")
         plot_heatmap(section, [t_exposed_png, t_exposed_pdf], metric_key="t_exposed_values", metric_label=T_EXPOSED_LABEL)
         
+        # 3. GPU Active outputs (ADD THIS BLOCK)
+        gpu_active_csv = summary_dir / f"{slug}_gpu_active_pivot.csv"
+        gpu_active_png = summary_dir / f"{slug}_gpu_active_heatmap.png"
+        gpu_active_pdf = summary_dir / f"{slug}_gpu_active_heatmap.pdf"
+        
+        write_pivot(section, gpu_active_csv, metric_key="gpu_active_values", metric_name="gpu_active_ms")
+        plot_heatmap(section, [gpu_active_png, gpu_active_pdf], metric_key="gpu_active_values", metric_label=GPU_ACTIVE_LABEL)
+        
+        # 4. TKLQT outputs (ADD THIS BLOCK)
+        tklqt_csv = summary_dir / f"{slug}_tklqt_pivot.csv"
+        tklqt_png = summary_dir / f"{slug}_tklqt_heatmap.png"
+        tklqt_pdf = summary_dir / f"{slug}_tklqt_heatmap.pdf"
+        
+        write_pivot(section, tklqt_csv, metric_key="tklqt_values", metric_name="tklqt_us")
+        plot_heatmap(section, [tklqt_png, tklqt_pdf], metric_key="tklqt_values", metric_label=TKLQT_LABEL)
+        
         print("Wrote")
-        print(f"* Inference time summary to {csv_path}")
-        print(f"* Inference time heatmap to {png_path}, {pdf_path}")
-        print(f"* T_exposed summary to {t_exposed_csv}")
-        print(f"* T_exposed heatmap to {t_exposed_png}, {t_exposed_pdf}")
+        print(f"* Inference time: {csv_path.name}, {png_path.name}")
+        print(f"* GPU Idle (T_exposed): {t_exposed_csv.name}, {t_exposed_png.name}")
+        print(f"* GPU Active: {gpu_active_csv.name}, {gpu_active_png.name}")
+        print(f"* TKLQT: {tklqt_csv.name}, {tklqt_png.name}")
 
 
 def main() -> int:

@@ -133,6 +133,7 @@ class SodaAnalyzer:
             inference_time,
             true_gpu_busy_time
         )
+        tklqt_metrics = utils.calculate_tklqt(sequences)
 
         # Build metrics dictionary 
         metrics = {
@@ -150,6 +151,7 @@ class SodaAnalyzer:
             # GPU metrics
             "total_gpu_time_span_ms": utils.us_to_ms(total_gpu_time_span),
             "gpu_busy_time_ms": utils.us_to_ms(true_gpu_busy_time),
+            "true_gpu_busy_time_us": true_gpu_busy_time,  # ADD: Keep µs version for summarizer
             "gpu_idle_time_ms": utils.us_to_ms(max(0.0, total_gpu_time_span - true_gpu_busy_time)),
             "gpu_utilization_percent": gpu_utilization,
  
@@ -161,6 +163,9 @@ class SodaAnalyzer:
             "avg_xlat_tax_ms": utils.us_to_ms(avg_xlat_tax),
             "total_launch_tax_ms": utils.us_to_ms(total_launch_tax),
             "avg_launch_tax_ms": utils.us_to_ms(avg_launch_tax),
+            
+            # TKLQT (ADD THIS)
+            "tklqt": tklqt_metrics,
         }
         
         self.results = {
@@ -488,13 +493,13 @@ class ModelTracer:
             self.model, self.tokenizer = self.load_decoder()
             # print(f"Generating synthetic input: batch_size={self.batch_size}, seq_len={self.seq_len}")
             self.model_inputs = utils.generate_synthetic_inputs(
-                self.tokenizer, self.device, self.batch_size, self.seq_len
+                self.tokenizer, self.device, self.batch_size, self.seq_len, model_config=self.model.config
             )
         else:
             self.model, self.tokenizer = self.load_encoder()
             # print(f"Generating synthetic input: batch_size={self.batch_size}, seq_len={self.seq_len}")
             self.model_inputs = utils.generate_synthetic_inputs(
-                self.tokenizer, self.device, self.batch_size, self.seq_len
+                self.tokenizer, self.device, self.batch_size, self.seq_len, model_config=self.model.config
             )
 
 
@@ -684,6 +689,7 @@ class ModelTracer:
         tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
         
         # Load config and set pad_token_id before model initialization
         config = transformers.AutoConfig.from_pretrained(self.model_name, trust_remote_code=True)
@@ -693,6 +699,9 @@ class ModelTracer:
         # FP8 path: Use Transformer Engine if available
         if self.is_fp8:
             model, self.fp8_recipe = self._load_model_fp8(self.model_name)
+            # FIX: Ensure model config has pad_token_id after FP8 loading
+            if hasattr(model, 'config') and model.config.pad_token_id is None:
+                model.config.pad_token_id = tokenizer.pad_token_id
             return model, tokenizer
         
         # Non-FP8 paths (existing code)

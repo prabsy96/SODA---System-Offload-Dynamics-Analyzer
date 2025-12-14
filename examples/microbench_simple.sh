@@ -4,6 +4,8 @@
 
 set -e
 
+
+
 # Check running from root directory
 if [ ! -f "pyproject.toml" ]; then
     echo "Error: Please run this script from the root directory of the SODA repository."
