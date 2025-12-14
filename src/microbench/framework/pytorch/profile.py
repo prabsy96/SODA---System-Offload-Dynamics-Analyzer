@@ -462,10 +462,11 @@ def create_input_tensors(aten_op: Dict[str, Any], device: str = "cuda") -> List[
                 inputs.append(create_tensor(dim, "float", device=device))
             else:
                 inputs.append(torch.tensor(1.0, device=device))
-        return inputs
+        return inputs if inputs else [torch.randn(16, 16, device=device)]
 
     for i, type_str in enumerate(input_types):
-        if type_str is None or type_str == "": type_str = "float"
+        if type_str is None or type_str == "":
+            type_str = "float"
         
         dims = input_dims[i] if i < len(input_dims) else []
         strides = input_strides[i] if i < len(input_strides) else None
@@ -483,34 +484,51 @@ def create_input_tensors(aten_op: Dict[str, Any], device: str = "cuda") -> List[
                     import ast
                     inputs.append(ast.literal_eval(concrete_val))
                     continue
-                except: pass
+                except:
+                    pass
             if dims and isinstance(dims, list):
                 inputs.append(dims)
             else:
-                inputs.append([])
+                inputs.append([1])
             continue
         
-        # Handle Scalar
+        # Handle Scalar type - always return Python scalar
         if type_str == "Scalar":
             inputs.append(parse_scalar_value(concrete_val))
             continue
         
-        # Handle empty dims (scalar tensor)
+        # Handle empty dims - this is the critical fix
         if dims is None or dims == []:
-            val = 1
-            if concrete_val: val = parse_scalar_value(concrete_val)
+            val = parse_scalar_value(concrete_val) if concrete_val else 1
             
-            if "int" in type_str.lower() or "long" in type_str.lower():
-                inputs.append(torch.tensor(val, dtype=torch.int64, device=device))
+            # Determine if this should be a Python scalar or scalar tensor
+            # Key insight: if type contains "int"/"long" AND we already have a tensor input,
+            # this is likely a Python scalar argument (e.g., dim argument)
+            is_likely_scalar_arg = (
+                ("int" in type_str.lower() or "long" in type_str.lower()) and
+                inputs and isinstance(inputs[-1], torch.Tensor)
+            )
+            
+            if is_likely_scalar_arg:
+                # Return Python int, not tensor
+                inputs.append(int(val) if isinstance(val, (int, float)) else 0)
             elif "bool" in type_str.lower():
-                inputs.append(torch.tensor(bool(val), dtype=torch.bool, device=device))
+                # Bool with empty dims - could be scalar or tensor
+                if inputs and isinstance(inputs[-1], torch.Tensor):
+                    inputs.append(bool(val))
+                else:
+                    inputs.append(torch.tensor(bool(val), dtype=torch.bool, device=device))
+            elif "int" in type_str.lower() or "long" in type_str.lower():
+                # First input, make it a scalar tensor
+                inputs.append(torch.tensor(int(val) if isinstance(val, (int, float)) else 0, dtype=torch.int64, device=device))
             else:
-                inputs.append(torch.tensor(val, device=device))
+                # Float scalar tensor
+                inputs.append(torch.tensor(float(val) if isinstance(val, (int, float)) else 1.0, device=device))
             continue
 
         # Special handling for gather/scatter index tensors
         if op_name in ("aten::gather", "aten::scatter_", "aten::index_select"):
-            if i == 2 and len(inputs) >= 1:  # Index tensor
+            if i == 2 and len(inputs) >= 1:
                 source_tensor = inputs[0]
                 if isinstance(source_tensor, torch.Tensor):
                     dim_arg = inputs[1] if len(inputs) > 1 and isinstance(inputs[1], int) else 0
@@ -518,17 +536,215 @@ def create_input_tensors(aten_op: Dict[str, Any], device: str = "cuda") -> List[
                     inputs.append(create_valid_index_tensor(source_dims, dim_arg, torch.int64, device))
                     continue
         
-        # Handle standard Tensor
+        # Handle standard Tensor - this should work for most cases
         tensor = create_tensor(dims, type_str, strides, device)
         if tensor is not None:
             inputs.append(tensor)
         else:
+            # Fallback - but log this as it indicates a problem
+            print(f"  Warning: Failed to create tensor for {op_name} input {i}: dims={dims}, type={type_str}")
             inputs.append(torch.randn(16, 16, device=device))
     
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     
-    return inputs
+    return inputs if inputs else [torch.randn(16, 16, device=device)]
+
+
+def _handle_special_ops(op_name: str, aten_op: Dict[str, Any], device: str) -> Optional[List[Any]]:
+    """
+    Handle special ops that need custom input reconstruction.
+    Returns None if not a special op.
+    """
+    input_dims = aten_op.get("input_dims", [])
+    input_types = aten_op.get("input_type", [])
+    concrete_inputs = aten_op.get("concrete_inputs", [])
+    
+    # aten::sum - tensor, optional dim, keepdim
+    if op_name == "aten::sum":
+        try:
+            dims = input_dims[0] if input_dims and input_dims[0] else [16, 16]
+            dtype_str = input_types[0] if input_types else "float"
+            tensor = create_tensor(dims, dtype_str, device=device)
+            if tensor is None:
+                tensor = torch.randn(dims, device=device)
+            return [tensor]
+        except Exception as e:
+            return None
+    
+    # aten::sub, aten::add - tensor, tensor/scalar
+    if op_name in ("aten::sub", "aten::add"):
+        try:
+            dims0 = input_dims[0] if input_dims and input_dims[0] else None
+            if dims0 is None:
+                return None  # Let default handler try
+            
+            dims1 = input_dims[1] if len(input_dims) > 1 and input_dims[1] else []
+            dtype0 = input_types[0] if input_types else "float"
+            dtype1 = input_types[1] if len(input_types) > 1 else "float"
+            
+            t0 = create_tensor(dims0, dtype0, device=device)
+            if t0 is None:
+                t0 = torch.randn(dims0, device=device)
+            
+            # Second arg: tensor if has dims, else scalar
+            if dims1:
+                t1 = create_tensor(dims1, dtype1, device=device)
+                if t1 is None:
+                    t1 = torch.randn(dims1, device=device)
+            else:
+                val = parse_scalar_value(concrete_inputs[1]) if len(concrete_inputs) > 1 else 1
+                t1 = val if isinstance(val, (int, float)) else 1
+            
+            return [t0, t1]
+        except Exception:
+            return None
+    
+    # aten::ge, aten::gt, aten::lt, aten::le, aten::eq, aten::ne - comparison ops
+    if op_name in ("aten::ge", "aten::gt", "aten::lt", "aten::le", "aten::eq", "aten::ne"):
+        try:
+            dims0 = input_dims[0] if input_dims and input_dims[0] else None
+            if dims0 is None:
+                return None
+            
+            dtype0 = input_types[0] if input_types else "long int"
+            
+            if "int" in dtype0.lower() or "long" in dtype0.lower():
+                t0 = torch.randint(0, 256, dims0, dtype=torch.int64, device=device)
+            else:
+                t0 = torch.randn(dims0, device=device)
+            
+            # Second arg - check if it has dims or is scalar
+            dims1 = input_dims[1] if len(input_dims) > 1 and input_dims[1] else []
+            if dims1:
+                dtype1 = input_types[1] if len(input_types) > 1 else dtype0
+                if "int" in dtype1.lower() or "long" in dtype1.lower():
+                    t1 = torch.randint(0, 256, dims1, dtype=torch.int64, device=device)
+                else:
+                    t1 = torch.randn(dims1, device=device)
+            else:
+                val = parse_scalar_value(concrete_inputs[1]) if len(concrete_inputs) > 1 else 0
+                t1 = val if isinstance(val, (int, float)) else 0
+            
+            return [t0, t1]
+        except Exception:
+            return None
+    
+    # aten::copy_ - dst, src
+    if op_name == "aten::copy_":
+        try:
+            dims0 = input_dims[0] if input_dims and input_dims[0] else None
+            dims1 = input_dims[1] if len(input_dims) > 1 and input_dims[1] else None
+            if dims0 is None:
+                return None
+            
+            dtype0 = input_types[0] if input_types else "float"
+            dtype1 = input_types[1] if len(input_types) > 1 else dtype0
+            
+            # Create destination tensor
+            if "bool" in dtype0.lower():
+                t0 = torch.zeros(dims0, dtype=torch.bool, device=device)
+            elif "int" in dtype0.lower() or "long" in dtype0.lower():
+                t0 = torch.zeros(dims0, dtype=torch.int64, device=device)
+            else:
+                t0 = torch.zeros(dims0, device=device)
+            
+            # Create source tensor (broadcastable to dst)
+            src_dims = dims1 if dims1 else dims0
+            if "int" in dtype1.lower() or "long" in dtype1.lower():
+                t1 = torch.randint(0, 2, src_dims, dtype=torch.int64, device=device)
+            elif "bool" in dtype1.lower():
+                t1 = torch.randint(0, 2, src_dims, dtype=torch.bool, device=device)
+            else:
+                t1 = torch.randn(src_dims, device=device)
+            
+            return [t0, t1]
+        except Exception:
+            return None
+    
+    # aten::gather - src, dim, index
+    if op_name == "aten::gather":
+        try:
+            src_dims = input_dims[0] if input_dims and input_dims[0] else None
+            idx_dims = input_dims[2] if len(input_dims) > 2 and input_dims[2] else None
+            if src_dims is None or idx_dims is None:
+                return None
+            
+            dim = int(concrete_inputs[1]) if len(concrete_inputs) > 1 and concrete_inputs[1] else 0
+            
+            src = torch.randn(src_dims, device=device)
+            max_idx = src_dims[dim] if dim < len(src_dims) else src_dims[0]
+            index = torch.randint(0, max(1, max_idx), idx_dims, dtype=torch.int64, device=device)
+            
+            return [src, dim, index]
+        except Exception:
+            return None
+    
+    # aten::where - cond, x, y
+    if op_name == "aten::where":
+        try:
+            cond_dims = input_dims[0] if input_dims and input_dims[0] else None
+            if cond_dims is None:
+                return None
+            
+            x_dims = input_dims[1] if len(input_dims) > 1 and input_dims[1] else []
+            y_dims = input_dims[2] if len(input_dims) > 2 and input_dims[2] else []
+            
+            cond = torch.randint(0, 2, cond_dims, dtype=torch.bool, device=device)
+            
+            # x and y might be scalars (empty dims)
+            if not x_dims:
+                x = 0.0
+            else:
+                x = torch.randn(x_dims, device=device)
+            
+            if not y_dims:
+                y = float('-inf')
+            else:
+                y = torch.randn(y_dims, device=device)
+            
+            return [cond, x, y]
+        except Exception:
+            return None
+    
+    # aten::native_layer_norm
+    if op_name == "aten::native_layer_norm":
+        try:
+            dims = input_dims[0] if input_dims and input_dims[0] else None
+            if dims is None:
+                return None
+            
+            x = torch.randn(dims, device=device)
+            normalized_shape = [dims[-1]]
+            weight = torch.ones(normalized_shape, device=device)
+            bias = torch.zeros(normalized_shape, device=device)
+            return [x, normalized_shape, weight, bias, 1e-5]
+        except Exception:
+            return None
+    
+    # aten::_softmax
+    if op_name == "aten::_softmax":
+        try:
+            dims = input_dims[0] if input_dims and input_dims[0] else None
+            if dims is None:
+                return None
+            x = torch.randn(dims, device=device)
+            return [x, -1, False]
+        except Exception:
+            return None
+    
+    # aten::max
+    if op_name == "aten::max":
+        try:
+            dims = input_dims[0] if input_dims and input_dims[0] else None
+            if dims is None:
+                return None
+            x = torch.randn(dims, device=device)
+            return [x]
+        except Exception:
+            return None
+    
+    return None
 
 # ==============================================================================
 # Profiling Functions

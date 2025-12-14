@@ -436,6 +436,34 @@ def summarize(model: str, precision: str, include_all_kernels: bool = False):
     generate_baremetal_summary(show_table=True)
     final_summary_data = generate_final_summary(show_table=True, include_all_kernels=include_all_kernels)
 
+    # --- Calculate Total Structural Overhead with Breakdown ---
+    # T_structural_total = Σ (T_fo[k] × freq[k])
+    # Decomposed: ΔFT + ΔCT + ΔKT
+    total_structural_overhead_us = 0.0
+    total_FT_us = 0.0  # Framework Translation (T_py)
+    total_CT_us = 0.0  # Compute Translation (T_aten_xlat)
+    total_KT_us = 0.0  # Kernel Launch Tax (T_sys)
+    total_invocations = 0
+    
+    for row in final_summary_data:
+        t_fo = row.get("T_fo")
+        t_py = row.get("T_py")
+        t_aten_xlat = row.get("T_aten_xlat")
+        t_sys = row.get("T_sys")
+        freq = row.get("freq") or 0
+        
+        if t_fo is not None and freq > 0:
+            total_structural_overhead_us += (t_fo * freq)
+            total_invocations += freq
+            
+            # Accumulate breakdown components
+            if t_py is not None:
+                total_FT_us += (t_py * freq)
+            if t_aten_xlat is not None:
+                total_CT_us += (t_aten_xlat * freq)
+            if t_sys is not None:
+                total_KT_us += (t_sys * freq)
+
     summary_path = utils.get_path("TAX_BREAK_SUMMARY")
     utils.save_json(
         summary_path,
@@ -444,11 +472,25 @@ def summarize(model: str, precision: str, include_all_kernels: bool = False):
                 "count": len(final_summary_data),
                 "gemm_count": sum(1 for d in final_summary_data if d.get("is_gemm", False)),
                 "non_gemm_count": sum(1 for d in final_summary_data if not d.get("is_gemm", False)),
+                "total_invocations": total_invocations,
+                "total_structural_overhead_us": total_structural_overhead_us,
+                # Breakdown
+                "total_FT_us": total_FT_us,   # ΔFT: Python translation
+                "total_CT_us": total_CT_us,   # ΔCT: Compute translation  
+                "total_KT_us": total_KT_us,   # ΔKT: Kernel launch
             },
             "data": final_summary_data,
         },
     )
     print(f"Saved taxbreak summary to {summary_path}")
+
+    # Print the aggregate result with breakdown
+    print(f"\n=== Structural (Orchestrator) Overhead ===")
+    print(f"T_structural_total = Σ (T_fo × freq) = {total_structural_overhead_us/1000:.2f} ms")
+    print(f"  ├─ ΔFT (Python Translation)  = Σ (T_py × freq)        = {total_FT_us/1000:.2f} ms")
+    print(f"  ├─ ΔCT (Compute Translation) = Σ (T_aten_xlat × freq) = {total_CT_us/1000:.2f} ms")
+    print(f"  └─ ΔKT (Kernel Launch)       = Σ (T_sys × freq)       = {total_KT_us/1000:.2f} ms")
+    print(f"  (Aggregated over {total_invocations} kernel invocations)")
 
     model = model or "<unknown_model>"
     precision = precision or "<unknown_precision>"
