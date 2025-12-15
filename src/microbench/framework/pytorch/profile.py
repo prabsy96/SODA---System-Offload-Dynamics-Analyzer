@@ -301,6 +301,54 @@ SUPPORTED_OPS = {
     ) if len(inputs) >= 1 else None,
     
     "aten::select": lambda inputs: inputs[0].select(_get_dim_arg(inputs, 1, 0), _get_dim_arg(inputs, 2, 0)) if len(inputs) >= 1 else None,
+    "aten::any": lambda inputs: torch.any(inputs[0]),
+    "aten::all": lambda inputs: torch.all(inputs[0]),
+    "aten::argmax": lambda inputs: torch.argmax(inputs[0]),
+    "aten::argmin": lambda inputs: torch.argmin(inputs[0]),
+    
+    # Additional elementwise operations
+    "aten::pow": lambda inputs: torch.pow(inputs[0], inputs[1]) if len(inputs) >= 2 else inputs[0],
+    "aten::sqrt": lambda inputs: torch.sqrt(inputs[0]),
+    "aten::exp": lambda inputs: torch.exp(inputs[0]),
+    "aten::log": lambda inputs: torch.log(inputs[0]),
+    "aten::sin": lambda inputs: torch.sin(inputs[0]),
+    "aten::cos": lambda inputs: torch.cos(inputs[0]),
+    
+    # Comparison operations
+    "aten::eq": lambda inputs: torch.eq(inputs[0], inputs[1]) if len(inputs) >= 2 else inputs[0],
+    "aten::ne": lambda inputs: torch.ne(inputs[0], inputs[1]) if len(inputs) >= 2 else inputs[0],
+    "aten::gt": lambda inputs: torch.gt(inputs[0], inputs[1]) if len(inputs) >= 2 else inputs[0],
+    "aten::lt": lambda inputs: torch.lt(inputs[0], inputs[1]) if len(inputs) >= 2 else inputs[0],
+    "aten::ge": lambda inputs: torch.ge(inputs[0], inputs[1]) if len(inputs) >= 2 else inputs[0],
+    "aten::le": lambda inputs: torch.le(inputs[0], inputs[1]) if len(inputs) >= 2 else inputs[0],
+    
+    # Indexing operations
+    "aten::gather": lambda inputs: torch.gather(inputs[0], 0, torch.zeros_like(inputs[0]).long()) if len(inputs) >= 1 else None,
+    "aten::scatter": lambda inputs: torch.scatter(inputs[0], 0, torch.zeros_like(inputs[0]).long(), inputs[1]) if len(inputs) >= 2 else None,
+    "aten::index_select": lambda inputs: torch.index_select(inputs[0], 0, torch.zeros(inputs[0].shape[0], dtype=torch.long)) if len(inputs) >= 1 else None,
+    "aten::masked_select": lambda inputs: torch.masked_select(inputs[0], torch.ones_like(inputs[0], dtype=torch.bool)) if len(inputs) >= 1 else None,
+    
+    # Conditional operations
+    "aten::where": lambda inputs: torch.where(inputs[0], inputs[1], inputs[2]) if len(inputs) >= 3 else None,
+    
+    # Additional normalization
+    "aten::batch_norm": lambda inputs: torch.nn.functional.batch_norm(inputs[0], torch.zeros(inputs[0].shape[1]), torch.ones(inputs[0].shape[1])) if len(inputs) >= 1 else None,
+    
+    # Additional activation
+    "aten::elu": lambda inputs: torch.nn.functional.elu(inputs[0]),
+    "aten::leaky_relu": lambda inputs: torch.nn.functional.leaky_relu(inputs[0]),
+    
+    # Additional reshape
+    "aten::squeeze": lambda inputs: inputs[0].squeeze(),
+    "aten::unsqueeze": lambda inputs: inputs[0].unsqueeze(0),
+    "aten::expand": lambda inputs: inputs[0].expand(inputs[0].shape),
+    "aten::repeat": lambda inputs: inputs[0].repeat(1),
+    
+    # Additional copy
+    "aten::detach": lambda inputs: inputs[0].detach(),
+    
+    # Additional embedding
+    "aten::embedding_bag": lambda inputs: torch.nn.functional.embedding_bag(inputs[0].long() % 1000, torch.randn(1000, inputs[1].shape[-1] if len(inputs) > 1 else 768)) if len(inputs) >= 1 else None,
 }
 
 def is_op_supported(aten_op_name: str) -> bool:

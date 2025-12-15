@@ -11,12 +11,56 @@ baremetal/output/bm_vs_framework_report.json.
 import json
 import os
 import sys
+import statistics
 from collections import defaultdict
 from typing import Any, Dict, List
 
 import matplotlib.pyplot as plt
 
 from soda.common import utils, print_utils
+
+# Hardcoded null kernel T_sys baselines (μs) by GPU architecture
+# Measured from baremetal profiling with minimal CUDA kernel
+NULL_KERNEL_SYS_TAX = {
+    "H100": 4.51,
+    "H200": 4.30,
+    "DEFAULT": 4.50,  # Fallback for unknown GPUs
+}
+
+def get_gpu_architecture() -> str:
+    """
+    Get the GPU architecture name from CUDA device properties.
+    
+    Returns:
+        GPU architecture string (e.g., "H100", "H200", "A100")
+    """
+    try:
+        import torch
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0).upper()
+            if "H100" in gpu_name:
+                return "H100"
+            elif "H200" in gpu_name:
+                return "H200"
+            elif "A100" in gpu_name:
+                return "A100"
+            elif "GB200" in gpu_name:
+                return "GB200"
+    except Exception:
+        pass
+    return "DEFAULT"
+
+
+def get_null_kernel_sys_tax() -> float:
+    """
+    Get the null kernel's system launch tax (hardcoded by GPU architecture).
+    
+    Returns:
+        T_sys for null kernel in microseconds
+    """
+    gpu_arch = get_gpu_architecture()
+    return NULL_KERNEL_SYS_TAX.get(gpu_arch, NULL_KERNEL_SYS_TAX["DEFAULT"])
+
 
 def load_pytorch_results(pytorch_file: str) -> Dict[str, Any]:
     """Load PyTorch GEMM sequences."""
@@ -131,7 +175,13 @@ def generate_framework_summary(show_table: bool = True, include_all_kernels: boo
         fo = py_tax + aten_xlat_tax + launch_tax
         kernel_type = "GEMM" if is_gemm else "other"
         kernel_name = job_result["kernel"]
-        kernel_display = kernel_name[:20] + "..." if len(kernel_name) > 20 else kernel_name
+        kernel_display = kernel_name[:40] + "..." if len(kernel_name) > 40 else kernel_name
+
+        kernel_display = kernel_name[:40] + "..." if len(kernel_name) > 40 else kernel_name
+        
+        # Truncate ATen op name slightly if too long, but keep it readable
+        aten_op = job_result["aten_op"]
+        aten_display = aten_op[:25] + "..." if len(aten_op) > 25 else aten_op 
 
         framework_summary_table.append([
             job_id,
@@ -161,6 +211,7 @@ def generate_framework_summary(show_table: bool = True, include_all_kernels: boo
 
 def generate_baremetal_summary(show_table: bool = True):
     """Per GEMM Baremetal Overhead (μs)"""
+    # NOTE: This function is kept for compatibility but might not be used if baremetal is disabled
     def fmt_val(v):
         return None if v is None else f"{v:.2f}"
 
@@ -217,51 +268,40 @@ def generate_final_summary(show_table: bool = True, include_all_kernels: bool = 
                 if job_id not in pytorch_results:
                     pytorch_results[job_id] = result
 
-    # Load baremetal results (GEMM only)
-    baremetal_file = utils.get_path("BAREMETAL_GEMM_KERNELS")
-    baremetal_results = {}
-    if os.path.exists(baremetal_file):
-        baremetal_results = load_baremetal_results(baremetal_file)
-
+    # NOTE: Baremetal loading removed for T_cuda calculation, but kept here for structure compatibility
+    # if needed for other fields. For now, we rely on PyTorch data.
+    
     print(f"Loaded {len(pytorch_results)} PyTorch sequences")
-    print(f"Loaded {len(baremetal_results)} baremetal sequences")
 
     final_summary_table = []
     final_summary_data = []
-    all_job_ids = sorted(set(pytorch_results.keys()) | set(baremetal_results.keys()))
+    all_job_ids = sorted(pytorch_results.keys())
 
     for job_id in all_job_ids:
         fw = pytorch_results.get(job_id)
-        bm = baremetal_results.get(job_id)
-
+        
         py = fw["py_tax"] if fw else None
         aten_xlat = fw["aten_xlat_tax"] if fw else None
         sys_fw = fw["launch_tax"] if fw else None
         is_gemm = fw.get("is_gemm", False) if fw else False
 
-        culib_xlat = bm["culib_xlat_tax"] if bm else None
-        shim = bm["shim_tax"] if bm else None
-        sys_bm = bm["launch_tax"] if bm else None
+        # Baremetal fields are None since we disabled dependency
+        culib_xlat = None
+        shim = None
+        sys_bm = None
+        setup = None
+        heur = None
 
-        setup = bm["culib_setup"] if bm else None
-        heur = bm["culib_heur"] if bm else None
+        sys = sys_fw
 
-        sys = sys_bm if sys_bm is not None else sys_fw
-
-        kernel_name = fw["kernel"] if fw else (bm["kernel"] if bm else None)
+        kernel_name = fw["kernel"] if fw else None
         aten_op_name = fw["aten_op"] if fw else None
         freq = fw["freq"] if fw else None
 
-        # Calculate T_aten (framework ATen overhead minus cuBLASLt translation)
+        # T_aten is not calculated here anymore (done in summarize via baseline)
         aten = None
-        if aten_xlat is not None and culib_xlat is not None:
-            aten = aten_xlat - culib_xlat
 
         # Framework overhead calculations
-        fo_bm = None
-        if all(x is not None for x in (py, aten, setup, heur, shim, sys)):
-            fo_bm = py + aten + setup + heur + shim + sys
-
         fo_fw = None
         if all(x is not None for x in (py, aten_xlat, sys_fw)):
             fo_fw = py + aten_xlat + sys_fw
@@ -274,8 +314,8 @@ def generate_final_summary(show_table: bool = True, include_all_kernels: bool = 
             "kernel": kernel_name,
             "kernel_type": kernel_type,
             "is_gemm": is_gemm,
-            "T_fo": fo_bm if fo_bm is not None else fo_fw,
-            "T_fo_bm": fo_bm,
+            "T_fo": fo_fw,
+            "T_fo_bm": None,
             "T_fo_fw": fo_fw,
             "T_py": py,
             "T_aten_xlat": aten_xlat,  
@@ -292,20 +332,14 @@ def generate_final_summary(show_table: bool = True, include_all_kernels: bool = 
 
         kernel_display = kernel_name[:15] + "..." if kernel_name and len(kernel_name) > 15 else kernel_name
         
-        # Use T_aten if available (GEMM with baremetal), else T_aten_xlat
-        aten_display = aten if aten is not None else aten_xlat
-
         final_summary_table.append([
             job_id,
             aten_op_name,
             kernel_display,
             kernel_type,
-            fmt_val(fo_bm if fo_bm is not None else fo_fw),
+            fmt_val(fo_fw),
             fmt_val(py),
-            fmt_val(aten_display),
-            fmt_val(setup),
-            fmt_val(heur),
-            fmt_val(shim),
+            fmt_val(aten_xlat),
             fmt_val(sys),
             freq,
         ])
@@ -315,18 +349,16 @@ def generate_final_summary(show_table: bool = True, include_all_kernels: bool = 
             title="Framework Tax Break (μs) - All Kernels",
             headers=[
                 "ID", "ATen op", "Kernel", "Type",
-                "T_fo", "T_py", "T_aten*",
-                "T_lib_setup", "T_lib_heur", "T_lib_shim",
+                "T_fo", "T_py", "T_aten_xlat",
                 "T_sys", "freq"
             ],
             data=final_summary_table,
         )
         print("Notes:")
-        print(" * Type: GEMM (full breakdown) or other (partial - no baremetal comparison)")
+        print(" * Type: GEMM or other")
         print(" * T_fo: framework overhead")
         print(" * T_py: python xlat tax; torch_op -> aten_op")
-        print(" * T_aten*: For GEMM: T_aten_xlat - T_lib_xlat; For others: T_aten_xlat (no breakdown)")
-        print(" * T_lib_*: cuBLASLt components (GEMM only)")
+        print(" * T_aten_xlat: ATen dispatch + potential library overhead")
         print(" * T_sys: kernel launch tax; launch -> kernel")
 
     return final_summary_data
@@ -336,16 +368,6 @@ def plot_per_kernel_taxbreak(final_summary_data: List[Dict], title_suffix: str):
     """Plot stacked bar chart for all kernels."""
     output_path = utils.get_path("TAX_BREAK_PLOT")
 
-    # Full components (GEMM with baremetal)
-    full_components = [
-        ("T_py", "#4e79a7"),
-        ("T_aten", "#59a14f"),
-        ("T_lib_setup", "#f28e2c"),
-        ("T_lib_heur", "#e15759"),
-        ("T_lib_shim", "#edc949"),
-        ("T_sys", "#af7aa1"),
-    ]
-    
     # PyTorch-only components (non-GEMM or fallback)
     pytorch_components = [
         ("T_py", "#4e79a7"),
@@ -362,17 +384,11 @@ def plot_per_kernel_taxbreak(final_summary_data: List[Dict], title_suffix: str):
         
         is_gemm = row.get("is_gemm", False)
         
-        if is_gemm:
-            vals = [row.get(name) for name, _ in full_components]
-            if all(v is not None for v in vals):
-                gemm_entries.append((row["id"], row["kernel"], vals, full_components))
+        vals = [row.get(name) for name, _ in pytorch_components]
+        if all(v is not None for v in vals):
+            if is_gemm:
+                gemm_entries.append((row["id"], row["kernel"], vals, pytorch_components))
             else:
-                vals = [row.get(name) for name, _ in pytorch_components]
-                if all(v is not None for v in vals):
-                    gemm_entries.append((row["id"], row["kernel"], vals, pytorch_components))
-        else:
-            vals = [row.get(name) for name, _ in pytorch_components]
-            if all(v is not None for v in vals):
                 non_gemm_entries.append((row["id"], row["kernel"], vals, pytorch_components))
 
     all_entries = gemm_entries + non_gemm_entries
@@ -423,76 +439,165 @@ def plot_per_kernel_taxbreak(final_summary_data: List[Dict], title_suffix: str):
     plt.close(fig)
     print(f"Saved per-kernel taxbreak plot to {output_path}")
 
+
+def get_derived_aten_baseline(final_summary_data: List[Dict[str, Any]]) -> float:
+    """
+    Derive baseline ATen dispatch cost (T_aten_base) from non-GEMM kernels.
+    Non-GEMM kernels (elementwise, etc.) represent pure dispatch without library overhead.
+    We use the median T_aten_xlat of these kernels as the baseline.
+    """
+    non_gemm_vals = []
+    for row in final_summary_data:
+        # Filter for non-GEMM kernels that have valid timing data
+        if (not row.get("is_gemm", False) and 
+            row.get("T_aten_xlat") is not None and 
+            row.get("T_aten_xlat") > 0.1):
+            non_gemm_vals.append(row["T_aten_xlat"])
+    
+    if not non_gemm_vals:
+        # Fallback if no non-GEMM kernels found (unlikely in real models)
+        return 2.0 
+        
+    return statistics.median(non_gemm_vals)
+
 def summarize(model: str, precision: str, include_all_kernels: bool = False):
     """
     Main reporting function.
-    
-    Args:
-        model: Model name for plot title
-        precision: Precision for plot title  
-        include_all_kernels: If True, include non-GEMM kernels in the report
+    Uses derived baseline subtraction for T_cuda calculation (no baremetal dependency).
     """
+    # Generate framework summary only (baremetal summary is skipped/optional)
     generate_framework_summary(show_table=True, include_all_kernels=include_all_kernels)
-    generate_baremetal_summary(show_table=True)
+    
+    # We still generate the final summary data structure from framework traces
     final_summary_data = generate_final_summary(show_table=True, include_all_kernels=include_all_kernels)
 
-    # --- Calculate Total Structural Overhead with Breakdown ---
-    # T_structural_total = Σ (T_fo[k] × freq[k])
-    # Decomposed: ΔFT + ΔCT + ΔKT
+    # Get null kernel T_sys as baseline (hardcoded)
+    t_sys_null = get_null_kernel_sys_tax()
+    gpu_arch = get_gpu_architecture()
+    
+    # --- Step 1: Derive Baseline ATen Dispatch (T_aten_base) ---
+    t_aten_base = get_derived_aten_baseline(final_summary_data)
+    
+    print(f"GPU Architecture: {gpu_arch}")
+    print(f"Null kernel T_sys baseline: {t_sys_null:.3f} μs (hardcoded)")
+    print(f"Derived T_aten_base:        {t_aten_base:.3f} μs (median of non-GEMM T_aten_xlat)")
+
+    # --- Step 2: Calculate Total Structural Overhead with Breakdown ---
     total_structural_overhead_us = 0.0
-    total_FT_us = 0.0  # Framework Translation (T_py)
-    total_CT_us = 0.0  # Compute Translation (T_aten_xlat)
-    total_KT_us = 0.0  # Kernel Launch Tax (T_sys)
+    total_FT_us = 0.0      # Framework Translation (T_py)
+    total_CT_us = 0.0      # Compute Translation (T_aten_base or T_aten_xlat)
+    total_KT_us = 0.0      # Kernel Launch Tax (T_sys)
+    total_CudaT_us = 0.0   # CUDA Translation Tax (Calculated)
+    total_LibT_us = 0.0    # Library overhead (placeholder)
     total_invocations = 0
+    gemm_invocations = 0
+    non_gemm_invocations = 0
     
     for row in final_summary_data:
-        t_fo = row.get("T_fo")
-        t_py = row.get("T_py")
-        t_aten_xlat = row.get("T_aten_xlat")
-        t_sys = row.get("T_sys")
-        freq = row.get("freq") or 0
-        
-        if t_fo is not None and freq > 0:
-            total_structural_overhead_us += (t_fo * freq)
-            total_invocations += freq
+        freq = row.get("freq")
+        if freq is None:
+            continue
             
-            # Accumulate breakdown components
-            if t_py is not None:
-                total_FT_us += (t_py * freq)
-            if t_aten_xlat is not None:
-                total_CT_us += (t_aten_xlat * freq)
-            if t_sys is not None:
-                total_KT_us += (t_sys * freq)
-
-    summary_path = utils.get_path("TAX_BREAK_SUMMARY")
-    utils.save_json(
-        summary_path,
-        {
-            "summary": {
-                "count": len(final_summary_data),
-                "gemm_count": sum(1 for d in final_summary_data if d.get("is_gemm", False)),
-                "non_gemm_count": sum(1 for d in final_summary_data if not d.get("is_gemm", False)),
-                "total_invocations": total_invocations,
-                "total_structural_overhead_us": total_structural_overhead_us,
-                # Breakdown
-                "total_FT_us": total_FT_us,   # ΔFT: Python translation
-                "total_CT_us": total_CT_us,   # ΔCT: Compute translation  
-                "total_KT_us": total_KT_us,   # ΔKT: Kernel launch
-            },
-            "data": final_summary_data,
-        },
-    )
-    print(f"Saved taxbreak summary to {summary_path}")
-
-    # Print the aggregate result with breakdown
-    print(f"\n=== Structural (Orchestrator) Overhead ===")
-    print(f"T_structural_total = Σ (T_fo × freq) = {total_structural_overhead_us/1000:.2f} ms")
-    print(f"  ├─ ΔFT (Python Translation)  = Σ (T_py × freq)        = {total_FT_us/1000:.2f} ms")
-    print(f"  ├─ ΔCT (Compute Translation) = Σ (T_aten_xlat × freq) = {total_CT_us/1000:.2f} ms")
-    print(f"  └─ ΔKT (Kernel Launch)       = Σ (T_sys × freq)       = {total_KT_us/1000:.2f} ms")
+        total_invocations += freq
+        
+        # Get components (default to 0.0)
+        t_fo = row.get("T_fo") or 0.0
+        t_py = row.get("T_py") or 0.0
+        t_sys = row.get("T_sys") or row.get("T_sys_fw") or 0.0
+        t_aten_xlat = row.get("T_aten_xlat") or 0.0
+        
+        is_gemm = row.get("is_gemm", False)
+        
+        # --- Step 3: Apply Subtraction Formula ---
+        if is_gemm:
+            # GEMM Kernel: Calculate T_cuda
+            # Formula: T_cuda = T_fo - T_py - T_aten_base - T_sys
+            # (Note: T_fo ≈ T_py + T_aten_xlat + T_sys, so this is equivalent to:
+            #  T_cuda = T_aten_xlat - T_aten_base)
+            
+            # We use the component-based formula for clarity:
+            # T_cuda = T_aten_xlat - T_aten_base
+            # (Since T_aten_xlat includes both pure dispatch + library overhead)
+            
+            raw_cuda = t_aten_xlat - t_aten_base
+            t_cuda = max(0.0, raw_cuda)
+            
+            # For GEMM, "Compute Translation" is the baseline dispatch cost
+            t_ct = t_aten_base
+            
+            gemm_invocations += freq
+        else:
+            # Non-GEMM: Pure dispatch, no library overhead
+            t_cuda = 0.0
+            # For non-GEMM, "Compute Translation" is the full measured cost
+            t_ct = t_aten_xlat
+            
+            non_gemm_invocations += freq
+        
+        # Store calculated T_cuda back to row
+        row["T_cuda"] = t_cuda
+        
+        # Aggregate with frequency
+        total_structural_overhead_us += t_fo * freq
+        total_FT_us += t_py * freq
+        total_CT_us += t_ct * freq
+        total_KT_us += t_sys * freq
+        total_CudaT_us += t_cuda * freq
+        # LibT is 0.0 in this calculation method (absorbed into CudaT or ignored)
+    
+    # Convert to ms for display
+    total_structural_overhead_ms = total_structural_overhead_us / 1000.0
+    total_FT_ms = total_FT_us / 1000.0
+    total_CT_ms = total_CT_us / 1000.0
+    total_KT_ms = total_KT_us / 1000.0
+    total_CudaT_ms = total_CudaT_us / 1000.0
+    
+    # Print structural overhead summary
+    print()
+    print("=== Structural (Orchestrator) Overhead ===")
+    print(f"T_structural_total = Σ (T_fo × freq) = {total_structural_overhead_ms:.3f} ms")
+    print(f"  ├─ ΔFT   (Python Translation)   = Σ (T_py × freq)        = {total_FT_ms:.3f} ms")
+    print(f"  ├─ ΔCT   (Compute Translation)  = Σ (T_ct × freq)        = {total_CT_ms:.3f} ms")
+    print(f"  ├─ ΔCudaT (CUDA Translation)    = Σ (T_cuda × freq)      = {total_CudaT_ms:.3f} ms")
+    print(f"  └─ ΔKT   (Kernel Launch)        = Σ (T_sys × freq)       = {total_KT_ms:.3f} ms")
     print(f"  (Aggregated over {total_invocations} kernel invocations)")
-
-    model = model or "<unknown_model>"
-    precision = precision or "<unknown_precision>"
-    title_suffix = f"{model} [{precision}]"
-    plot_per_kernel_taxbreak(final_summary_data, title_suffix=title_suffix)
+    print()
+    print("Calculation Method (No Baremetal):")
+    print(f"  1. T_aten_base = Median(T_aten_xlat of non-GEMM kernels) = {t_aten_base:.3f} μs")
+    print(f"  2. GEMM:     T_cuda = max(0, T_aten_xlat - T_aten_base)")
+    print(f"  3. Non-GEMM: T_cuda = 0.0")
+    print()
+    print("Kernel Breakdown:")
+    print(f"  * GEMM invocations:     {gemm_invocations}")
+    print(f"  * Non-GEMM invocations: {non_gemm_invocations}")
+    
+    # Save to JSON
+    summary_path = utils.get_path("TAX_BREAK_SUMMARY")
+    summary_data = {
+        "gpu_architecture": gpu_arch,
+        "t_aten_base_us": t_aten_base,
+        "T_structural_total_ms": total_structural_overhead_ms,
+        "breakdown": {
+            "FT_python_ms": total_FT_ms,
+            "CT_aten_ms": total_CT_ms,
+            "CudaT_cuda_runtime_ms": total_CudaT_ms,
+            "KT_kernel_launch_ms": total_KT_ms,
+        },
+        "formula": {
+            "T_cuda_gemm": "max(0, T_aten_xlat - T_aten_base)",
+            "T_cuda_non_gemm": "0.0",
+            "T_aten_base": "Median(Non-GEMM T_aten_xlat)"
+        },
+        "invocations": {
+            "total": total_invocations,
+            "gemm": gemm_invocations,
+            "non_gemm": non_gemm_invocations,
+        },
+        "per_kernel": final_summary_data,
+    }
+    utils.save_json(summary_path, summary_data)
+    print(f"\nSaved taxbreak summary to {summary_path}")
+    
+    # Plot
+    plot_per_kernel_taxbreak(final_summary_data, f"{model} | {precision}")
+    print("=== TaxBreak Report ===")
