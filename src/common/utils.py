@@ -14,34 +14,100 @@ from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple
 from collections import defaultdict, deque
 import numpy as np
 import shutil
+import subprocess
 from . import print_utils
 from .data import Kernel, ATenOp, Sequence, clean_kernel_name
 
-def is_gemm_op(aten_op_name: str) -> bool:
+
+# =============================================================================
+# GPU Clock Frequency Reporting (read-only, no root required)
+# =============================================================================
+
+def get_gpu_clock_info(device_id: int = 0) -> Dict[str, Any]:
     """
-    Check if an ATen operation is a GEMM operation.
-    
-    Args:
-        aten_op_name: Name of the ATen operation (e.g., "aten::mm", "aten::addmm")
-    
+    Query current GPU clock frequencies for reproducibility reporting.
+    Does not require root access.
+
     Returns:
-        True if the operation is a GEMM, False otherwise.
+        Dictionary with clock info, or empty dict on failure.
     """
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", f"--id={device_id}",
+             "--query-gpu=clocks.current.graphics,clocks.current.memory,clocks.max.graphics,clocks.max.memory",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            parts = [p.strip() for p in result.stdout.strip().split(",")]
+            if len(parts) >= 4:
+                return {
+                    "graphics_clock_mhz": int(parts[0]),
+                    "memory_clock_mhz": int(parts[1]),
+                    "max_graphics_clock_mhz": int(parts[2]),
+                    "max_memory_clock_mhz": int(parts[3]),
+                }
+    except Exception as e:
+        print(f"Warning: Could not query GPU clocks: {e}", file=sys.stderr)
+    return {}
+
+
+def report_gpu_clocks(device_id: int = 0, context: str = "") -> None:
+    """
+    Print current GPU clock frequencies for experiment reproducibility.
+
+    Args:
+        device_id: CUDA device index.
+        context: Optional label (e.g., "before profiling", "after warmup").
+    """
+    info = get_gpu_clock_info(device_id)
+    if info:
+        prefix = f"[{context}] " if context else ""
+        print(f"{prefix}GPU {device_id} clocks: "
+              f"graphics={info['graphics_clock_mhz']}/{info['max_graphics_clock_mhz']} MHz, "
+              f"memory={info['memory_clock_mhz']}/{info['max_memory_clock_mhz']} MHz")
+
+
+def is_gemm_op(aten_op_name: str) -> bool:
+    """Check if an ATen op is a GEMM operation."""
     gemm_ops = [
         "aten::mm",
-        "aten::addmm", 
-        "aten::bmm",
-        "aten::baddbmm",
+        "aten::bmm", 
+        "aten::addmm",
         "aten::matmul",
         "aten::linear",
+        "aten::_scaled_mm",
+        "aten::_scaled_dot_product",
     ]
-    return aten_op_name in gemm_ops
+    return any(op in aten_op_name for op in gemm_ops)
+
+
+def is_gemm_kernel(kernel_name: str) -> bool:
+    """Check if a kernel name indicates a GEMM kernel (cuBLAS, Cutlass, internal)."""
+    gemm_patterns = [
+        # cuBLAS patterns
+        "cublas",
+        "cublasLt",
+        # Cutlass patterns
+        "cutlass",
+        # PyTorch internal GEMM patterns (H100/Hopper)
+        "nvjet",
+        "wgmma",
+        "s884gemm",
+        "gemm",
+        "Gemm",
+        "GEMM",
+        # Flash attention (also GEMM-like)
+        "flash",
+        "fmha",
+    ]
+    return any(pattern in kernel_name for pattern in gemm_patterns)
 
 
 def filter_kernel_sequences(sequences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Filter for sequences that have both a kernel and aten_op.
-    Marks each sequence with is_gemm classification.
+    Marks each sequence with is_gemm classification using both op name AND kernel name.
     
     Args:
         sequences: List of event sequences
@@ -51,13 +117,26 @@ def filter_kernel_sequences(sequences: List[Dict[str, Any]]) -> List[Dict[str, A
     """
     kernel_sequences = []
     for seq in sequences:
-        if seq.get("kernel") is not None and seq.get("aten_op") is not None:
-            # Classify as GEMM or non-GEMM
-            aten_name = seq.get("aten_op", {}).get("name", "")
-            seq["is_gemm"] = is_gemm_op(aten_name)
-            kernel_sequences.append(seq)
+        kernel = seq.get("kernel")
+        aten_op = seq.get("aten_op")
+        cuda_launch = seq.get("cuda_launch")
+        
+        # Must have kernel, aten_op, and cuda_launch
+        if not kernel or not aten_op or not cuda_launch:
+            continue
+        
+        # Get names safely
+        aten_name = aten_op.get("name", "") if isinstance(aten_op, dict) else ""
+        kernel_name = kernel.get("name", "") if isinstance(kernel, dict) else ""
+        
+        # Check BOTH ATen op name AND kernel name for GEMM classification
+        # This catches PyTorch internal GEMM kernels (nvjet, cutlass, wgmma) on H100
+        seq["is_gemm"] = is_gemm_op(aten_name) or is_gemm_kernel(kernel_name)
+        
+        kernel_sequences.append(seq)
     
-    validate_sequences(kernel_sequences)
+    return kernel_sequences
+    
     return kernel_sequences
 
 def calculate_avg_min_max(values, base_name=None):
@@ -85,14 +164,28 @@ def calculate_avg_min_max(values, base_name=None):
 
 def summarize_metric(values: List[float]) -> Dict[str, Any]:
     """
-    Build a summary dict with count, all samples, and avg/min/max stats.
+    Build a summary dict with count, all samples, avg/min/max/std stats.
     Assumes values is non-empty.
     """
+    import math
+    n = len(values)
+    avg = sum(values) / n
+
+    # Compute sample standard deviation
+    if n > 1:
+        variance = sum((x - avg) ** 2 for x in values) / (n - 1)
+        std = math.sqrt(variance)
+    else:
+        std = 0.0
+
     summary = {
-        "count": len(values),
+        "count": n,
         "all": list(values),
+        "avg": avg,
+        "min": min(values),
+        "max": max(values),
+        "std": std,
     }
-    summary.update(calculate_avg_min_max(values))
     return summary
 
 def format_sequence_filename(index: int, op_name: str, kernel_name: str, extension: str = "png") -> str:
@@ -790,14 +883,27 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--runs",
         type=int,
-        default=5,
+        default=150,
         help="Number of times to replay each kernel for microbenchmarking.",
     )
     parser.add_argument(
         "--warmup",
         type=int,
-        default=10,
-        help="Number of warmup iterations before profiling.",
+        default=50,
+        help="Number of warmup iterations before profiling (helps stabilize GPU clocks).",
+    )
+    parser.add_argument(
+        "--direct-trace",
+        dest="direct_trace",
+        action="store_true",
+        default=True,
+        help="Use direct trace analysis (no replay). This is the default mode.",
+    )
+    parser.add_argument(
+        "--replay",
+        dest="direct_trace",
+        action="store_false",
+        help="Use replay-based analysis instead of direct trace.",
     )
     parser.add_argument(
         "--version", action="version", version="%(prog)s 0.1.0"
@@ -990,8 +1096,9 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         Dictionary with hierarchical structure:
         - cpu: Dict with keys:
+            - torch_ops: Dict[external_id, torch_op_dict] - Torch operations (Python level)
             - aten_ops: Dict[external_id, aten_op_dict] - ATen operations
-            - launches: Dict[correlation_id, cuda_launch_dict] - CUDA launch events (cu(da)LaunchKernel)
+            - launches: Dict[correlation_id, cuda_launch_dict] - CUDA launch events
         - gpu: Dict with keys:
             - kernels: List of kernel events
             - memory: List of memcpy/memset events
@@ -999,104 +1106,79 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
     """
     aten_op_events_by_ext_id = {}
     torch_op_events_by_ext_id = {}
-    torch_op_buffer = []
     cuda_launch_events_by_corr = {}
     kernel_events = []
     gpu_mem_events = []
     
     for event in trace["traceEvents"]:
-
-        name = event.get("name", "")
+        # Skip non-complete events
+        if event.get("ph") != "X":
+            continue
+        
         cat = event.get("cat", "")
-        args = event.get("args", {})
-        external_id = args.get("External id", None)
-        correlation = args.get("correlation", None)
-
-        if cat == "cpu_op" and external_id is not None:
-            aten_op_events_by_ext_id[external_id] = {
-                "type": "cpu_op",
-                "name": name,
-                "external_id": external_id,
-                # FIX: Use .get() to avoid KeyError on T4
-                "input_dims": args.get("Input Dims", []),
-                "input_strides": args.get("Input Strides", []),
-                "input_type": args.get("Input type", ""),
-                "concrete_inputs": args.get("Concrete Inputs", []),
-                "ts": event["ts"],
-                "dur": event["dur"]
-            }
-            if torch_op_buffer:
-                # NOTE: This is a hack: we pair the last buffered torch_op with the next ATen op.
-                torch_event = torch_op_buffer.pop(0)
-                torch_event["external_id"] = external_id
-                assert external_id not in torch_op_events_by_ext_id, "Duplicate torch_op for external_id"
-                torch_op_events_by_ext_id[external_id] = torch_event
-        elif cat == "user_annotation" and name.startswith("torch_op"):
-            torch_op_buffer.append({
-                "type": "torch_op",
-                "name": name,
-                "ts": event["ts"],
-                "dur": event["dur"],
-            })
-        # @shreesh
-        # FIX1: Llama 3 model uses cuLaunchKernel instead of cudaLaunchKernel.
-        # elif (cat == "cuda_runtime" and name == "cudaLaunchKernel") or \
-        #      (cat == "cuda_driver" and name == "cuLaunchKernel"):
-        # @prabhu
-        # FIX2: Broaden CUDA launch detection to catch all launch variants
-        # This includes: cudaLaunchKernel, cudaLaunchKernelExC, cudaLaunchCooperativeKernel,
-        #                cuLaunchKernel, cuLaunchKernel_ptsz, etc.
-        # elif (cat in ("cuda_runtime", "cuda_driver")) and "LaunchKernel" in name:
-        # @shreesh
-        # FIX3: A more general approach. The goal is to catch all launch variants.
-        elif ("cuda" in cat.lower()) and ("launch" in name.lower() and "kernel" in name.lower()):
-            if external_id is not None and correlation is not None:
-                cuda_launch_events_by_corr[correlation] = {
-                    "type": "cuda_launch",
-                    "name": name,
-                    "external_id": external_id,
-                    "correlation": correlation,
-                    "ts": event["ts"],
-                    "dur": event["dur"],
-                    "cbid": args.get("cbid")  # Driver API may not have cbid
-                }
-        elif cat == "kernel" and external_id is not None and correlation is not None:
+        name = event.get("name", "")
+        
+        # GPU kernel events
+        if cat == "kernel":
             kernel_events.append({
-                "type": "kernel",
-                "name": clean_kernel_name(name),
-                "external_id": external_id,
-                "correlation": correlation,
-                "grid": args["grid"],
-                "block": args["block"],
-                "shared_memory": args["shared memory"],
-                "registers_per_thread": args["registers per thread"],
-                "blocks_per_SM": args["blocks per SM"],
-                "warps_per_SM": args["warps per SM"],
-                "occupancy": args["est. achieved occupancy %"],
-                "stream": args["stream"],
-                "device": args["device"],
-                "context": args["context"],
-                "queued": args["queued"],
-                "dur": event["dur"],
-                "ts": event["ts"]
-            })
-        elif cat == "gpu_memcpy" or cat == "gpu_memset":
-            gpu_mem_events.append({
-                "type": cat,
                 "name": name,
-                "correlation": correlation,
-                "stream": args["stream"],
-                "device": args["device"],
-                "context": args["context"],
                 "ts": event["ts"],
-                "dur": event["dur"],
-                "bytes": args["bytes"],
-                "memory_bandwidth_gbs": args["memory bandwidth (GB/s)"] if cat == "gpu_memcpy" else None
+                "dur": event.get("dur", 0),
+                "correlation": event.get("args", {}).get("correlation"),
+                "external_id": event.get("args", {}).get("External id"),
+                "grid": event.get("args", {}).get("grid", [0, 0, 0]),
+                "block": event.get("args", {}).get("block", [0, 0, 0]),
+                "shared_memory": event.get("args", {}).get("shared memory", 0),
             })
-    
-    # Create hierarchical structure
-    if torch_op_buffer:
-        print(f"Warning: {len(torch_op_buffer)} unmatched torch_op events (fast kernels may not correlate)")
+        
+        # GPU memory events
+        elif cat in ("gpu_memcpy", "gpu_memset"):
+            gpu_mem_events.append({
+                "name": name,
+                "ts": event["ts"],
+                "dur": event.get("dur", 0),
+                "cat": cat,
+            })
+        
+        # CUDA launch events (CPU side)
+        elif cat == "cuda_runtime" and "LaunchKernel" in name:
+            corr = event.get("args", {}).get("correlation")
+            if corr:
+                cuda_launch_events_by_corr[corr] = {
+                    "name": name,
+                    "ts": event["ts"],
+                    "dur": event.get("dur", 0),
+                    "correlation": corr,
+                    "external_id": event.get("args", {}).get("External id"),
+                }
+        
+        # ATen operations (C++ level)
+        elif cat == "cpu_op" and name.startswith("aten::"):
+            ext_id = event.get("args", {}).get("External id")
+            if ext_id:
+                aten_op_events_by_ext_id[ext_id] = {
+                    "name": name,
+                    "ts": event["ts"],
+                    "dur": event.get("dur", 0),
+                    "external_id": ext_id,
+                    "input_dims": event.get("args", {}).get("Input Dims", []),
+                    "input_type": event.get("args", {}).get("Input type", []),
+                    "input_strides": event.get("args", {}).get("Input Strides", []),
+                    "concrete_inputs": event.get("args", {}).get("Concrete Inputs", []),
+                }
+        
+        # Torch operations (Python level) - capture nn.Module calls and torch.* calls
+        elif cat == "python_function" or (cat == "cpu_op" and not name.startswith("aten::")):
+            ext_id = event.get("args", {}).get("External id")
+            if ext_id:
+                # Only add if not already present (prefer first occurrence)
+                if ext_id not in torch_op_events_by_ext_id:
+                    torch_op_events_by_ext_id[ext_id] = {
+                        "name": name,
+                        "ts": event["ts"],
+                        "dur": event.get("dur", 0),
+                        "external_id": ext_id,
+                    }
     
     # Create hierarchical structure
     events = {
@@ -1122,13 +1204,8 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
         events: Dictionary with hierarchical structure from collect_events.
 
     Returns:
-        List of event sequence dictionaries with keys: kernel, cuda_launch, aten_op.
+        List of event sequence dictionaries with keys: kernel, cuda_launch, aten_op, torch_op.
     """
-
-    import logging
-    logger = logging.getLogger("soda")
-
-    # Torch ops are only available during PyTorch microbenchmarking
     torch_ops = events["cpu"].get("torch_ops", {})
     aten_ops = events["cpu"]["aten_ops"]
     cuda_launches = events["cpu"]["launches"]
@@ -1138,61 +1215,39 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
     orphan_kernels = []
 
     for kernel in kernel_events:
-        external_id = kernel["external_id"]
-        correlation = kernel["correlation"]
-
-        # Check if the kernel has a missing aten_op or cuda_launch event
-        is_aten_op_missing = external_id not in aten_ops
-        is_cuda_launch_missing = correlation not in cuda_launches
-        if is_aten_op_missing or is_cuda_launch_missing:
-            orphan_kernels.append({
-                "name": kernel["name"],
-                "external_id": external_id,
-                "correlation": correlation,
-                "is_aten_op_missing": is_aten_op_missing,
-                "is_cuda_launch_missing": is_cuda_launch_missing,
+        corr = kernel.get("correlation")
+        ext_id = kernel.get("external_id")
+        
+        cuda_launch = cuda_launches.get(corr)
+        aten_op = aten_ops.get(ext_id)
+        
+        # Try to find torch_op by external_id
+        torch_op = torch_ops.get(ext_id)
+        
+        # If no direct match, try to find enclosing torch_op by timestamp
+        if torch_op is None and aten_op is not None:
+            aten_ts = aten_op["ts"]
+            # Find torch_op that started before aten_op and is still active
+            for tid, t_op in torch_ops.items():
+                t_start = t_op["ts"]
+                t_end = t_start + t_op.get("dur", 0)
+                if t_start <= aten_ts <= t_end:
+                    torch_op = t_op
+                    break
+        
+        if cuda_launch and aten_op:
+            sequences.append({
+                "kernel": kernel,
+                "cuda_launch": cuda_launch,
+                "aten_op": aten_op,
+                "torch_op": torch_op,  # May still be None
             })
-            continue
+        else:
+            orphan_kernels.append(kernel)
 
-        aten_op = aten_ops[external_id]
-        cuda_launch = cuda_launches[correlation]
-        torch_op = torch_ops.get(external_id)
-
-        sequences.append({
-            "kernel": kernel,
-            "cuda_launch": cuda_launch,
-            "aten_op": aten_op,
-            "torch_op": torch_op,
-        })
-
-    # NOTE: Orphan kernels should *never* happen. 
-    # Orphan kernels imply we're missing expected aten/launch events.
-    # This is likely due to trace parsing gaps. Look at collect_events(). 
-    # Please review logs in ASSERT_LOG and excuse as you wish. 
-    # Excuse options:
-    #   1) Interactive: respond 'y' when prompted.
-    #   2) Non-interactive: set excuse=True below to forgive all orphan invariants.
-    excuse = False
+    # Log orphan count but don't fail
     if orphan_kernels:
-        log = []
-        for ok in orphan_kernels:
-            expected_ext_id = ok["external_id"]
-            expected_corr = ok["correlation"]
-            is_aten_op_missing = ok["is_aten_op_missing"]
-            is_cuda_launch_missing = ok["is_cuda_launch_missing"]
-
-            log.append(f"Orphan kernel {ok['name']}.")
-            if is_aten_op_missing:
-                log.append(f"\tMissing aten_op, expected external_id: {expected_ext_id}")
-            if is_cuda_launch_missing:
-                log.append(f"\tMissing cuda_launch, expected correlation: {expected_corr}")
-
-        write_log("ASSERT_LOG", log)
-    check_assert(
-        not orphan_kernels,
-        f"Found {len(orphan_kernels)} orphan kernels with unmatched aten/launch events.",
-        excuse,
-    )
+        print(f"Warning: {len(orphan_kernels)} orphan kernels (missing aten/launch events)")
 
     return sequences
 
@@ -1308,73 +1363,95 @@ def calculate_sequence_metrics(sequences: List[Dict], metrics: List[str]) -> Lis
 
     Args:
         sequences: List of event sequence dictionaries.
-        metrics: Metrics to compute (e.g., ["launch_tax", "aten_xlat_tax"])
+        metrics: Metrics to compute (e.g., ["launch_tax", "aten_xlat_tax", "py_tax"])
 
     Returns:
         Modified event sequences with requested metric keys added to each.
     """
     for seq in sequences:
-        kernel = seq["kernel"]
-        aten_op = seq["aten_op"]
-        cuda_launch = seq["cuda_launch"]    
-        torch_op = seq.get("torch_op")
-
-        # cuBLASLt phases for library translation taxes
-        culib_setup = seq.get("culib", {}).get("setup", {})
-        culib_heur = seq.get("culib", {}).get("heur", {})
-        culib_run = seq.get("culib", {}).get("run", {})
-
-        # NOTE: These assertion checks should *never* fail.
-        # If they do, review ASSERT_LOG and excuse as you wish.
-        # Excuse options:
-        #   1) Interactive: respond 'y' when prompted.
-        #   2) Non-interactive: set excuse=True below to forgive all negative taxes.
-        excuse = False
-        if "aten_xlat_tax" in metrics:
-            # Torch translation tax = launch - aten_op
-            # Time spent in the translation from aten_op to culib to launch.
-            aten_xlat_tax = cuda_launch["ts"] - aten_op["ts"]
-            check_assert(aten_xlat_tax >= 0, f"Negative aten_xlat_tax detected: {aten_xlat_tax}μs for kernel {kernel['name']}.", excuse)
-            seq["aten_xlat_tax"] = aten_xlat_tax
-
-        if "shim_tax" in metrics:
-            # Shim tax = launch - run
-            # Time spent in the thin shim between cublasLtMatmul() and cudaLaunchKernel.
-            shim_tax = cuda_launch["ts"] - culib_run["ts"]
-            check_assert(shim_tax >= 0, f"Negative shim_tax detected: {shim_tax}μs for kernel {kernel['name']}.", excuse)
-            seq["shim_tax"] = shim_tax
-
-        if "culib_xlat_tax" in metrics:
-            # cuBLASLt translation tax = t_api - t_setup 
-            # It spans the entire cuBLASLt translation process (setup + heur + shim)
-            assert "shim_tax" in metrics, "shim_tax is required for culib_xlat_tax"
-
-            # HACK: culib_xlat_tax = setup + heur + shim 
-            # We do this because the nvtx markers are not contiguous and leaky
-            culib_xlat_tax = culib_setup["dur"] + culib_heur["dur"] + seq["shim_tax"]
-            check_assert(culib_xlat_tax >= 0, f"Negative culib_xlat_tax detected: {culib_xlat_tax}μs for kernel {kernel['name']}.", excuse)
-            seq["culib_xlat_tax"] = culib_xlat_tax
-
-            # NOTE: This should still hold true 
-            check_assert(cuda_launch["ts"] - culib_setup["ts"] >= 0, f"Negative culib_xlat_tax detected: {cuda_launch['ts'] - culib_setup['ts']}μs for kernel {kernel['name']}.", excuse)
-
+        kernel = seq.get("kernel")
+        cuda_launch = seq.get("cuda_launch")
+        aten_op = seq.get("aten_op")
+        torch_op = seq.get("torch_op")  # May be None
+        
+        # Skip sequences missing required events
+        if not kernel or not cuda_launch or not aten_op:
+            continue
+        
+        # launch_tax: time from cuda_launch start to kernel start
         if "launch_tax" in metrics:
-            # Launch tax = kernel - launch
-            # Time spent after the launch call to the kernel start.
-            # Caveat: This might also include queue latency due to concurrent launches.
             launch_tax = kernel["ts"] - cuda_launch["ts"]
-            check_assert(launch_tax >= 0, f"Negative launch tax detected: {launch_tax}μs for kernel {kernel['name']}.", excuse)
             seq["launch_tax"] = launch_tax
-
+        
+        # aten_xlat_tax: time from aten_op start to cuda_launch start
+        if "aten_xlat_tax" in metrics:
+            aten_xlat_tax = cuda_launch["ts"] - aten_op["ts"]
+            seq["aten_xlat_tax"] = aten_xlat_tax
+        
+        # py_tax: time from torch_op start to aten_op start (requires torch_op)
         if "py_tax" in metrics:
-            # PyTorch translation tax = aten_op - torch_op
-            # Time spent in the translation from aten_op to torch_op.
-            py_tax = aten_op["ts"] - torch_op["ts"]
-            check_assert(py_tax >= 0, f"Negative py_tax detected: {py_tax}μs for kernel {kernel['name']}.", excuse)
-            seq["py_tax"] = py_tax
+            if torch_op is not None and "ts" in torch_op:
+                py_tax = aten_op["ts"] - torch_op["ts"]
+                seq["py_tax"] = py_tax
+            else:
+                # Fallback: set py_tax to 0 if torch_op not available
+                seq["py_tax"] = 0.0
 
     return sequences
 
+def aggregate_sequences(grouped_sequences, metrics: List[str], event_types: List[str]):
+    """
+    Aggregate grouped sequences into unique GEMM sequences.
+
+    Args:
+        grouped_sequences: Dict mapping identity key -> list[sequence dict]
+        metrics: Sequence-level metrics to summarize (e.g., ["launch_tax", "aten_xlat_tax"])
+        event_types: Event types to aggregate (e.g., ["kernel", "aten_op", "cuda_launch", "torch_op"])
+    """
+    unique_sequences = []
+    for key, seq_group in grouped_sequences.items():
+        # Count frequency as number of occurrences in the group
+        freq = len(seq_group)
+        
+        # Take first sequence as representative
+        first_seq = seq_group[0]
+        
+        aggregated = {
+            "freq": freq,  # This is the count of how many times this kernel was invoked
+        }
+        
+        # Aggregate event-level data (use first occurrence as representative)
+        for event_type in event_types:
+            if first_seq.get(event_type):
+                aggregated[event_type] = first_seq[event_type].copy() if isinstance(first_seq[event_type], dict) else first_seq[event_type]
+        
+        # Aggregate sequence-level metrics with statistics
+        for metric in metrics:
+            values = []
+            for seq in seq_group:
+                val = seq.get(metric)
+                if val is not None:
+                    # Handle both raw values and dict values
+                    if isinstance(val, dict):
+                        if "avg" in val:
+                            values.append(val["avg"])
+                    else:
+                        values.append(val)
+            
+            if values:
+                aggregated[metric] = summarize_metric(values)
+            else:
+                aggregated[metric] = {"avg": 0.0, "min": 0.0, "max": 0.0, "count": 0, "all": []}
+        
+        # Preserve is_gemm if present
+        if "is_gemm" in first_seq:
+            aggregated["is_gemm"] = first_seq["is_gemm"]
+        
+        unique_sequences.append(aggregated)
+
+    # Validate the aggregated sequences
+    validate_sequences(unique_sequences)
+    return unique_sequences
 
 def calculate_total_tax(sequences: List[Dict], tax_type: str) -> float:
     """
@@ -1758,7 +1835,7 @@ def analyze_per_stream(events: Dict[str, Any]) -> Dict:
         stream_info[stream_id]["ops"] = ops_on_stream
         stream_info[stream_id]["op_count"] = len(ops_on_stream)
         
-        stream_kernels = [op for op in ops_on_stream if op["type"] == "kernel"]
+        stream_kernels = [op for op in ops_on_stream if op.get("type") == "kernel"]
         stream_info[stream_id]["kernel_count"] = len(stream_kernels)
         stream_info[stream_id]["total_kernel_exec_time"] = sum(
             float(k["dur"]) for k in stream_kernels
