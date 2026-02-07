@@ -212,18 +212,31 @@ public:
     int batch = params.batch;
 
     // Allocate device memory
-    // For batched operations, allocate batch * matrix_size
-    // Size depends on physical layout (row-major vs col-major)
-    // Row-major [M, K] with ld: size = M * ld
-    // Col-major [M, K] with ld: size = K * ld (since ld is stride between
-    // columns)
-    size_A = batch * M * lda * elem_size;
+    // Size depends on physical layout:
+    //   Row-major [rows, cols] with ld=cols: size = rows * ld
+    //   Col-major [rows, cols] with ld=rows: size = cols * ld
+    if (params.order_a == "col") {
+      // Col-major A[M,K]: K columns, each stride lda (>= M)
+      size_A = batch * K * lda * elem_size;
+    } else {
+      // Row-major A[M,K]: M rows, each stride lda (>= K)
+      size_A = batch * M * lda * elem_size;
+    }
     if (params.order_b == "col") {
+      // Col-major B[K,N]: N columns, each stride ldb (>= K)
       size_B = batch * N * ldb * elem_size;
     } else {
+      // Row-major B[K,N]: K rows, each stride ldb (>= N)
       size_B = batch * K * ldb * elem_size;
     }
-    size_C = batch * M * ldc * elem_size;
+    // C is always same order as output (row if any input is row)
+    if (params.order_a == "col" && params.order_b == "col") {
+      // Col-major C[M,N]: N columns, each stride ldc (>= M)
+      size_C = batch * N * ldc * elem_size;
+    } else {
+      // Row-major C[M,N]: M rows, each stride ldc (>= N)
+      size_C = batch * M * ldc * elem_size;
+    }
 
     CHECK_CUDA(cudaMalloc(&d_A, size_A));
     CHECK_CUDA(cudaMalloc(&d_B, size_B));
@@ -700,6 +713,146 @@ void run_gemm(const GemmParams &params, MatBufs &matBufs,
   } // lib scope end
 }
 
+// CUDA event-based timing for ΔCT validation
+struct TimingResult {
+  double setup_us;
+  double heur_us;
+  double run_us;
+  double total_us;
+};
+
+TimingResult run_gemm_timed(const GemmParams &params, MatBufs &matBufs,
+                            WorkspaceBuffer &workspace) {
+  TimingResult result = {0, 0, 0, 0};
+  cudaEvent_t start, after_setup, after_heur, after_run;
+
+  CHECK_CUDA(cudaEventCreate(&start));
+  CHECK_CUDA(cudaEventCreate(&after_setup));
+  CHECK_CUDA(cudaEventCreate(&after_heur));
+  CHECK_CUDA(cudaEventCreate(&after_run));
+
+  // Resources
+  cublasLtHandle_t handle = nullptr;
+  cublasLtMatrixLayout_t A_desc = nullptr;
+  cublasLtMatrixLayout_t B_desc = nullptr;
+  cublasLtMatrixLayout_t C_desc = nullptr;
+  cublasLtMatmulDesc_t matmul_desc = nullptr;
+  cublasLtMatmulPreference_t preference = nullptr;
+  cublasLtMatmulAlgo_t selected_algo{};
+  size_t workspace_size = workspace.bytes;
+  std::vector<cublasLtMatmulHeuristicResult_t> heuristic_results(1);
+  int returned_results = 0;
+
+  cudaDataType_t cuda_dtype = get_cuda_dtype(params.dtype);
+  cublasComputeType_t compute_type = get_compute_type(params.dtype);
+
+  // Record start
+  CHECK_CUDA(cudaEventRecord(start, 0));
+
+  // === SETUP PHASE ===
+  CHECK_CUBLASLT(cublasLtCreate(&handle));
+
+  cublasOperation_t op_A = get_transpose_op(params.trans_a);
+  cublasOperation_t op_B = get_transpose_op(params.trans_b);
+  bool transpose_A = (op_A == CUBLAS_OP_T);
+  bool transpose_B = (op_B == CUBLAS_OP_T);
+
+  CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(
+      &A_desc, cuda_dtype,
+      transpose_A ? params.k : params.m,
+      transpose_A ? params.m : params.k,
+      params.lda));
+
+  CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(
+      &B_desc, cuda_dtype,
+      transpose_B ? params.n : params.k,
+      transpose_B ? params.k : params.n,
+      params.ldb));
+
+  CHECK_CUBLASLT(cublasLtMatrixLayoutCreate(&C_desc, cuda_dtype,
+                                             params.m, params.n, params.ldc));
+
+  // Set matrix order for row-major (same as run_gemm)
+  if (params.order_a == "row" || params.order_b == "row") {
+    cublasLtOrder_t order_a =
+        (params.order_a == "col") ? CUBLASLT_ORDER_COL : CUBLASLT_ORDER_ROW;
+    cublasLtOrder_t order_b =
+        (params.order_b == "col") ? CUBLASLT_ORDER_COL : CUBLASLT_ORDER_ROW;
+    cublasLtOrder_t order_c = CUBLASLT_ORDER_ROW;  // Output is always row-major
+
+    CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(
+        A_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &order_a, sizeof(order_a)));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(
+        B_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &order_b, sizeof(order_b)));
+    CHECK_CUBLASLT(cublasLtMatrixLayoutSetAttribute(
+        C_desc, CUBLASLT_MATRIX_LAYOUT_ORDER, &order_c, sizeof(order_c)));
+  }
+
+  CHECK_CUBLASLT(cublasLtMatmulDescCreate(&matmul_desc, compute_type, cuda_dtype));
+  CHECK_CUBLASLT(cublasLtMatmulDescSetAttribute(
+      matmul_desc, CUBLASLT_MATMUL_DESC_TRANSA, &op_A, sizeof(op_A)));
+  CHECK_CUBLASLT(cublasLtMatmulDescSetAttribute(
+      matmul_desc, CUBLASLT_MATMUL_DESC_TRANSB, &op_B, sizeof(op_B)));
+
+  CHECK_CUBLASLT(cublasLtMatmulPreferenceCreate(&preference));
+  CHECK_CUBLASLT(cublasLtMatmulPreferenceSetAttribute(
+      preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspace_size,
+      sizeof(workspace_size)));
+
+  CHECK_CUDA(cudaEventRecord(after_setup, 0));
+
+  // === HEURISTIC PHASE ===
+  CHECK_CUBLASLT(cublasLtMatmulAlgoGetHeuristic(
+      handle, matmul_desc, A_desc, B_desc, C_desc, C_desc, preference,
+      1, heuristic_results.data(), &returned_results));
+
+  if (returned_results == 0) {
+    std::cerr << "Error: No cuBLASLt algorithm found" << std::endl;
+    return result;
+  }
+  selected_algo = heuristic_results[0].algo;
+
+  CHECK_CUDA(cudaEventRecord(after_heur, 0));
+
+  // === RUN PHASE ===
+  float alpha = params.alpha;
+  float beta = params.beta;
+
+  CHECK_CUBLASLT(cublasLtMatmul(
+      handle, matmul_desc, &alpha, matBufs.d_A, A_desc, matBufs.d_B, B_desc,
+      &beta, matBufs.d_C, C_desc, matBufs.d_C, C_desc, &selected_algo,
+      workspace.ptr, workspace_size, 0));
+
+  CHECK_CUDA(cudaEventRecord(after_run, 0));
+  CHECK_CUDA(cudaEventSynchronize(after_run));
+
+  // Get timing
+  float setup_ms, heur_ms, run_ms;
+  CHECK_CUDA(cudaEventElapsedTime(&setup_ms, start, after_setup));
+  CHECK_CUDA(cudaEventElapsedTime(&heur_ms, after_setup, after_heur));
+  CHECK_CUDA(cudaEventElapsedTime(&run_ms, after_heur, after_run));
+
+  result.setup_us = setup_ms * 1000.0;
+  result.heur_us = heur_ms * 1000.0;
+  result.run_us = run_ms * 1000.0;
+  result.total_us = result.setup_us + result.heur_us + result.run_us;
+
+  // Cleanup
+  CHECK_CUBLASLT(cublasLtMatmulPreferenceDestroy(preference));
+  CHECK_CUBLASLT(cublasLtMatmulDescDestroy(matmul_desc));
+  CHECK_CUBLASLT(cublasLtMatrixLayoutDestroy(C_desc));
+  CHECK_CUBLASLT(cublasLtMatrixLayoutDestroy(B_desc));
+  CHECK_CUBLASLT(cublasLtMatrixLayoutDestroy(A_desc));
+  CHECK_CUBLASLT(cublasLtDestroy(handle));
+
+  CHECK_CUDA(cudaEventDestroy(start));
+  CHECK_CUDA(cudaEventDestroy(after_setup));
+  CHECK_CUDA(cudaEventDestroy(after_heur));
+  CHECK_CUDA(cudaEventDestroy(after_run));
+
+  return result;
+}
+
 int main(int argc, char **argv) {
   GemmParams params;
   parse_args(argc, argv, params);
@@ -730,9 +883,46 @@ int main(int argc, char **argv) {
   for (int i = 0; i < params.warmup; i++) {
     run_gemm(params, matBufs, workspace, "cold");
   }
-  // Measurement iterations
+
+  // Measurement iterations with timing
+  std::vector<TimingResult> timings;
+  timings.reserve(params.runs);
+
   for (int i = 0; i < params.runs; i++) {
-    run_gemm(params, matBufs, workspace, "hot");
+    TimingResult t = run_gemm_timed(params, matBufs, workspace);
+    timings.push_back(t);
   }
+
+  // Compute statistics
+  double sum_setup = 0, sum_heur = 0, sum_run = 0, sum_total = 0;
+  for (const auto &t : timings) {
+    sum_setup += t.setup_us;
+    sum_heur += t.heur_us;
+    sum_run += t.run_us;
+    sum_total += t.total_us;
+  }
+
+  int n = timings.size();
+  double mean_setup = sum_setup / n;
+  double mean_heur = sum_heur / n;
+  double mean_run = sum_run / n;
+  double mean_total = sum_total / n;
+
+  // Output results in JSON-like format for easy parsing
+  std::cout << "TIMING_RESULTS_BEGIN" << std::endl;
+  std::cout << "{" << std::endl;
+  std::cout << "  \"m\": " << params.m << "," << std::endl;
+  std::cout << "  \"n\": " << params.n << "," << std::endl;
+  std::cout << "  \"k\": " << params.k << "," << std::endl;
+  std::cout << "  \"dtype\": \"" << params.dtype << "\"," << std::endl;
+  std::cout << "  \"runs\": " << n << "," << std::endl;
+  std::cout << "  \"t_setup_us\": " << mean_setup << "," << std::endl;
+  std::cout << "  \"t_heur_us\": " << mean_heur << "," << std::endl;
+  std::cout << "  \"t_run_us\": " << mean_run << "," << std::endl;
+  std::cout << "  \"t_culib_total_us\": " << (mean_setup + mean_heur) << "," << std::endl;
+  std::cout << "  \"t_total_us\": " << mean_total << std::endl;
+  std::cout << "}" << std::endl;
+  std::cout << "TIMING_RESULTS_END" << std::endl;
+
   return 0;
 }

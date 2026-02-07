@@ -18,7 +18,7 @@ export SODA_EXAMPLES="$SODA_ROOT/examples"
 export SODA_OUTPUT="$SODA_ROOT/output"
 
 # Microbenchmark directories
-export MICROBENCH_DIR="$SODA_SRC/microbench"
+export MICROBENCH_DIR="$SODA_SRC/soda/microbench"
 export BAREMETAL_MICROBENCH_DIR="$MICROBENCH_DIR/baremetal"
 export FRAMEWORK_DIR="$MICROBENCH_DIR/framework"
 export PYTORCH_MICROBENCH_DIR="$FRAMEWORK_DIR/pytorch"
@@ -44,35 +44,43 @@ export ENV_METADATA="env_metadata.json"
 # Experiment directory (set by tracer, DO NOT set manually)
 export EXPERIMENT_DIR=""
 
-# Common data files referenced across scripts (relative to experiment directory)
-export ALL_SEQUENCES="sequences/all_sequences.json"
-export ALL_GEMM_SEQUENCES="sequences/all_gemm_sequences.json"
-export UNIQUE_GEMM_SEQUENCES="sequences/unique_gemm_sequences.json"
-
-# Framework/pytorch
-export PYTORCH_GEMM_SEQUENCES="$PYTORCH_OUTPUT_DIR/pytorch_gemm_profile.json"
-export PYTORCH_TRACES="$PYTORCH_OUTPUT_DIR/traces"
-export PYTORCH_LAUNCH_TAX_GRAPHS="$PYTORCH_OUTPUT_DIR/graphs/launch_tax"
-
-# Baremetal
-export BAREMETAL_JOBS="$BAREMETAL_OUTPUT_DIR/jobs.json"
-export BAREMETAL_GEMM_KERNELS="$BAREMETAL_OUTPUT_DIR/baremetal_gemm_profile.json"
-export BAREMETAL_TRACES="$BAREMETAL_OUTPUT_DIR/traces"
-
-# Tax break files (relative to experiment directory)
-export TAX_BREAK_SUMMARY="microbench/taxbreak.json"
-export TAX_BREAK_PLOT="microbench/taxbreak.png"
-
-# Log files (relative to experiment directory)
-export PYTORCH_VERIFY_LOG="$PYTORCH_OUTPUT_DIR/microbench.log"
-export ASSERT_LOG="assertions.log"
-
 # HuggingFace cache (set default if not already set)
 # export HF_HOME="${HF_HOME:-/tmp/hf_cache_$USER}"
 export HF_HOME="/scratch/$USER/hf_cache"
 
 # Python path setup for imports
 export PYTHONPATH="$SODA_SRC:$PYTHONPATH"
+
+# ============================================================
+# Microbench paths
+# ============================================================
+
+# Raw sequences from trace
+export ALL_SEQUENCES="microbench/all_sequences.json"
+
+# All kernel sequences (GEMM + non-GEMM)
+export ALL_KERNEL_SEQUENCES="microbench/all_kernel_sequences.json"
+export UNIQUE_ALL_SEQUENCES="microbench/unique_all_sequences.json"
+
+# GEMM-only sequences (for baremetal comparison)
+export ALL_GEMM_SEQUENCES="microbench/all_gemm_sequences.json"
+export UNIQUE_GEMM_SEQUENCES="microbench/unique_gemm_sequences.json"
+
+# PyTorch profiling outputs
+export PYTORCH_TRACES="microbench/framework/pytorch/traces"
+export PYTORCH_GEMM_SEQUENCES="microbench/framework/pytorch/output/pytorch_gemm_sequences.json"
+export PYTORCH_ALL_SEQUENCES="microbench/framework/pytorch/output/pytorch_all_sequences.json"
+
+# Baremetal outputs (GEMM only - cuBLAS comparison)
+export BAREMETAL_JOBS="microbench/baremetal/output/jobs.json"
+export BAREMETAL_GEMM_KERNELS="microbench/baremetal/output/baremetal_gemm_kernels.json"
+
+# TaxBreak report outputs
+export TAX_BREAK_SUMMARY="microbench/taxbreak.json"
+export TAX_BREAK_PLOT="microbench/taxbreak_plot.png"
+
+# Logs
+export ASSERT_LOG="microbench/assert.log"
 
 # Helper function to activate Python environment (supports conda or venv)
 activate_env() {

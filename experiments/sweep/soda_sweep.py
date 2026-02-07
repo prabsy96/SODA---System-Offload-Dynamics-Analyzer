@@ -15,7 +15,7 @@ from pathlib import Path
 import torch
 import json 
 from datetime import datetime 
-
+from transformers import AutoConfig
 from soda import ModelTracer, SodaAnalyzer
 from soda.common import utils
 from experiments.sweep.summarize_soda_sweep import summarize as summarize_soda_sweep
@@ -102,13 +102,29 @@ def main() -> None:
 
         run_precision = cfg.get("precision", precision)
 
+        try:
+            model_config = AutoConfig.from_pretrained(model, trust_remote_code=True)
+            max_pos = getattr(model_config, 'max_position_embeddings',
+                    getattr(model_config, 'n_positions',
+                    getattr(model_config, 'n_ctx', float('inf'))))
+        except Exception as e:
+            print(f"Warning: Could not load config for {model}: {e}. Skipping seq_len validation.")
+            max_pos = float('inf')
+
         # Group sweep outputs under a common prefix (model + compile_type + precision)
-        max_tok_str = f"mt{max_new_toks[0]}"  # Use the first value since it's typically a single-element list
+        max_tok_str = f"mt{max_new_toks[0]}"
         sweep_root = Path(os.environ.get("SODA_OUTPUT", "output")) / f"{model.replace('/', '_')}_{compile_type}_{run_precision}_{max_tok_str}_{gpu_suffix}"
         sweep_roots.add(sweep_root)
-        print(f"\n=== Running config: {config_name} ({model})  with precision={run_precision} ===")
+        print(f"\n=== Running config: {config_name} ({model}) with precision={run_precision}, max_pos={max_pos} ===")
 
         for bs, sl, max_new_tokens in product(batch_sizes, seq_lens, max_new_toks):
+            # Before running each sweep point, check if seq_len is valid for this model
+            if sl > max_pos:
+                print(f"Skipping bs={bs}, sl={sl}: exceeds model max_position_embeddings ({max_pos})")
+                continue
+            
+            
+
             print(f"\n\n\n=== Running sweep point: batch_size={bs}, seq_len={sl}, max_new_tokens={max_new_tokens} ===")
             exp_name = utils.generate_experiment_name(model, compile_type, run_precision, bs, sl, max_new_tokens)
             cli_args = [
@@ -119,19 +135,8 @@ def main() -> None:
                 "--max-new-tokens", str(max_new_tokens),
                 "--precision", run_precision,
                 "--compile-type", compile_type,
-                "--device", "cuda",
                 "--device", device,
                 "--warmup", warmup,
-                # Extra parser knobs (fusion + microbench) left at defaults:
-                # "--fusion", "2",
-                # "--prox-score", "1.0",
-                # "--seed", "42",
-                # "--version",
-
-                # NOTE: for SodaAnalyzer
-                # "--microbench", # DONOT use microbench 
-                # "--warmup", "10", # 10 is ok 
-                # "--runs", "5", # This doesn't matter 
             ]
             args = utils.parse_and_validate_args(cli_args)
 
@@ -146,7 +151,7 @@ def main() -> None:
                 if "out of memory" in str(e).lower():
                     print(f"Skipping bs={bs}, sl={sl}, max_new_tokens={max_new_tokens} due to OOM: {e}", file=sys.stderr)
                     
-                    # FIX: Generate a report.json that MATCHES soda.py structure
+                    # Generate a report.json that MATCHES soda.py structure
                     run_output_dir = sweep_root / exp_name
                     run_output_dir.mkdir(parents=True, exist_ok=True)
                     
@@ -178,27 +183,20 @@ def main() -> None:
                     continue
                 raise
 
-    if sweep_roots:
-        print("\n=== Summarizing completed sweep directories ===")
-        for root in sorted(sweep_roots, key=lambda p: str(p)):
-            if not root.exists():
-                print(f"Skipping summary for {root}: path does not exist", file=sys.stderr)
-                continue
-            
-            # Extract max_tok_str from the folder name
-            # e.g., "meta-llama_Llama-3.2-1B_eager_bfloat16_mt10_T4" -> "mt10"
-            folder_name = root.name
-            max_tok_str = None
-            for part in folder_name.split("_"):
-                if part.startswith("mt"):
-                    max_tok_str = part
-                    break
-            
+        # === FIX START: Generate summary immediately after this model finishes ===
+        if sweep_root.exists():
+            print(f"\n=== Generating summary for {sweep_root} ===")
             try:
-                # PASS both gpu_suffix and max_tok_str
-                summarize_soda_sweep(root, gpu_name_override=gpu_suffix, max_tok_override=max_tok_str)
-            except RuntimeError as exc:
-                print(f"Failed to summarize {root}: {exc}", file=sys.stderr)
+                summarize_soda_sweep(sweep_root, gpu_name_override=gpu_suffix)
+                print(f"Summary generated in {sweep_root}/summary")
+            except Exception as e:
+                print(f"Warning: Could not generate summary for {sweep_root}: {e}")
+                import traceback
+                traceback.print_exc()
+        # === FIX END ===
+
+    # Remove the redundant summary blocks at the end of main()
+    print("\n=== Sweep Completed ===")
 
 
 if __name__ == "__main__":

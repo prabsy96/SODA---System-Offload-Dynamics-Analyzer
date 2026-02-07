@@ -84,6 +84,29 @@ def nsys_profile(
         return False, None, result.stderr or result.stdout
 
 
+def to_hashable(obj: Any) -> Any:
+    """
+    Recursively convert an object to a hashable type.
+    
+    - Lists become tuples
+    - Dicts become tuples of (key, value) pairs
+    - Other types are returned as-is
+    
+    Args:
+        obj: Any Python object
+    
+    Returns:
+        Hashable version of the object
+    """
+    if isinstance(obj, list):
+        return tuple(to_hashable(item) for item in obj)
+    elif isinstance(obj, dict):
+        return tuple((k, to_hashable(v)) for k, v in sorted(obj.items()))
+    elif isinstance(obj, set):
+        return frozenset(to_hashable(item) for item in obj)
+    else:
+        return obj
+
 def extract_kernels_sql(trace_file_sql):
     """Extract all kernels from nsys sqlite trace.
     
