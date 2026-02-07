@@ -257,10 +257,10 @@ def generate_jobs(target_sequences: dict):
         job = {
             "id": job_id,
             "name": kernel["name"],
-            "grid": kernel["grid"],
-            "block": kernel["block"],
-            "shared_memory": kernel["shared_memory"],
-            "registers_per_thread": kernel["registers_per_thread"],
+            "grid": kernel.get("grid", [1, 1, 1]),
+            "block": kernel.get("block", [1, 1, 1]),
+            "shared_memory": kernel.get("shared_memory", 0),
+            "registers_per_thread": kernel.get("registers_per_thread", 0),  # Optional field
             "aten_op": aten_op,
             "m": params["m"],
             "n": params["n"],

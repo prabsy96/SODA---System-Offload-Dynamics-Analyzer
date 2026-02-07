@@ -20,6 +20,15 @@ from .data import Kernel, ATenOp, Sequence, clean_kernel_name
 
 
 # =============================================================================
+# TaxBreak Constants (from paper)
+# =============================================================================
+
+# T_floor_sys: Minimum kernel launch latency from nullKernel measurement
+# Source: TaxBreak paper, measured on H100 (~4.5µs)
+T_FLOOR_SYS_MS = 0.0045  # 4.5 microseconds in milliseconds
+
+
+# =============================================================================
 # GPU Clock Frequency Reporting (read-only, no root required)
 # =============================================================================
 
@@ -1803,6 +1812,71 @@ def calculate_framework_tax(
         "T_gpu_busy_percent": t_gpu_busy_percent,
     #    "is_framework_bound": is_framework_bound
     }
+
+
+def calculate_hdbi(
+    total_kernel_exec_time_ms: float,
+    total_xlat_tax_ms: float,
+    num_total_kernels: int,
+) -> Dict[str, Any]:
+    """
+    Calculate HDBI (Host-Device Balance Index) per TaxBreak paper Eq. 6.
+
+    HDBI = T_DeviceActive / (T_DeviceActive + T_Orchestrate)
+
+    Where:
+        T_DeviceActive = Σ(t_k) = sum of kernel execution times
+        T_Orchestrate = Σ(ΔFT + I_lib·ΔCT + ΔKT)
+                      = total_xlat_tax + (num_kernels × T_floor_sys)
+
+    Classification:
+        HDBI ≥ 0.5: device-bound (GPU compute dominates)
+        0.2 ≤ HDBI < 0.5: balanced
+        HDBI < 0.2: host-bound (CPU overhead dominates)
+
+    Args:
+        total_kernel_exec_time_ms: Sum of kernel durations (T_DeviceActive)
+        total_xlat_tax_ms: Sum of ATen translation overhead (ΔFT + ΔCT)
+        num_total_kernels: Number of kernels (for ΔKT calculation)
+
+    Returns:
+        Dictionary containing HDBI metrics and classification.
+    """
+    # T_DeviceActive = sum of kernel execution times
+    t_device_active = total_kernel_exec_time_ms
+
+    # ΔKT = num_kernels × T_floor_sys
+    delta_kt = num_total_kernels * T_FLOOR_SYS_MS
+
+    # T_Orchestrate = xlat_tax (ΔFT + ΔCT) + ΔKT
+    t_orchestrate = total_xlat_tax_ms + delta_kt
+
+    # HDBI = T_DeviceActive / (T_DeviceActive + T_Orchestrate)
+    denominator = t_device_active + t_orchestrate
+    if denominator > 0:
+        hdbi_value = t_device_active / denominator
+    else:
+        hdbi_value = 0.0
+
+    # Clamp to valid range [0, 1]
+    hdbi_value = max(0.0, min(1.0, hdbi_value))
+
+    # Classification per TaxBreak paper
+    if hdbi_value >= 0.5:
+        classification = "device-bound"
+    elif hdbi_value >= 0.2:
+        classification = "balanced"
+    else:
+        classification = "host-bound"
+
+    return {
+        "hdbi_value": hdbi_value,
+        "hdbi_classification": classification,
+        "t_device_active_ms": t_device_active,
+        "t_orchestrate_ms": t_orchestrate,
+        "delta_kt_ms": delta_kt,
+    }
+
 
 def analyze_per_stream(events: Dict[str, Any]) -> Dict:
     """

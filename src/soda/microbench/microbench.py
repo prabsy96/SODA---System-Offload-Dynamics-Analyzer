@@ -16,7 +16,7 @@ from soda.microbench.framework.pytorch.verify import compare_sequences
 from soda.microbench.baremetal.generate import generate_jobs
 from soda.microbench.baremetal.search import search_cublas_algos_offline
 from soda.microbench.baremetal.profile import profile_baremetal_gemm_kernels
-from soda.microbench.baremetal.report import summarize
+from soda.microbench.baremetal.report import summarize, summarize_from_trace_directly
 
 def _nested_to_tuple(obj):
     """Convert nested lists to nested tuples for hashability."""
@@ -91,148 +91,200 @@ def _make_sequence_key(seq_dict):
         ),
     )
 class SodaMicrobench:
-    
+
     def __init__(self, tracer: 'ModelTracer', args):
         self.tracer = tracer
         self.args = args
         self.warmup = args.warmup
         self.runs = args.runs
-    
+
     def extract_unique_gemm_sequences(self) -> Dict[str, Any]:
         """
-        Main pipeline: extract -> save, filter -> save, deduplicate -> save.
-        
+        Extract unique GEMM and non-GEMM sequences from the tracer's collected data.
+
+        This method processes the trace data to identify unique kernel configurations,
+        separating GEMM operations (library-mediated) from non-GEMM operations.
+
         Returns:
-            Dictionary with unique GEMM sequences data.
+            Dictionary containing:
+            - unique_gemm_sequences: Dict with summary and list of unique GEMM sequences
+            - unique_all_sequences: Dict with summary and list of all unique sequences
         """
-        # Calculate launch/xlat taxes for event sequences
-        sequences = utils.calculate_sequence_metrics(list(self.tracer.sequences), metrics=["launch_tax", "aten_xlat_tax"])
+        section = "Extract Unique Sequences"
+        print_utils.section_start(section)
 
-        print("\n[DEBUG] ATen Op Distribution in Trace (Pre-Filter):")
-        from collections import Counter
-        op_counts = Counter()
-        for s in sequences:
-            if s.get("aten_op") and "name" in s["aten_op"]:
-                op_counts[s["aten_op"]["name"]] += 1
-            else:
-                op_counts["<unknown/null>"] += 1
-        
-        for op, count in op_counts.most_common():
-            print(f"  {op}: {count}")
-        print("---------------------------------------------------\n")
+        # Get sequences from tracer
+        sequences = list(self.tracer.sequences)
 
-        # Save all sequences
-        all_sequences_file = utils.get_path("ALL_SEQUENCES")
-        all_sequences_data = {
-            "summary": {"count": len(sequences)},
-            "sequences": sequences
-        }
-        # ============================================================
-        # PATH 1: All kernel sequences (for complete T_structural)
-        # ============================================================
-        all_kernel_sequences = utils.filter_kernel_sequences(sequences)
-        
-        gemm_count = sum(1 for s in all_kernel_sequences if s.get("is_gemm", False))
-        non_gemm_count = len(all_kernel_sequences) - gemm_count
+        # Calculate metrics on all sequences
+        sequences_with_metrics = utils.calculate_sequence_metrics(
+            sequences,
+            metrics=["launch_tax", "aten_xlat_tax", "py_tax"]
+        )
 
-        all_kernel_sequences_file = utils.get_path("ALL_KERNEL_SEQUENCES")
-        all_kernel_data = {
-            "summary": {
-                "count": len(all_kernel_sequences),
-                "gemm_count": gemm_count,
-                "non_gemm_count": non_gemm_count,
-            },
-            "sequences": all_kernel_sequences
-        }
-        utils.save_json(all_kernel_sequences_file, all_kernel_data)
-        print(f"Saved {len(all_kernel_sequences)} kernel sequences to {all_kernel_sequences_file}")
+        # Filter for kernel sequences
+        kernel_sequences = utils.filter_kernel_sequences(sequences_with_metrics)
+
+        gemm_count = sum(1 for s in kernel_sequences if s.get("is_gemm", False))
+        non_gemm_count = len(kernel_sequences) - gemm_count
+
+        print(f"Found {len(kernel_sequences)} kernel sequences in trace:")
         print(f"  - {gemm_count} GEMM sequences")
         print(f"  - {non_gemm_count} non-GEMM sequences")
 
-        # Deduplicate all kernel sequences
-        grouped_all_seqs = utils.group_sequences_by_identity(all_kernel_sequences)
-        unique_all_sequences = utils.aggregate_sequences(
-            grouped_all_seqs,
-            metrics=["launch_tax", "aten_xlat_tax"],
+        # Group by identity and aggregate (deduplicate)
+        grouped_seqs = utils.group_sequences_by_identity(kernel_sequences)
+        unique_sequences = utils.aggregate_sequences(
+            grouped_seqs,
+            metrics=["launch_tax", "aten_xlat_tax", "py_tax"],
             event_types=["kernel", "aten_op", "cuda_launch"],
         )
-        
-        # Preserve is_gemm classification after aggregation
-        for seq in unique_all_sequences:
+
+        # Preserve is_gemm classification and add freq (count) after aggregation
+        for seq in unique_sequences:
             aten_name = seq.get("aten_op", {}).get("name", "")
             seq["is_gemm"] = utils.is_gemm_op(aten_name)
-        
-        unique_gemm_count = sum(1 for s in unique_all_sequences if s.get("is_gemm", False))
-        unique_non_gemm_count = len(unique_all_sequences) - unique_gemm_count
-        
+            # freq is used by replay profiling for matching
+            seq["freq"] = seq.get("count", 1)
+
+        # Separate GEMM and non-GEMM
+        gemm_sequences = [s for s in unique_sequences if s.get("is_gemm", False)]
+        non_gemm_sequences = [s for s in unique_sequences if not s.get("is_gemm", False)]
+
+        print(f"Deduplicated to {len(unique_sequences)} unique sequences:")
+        print(f"  - {len(gemm_sequences)} unique GEMM")
+        print(f"  - {len(non_gemm_sequences)} unique non-GEMM")
+
+        # Save unique sequences for reference
         unique_all_sequences_file = utils.get_path("UNIQUE_ALL_SEQUENCES")
         unique_all_data = {
             "summary": {
-                "unique_count": len(unique_all_sequences),
-                "total_count": len(all_kernel_sequences),
-                "unique_gemm": unique_gemm_count,
-                "unique_non_gemm": unique_non_gemm_count,
-                "deduplication_ratio": f"{len(unique_all_sequences)}/{len(all_kernel_sequences)}"
+                "unique_count": len(unique_sequences),
+                "total_count": len(kernel_sequences),
+                "unique_gemm": len(gemm_sequences),
+                "unique_non_gemm": len(non_gemm_sequences),
             },
-            "sequences": unique_all_sequences
+            "sequences": unique_sequences
         }
         utils.save_json(unique_all_sequences_file, unique_all_data)
-        print(f"Saved {unique_all_data['summary']['unique_count']} unique kernel sequences to {unique_all_sequences_file}")
-        print(f"  - {unique_gemm_count} unique GEMM")
-        print(f"  - {unique_non_gemm_count} unique non-GEMM")
-        print(f"\t* Uniqueness key: kernel_name + grid + block + shared_memory + input_dims")
 
-        # ============================================================
-        # PATH 2: GEMM-only sequences (for baremetal comparison)
-        # ============================================================
-        gemm_sequences = [s for s in all_kernel_sequences if s.get("is_gemm", False)]
-        all_gemm_sequences_file = utils.get_path("ALL_GEMM_SEQUENCES")
-        all_gemm_sequences_data = {
-            "summary": {"count": len(gemm_sequences)},
-            "sequences": gemm_sequences
-        }
-        utils.save_json(all_gemm_sequences_file, all_gemm_sequences_data)
-        print(f"Saved {all_gemm_sequences_data['summary']['count']} GEMM sequences to {all_gemm_sequences_file}")
-        
-        # Deduplicate GEMM sequences
-        if gemm_sequences:
-            grouped_gemm_seqs = utils.group_sequences_by_identity(gemm_sequences)
-            unique_gemm_sequences = utils.aggregate_sequences(
-                grouped_gemm_seqs,
-                metrics=["launch_tax", "aten_xlat_tax"],
-                event_types=["kernel", "aten_op", "cuda_launch"],
-            )
-            for seq in unique_gemm_sequences:
-                seq["is_gemm"] = True
-        else:
-            unique_gemm_sequences = []
-        
-        unique_gemm_sequences_file = utils.get_path("UNIQUE_GEMM_SEQUENCES")
         unique_gemm_data = {
             "summary": {
-                "unique_count": len(unique_gemm_sequences),
-                "total_count": len(gemm_sequences),
-                "deduplication_ratio": f"{len(unique_gemm_sequences)}/{len(gemm_sequences)}"
+                "count": len(gemm_sequences),
             },
-            "sequences": unique_gemm_sequences
+            "sequences": gemm_sequences
         }
-        utils.save_json(unique_gemm_sequences_file, unique_gemm_data)
-        print(f"Saved {unique_gemm_data['summary']['unique_count']} unique GEMM sequences to {unique_gemm_sequences_file}")
-        
+
+        print_utils.section_end(section)
+
         return {
             "unique_gemm_sequences": unique_gemm_data,
             "unique_all_sequences": unique_all_data,
         }
 
+    def run_direct_from_trace(self) -> None:
+        """
+        Simplified pipeline: compute T_structural directly from the original trace.
+        
+        No replay needed - uses the trace data already collected by ModelTracer.
+        This provides real-world timing with full coverage.
+        """
+        section = "Direct Trace Analysis"
+        print_utils.section_start(section)
+        
+        # Get sequences from tracer (already collected during tracing)
+        sequences = list(self.tracer.sequences)
+        
+        # Calculate metrics on all sequences
+        sequences_with_metrics = utils.calculate_sequence_metrics(
+            sequences, 
+            metrics=["launch_tax", "aten_xlat_tax", "py_tax"]
+        )
+        
+        # Filter for kernel sequences (those with both kernel and aten_op)
+        kernel_sequences = utils.filter_kernel_sequences(sequences_with_metrics)
+        
+        gemm_count = sum(1 for s in kernel_sequences if s.get("is_gemm", False))
+        non_gemm_count = len(kernel_sequences) - gemm_count
+        
+        print(f"Found {len(kernel_sequences)} kernel sequences in trace:")
+        print(f"  - {gemm_count} GEMM sequences")
+        print(f"  - {non_gemm_count} non-GEMM sequences")
+        
+        # Group by identity and aggregate (deduplicate)
+        grouped_seqs = utils.group_sequences_by_identity(kernel_sequences)
+        unique_sequences = utils.aggregate_sequences(
+            grouped_seqs,
+            metrics=["launch_tax", "aten_xlat_tax", "py_tax"],
+            event_types=["kernel", "aten_op", "cuda_launch"],
+        )
+        
+        # Preserve is_gemm classification after aggregation
+        for seq in unique_sequences:
+            aten_name = seq.get("aten_op", {}).get("name", "")
+            seq["is_gemm"] = utils.is_gemm_op(aten_name)
+        
+        unique_gemm = sum(1 for s in unique_sequences if s.get("is_gemm", False))
+        unique_non_gemm = len(unique_sequences) - unique_gemm
+        
+        print(f"Deduplicated to {len(unique_sequences)} unique sequences:")
+        print(f"  - {unique_gemm} unique GEMM")
+        print(f"  - {unique_non_gemm} unique non-GEMM")
+        
+        # Save unique sequences
+        unique_all_sequences_file = utils.get_path("UNIQUE_ALL_SEQUENCES")
+        unique_all_data = {
+            "summary": {
+                "unique_count": len(unique_sequences),
+                "total_count": len(kernel_sequences),
+                "unique_gemm": unique_gemm,
+                "unique_non_gemm": unique_non_gemm,
+            },
+            "sequences": unique_sequences
+        }
+        utils.save_json(unique_all_sequences_file, unique_all_data)
+        
+        print_utils.section_end(section)
+        
+        # Generate report directly from trace-derived sequences
+        section = "TaxBreak Report (Direct Trace)"
+        print_utils.section_start(section)
+
+        # Get num_runs from tracer (defaults to 1 for backwards compatibility)
+        num_runs = getattr(self.tracer, 'num_profiled_runs', 1)
+
+        summarize_from_trace_directly(
+            unique_sequences=unique_sequences,
+            model=self.args.model,
+            precision=self.args.precision,
+            num_runs=num_runs
+        )
+
+        print_utils.section_end(section)
+
     def run(self) -> None:
         """
-        Run the complete microbenchmarking pipeline
+        Run the complete microbenchmarking pipeline.
+        
+        By default, uses direct trace analysis (no replay).
+        Set --replay flag to use the original replay-based pipeline.
         """
+        # Check if we should use direct trace mode (default) or replay mode
+        use_direct_trace = getattr(self.args, 'direct_trace', True)
+        
+        if use_direct_trace:
+            self.run_direct_from_trace()
+            return
+        
+        # --- Original replay-based pipeline below ---
         # Extract target GEMM sequences
         extraction_results = self.extract_unique_gemm_sequences()  
         target_gemm_sequences = extraction_results["unique_gemm_sequences"]
         target_all_sequences = extraction_results["unique_all_sequences"]
 
+        # ...rest of original run() method...
+        # (Keep existing code for replay-based pipeline)
+        
         # ============================================================
         # Profile ALL PyTorch kernels (GEMM + non-GEMM)
         # ============================================================

@@ -53,6 +53,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Enable CUDA language
 enable_language(CUDA)
 
+# Allow newer GCC versions with CUDA
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --allow-unsupported-compiler")
+
 # Find CUDA toolkit
 find_package(CUDAToolkit REQUIRED)
 

@@ -18,7 +18,7 @@ export SODA_EXAMPLES="$SODA_ROOT/examples"
 export SODA_OUTPUT="$SODA_ROOT/output"
 
 # Microbenchmark directories
-export MICROBENCH_DIR="$SODA_SRC/microbench"
+export MICROBENCH_DIR="$SODA_SRC/soda/microbench"
 export BAREMETAL_MICROBENCH_DIR="$MICROBENCH_DIR/baremetal"
 export FRAMEWORK_DIR="$MICROBENCH_DIR/framework"
 export PYTORCH_MICROBENCH_DIR="$FRAMEWORK_DIR/pytorch"
@@ -43,29 +43,6 @@ export ENV_METADATA="env_metadata.json"
 
 # Experiment directory (set by tracer, DO NOT set manually)
 export EXPERIMENT_DIR=""
-
-# Common data files referenced across scripts (relative to experiment directory)
-export ALL_SEQUENCES="sequences/all_sequences.json"
-export ALL_GEMM_SEQUENCES="sequences/all_gemm_sequences.json"
-export UNIQUE_GEMM_SEQUENCES="sequences/unique_gemm_sequences.json"
-
-# Framework/pytorch
-export PYTORCH_GEMM_SEQUENCES="$PYTORCH_OUTPUT_DIR/pytorch_gemm_profile.json"
-export PYTORCH_TRACES="$PYTORCH_OUTPUT_DIR/traces"
-export PYTORCH_LAUNCH_TAX_GRAPHS="$PYTORCH_OUTPUT_DIR/graphs/launch_tax"
-
-# Baremetal
-export BAREMETAL_JOBS="$BAREMETAL_OUTPUT_DIR/jobs.json"
-export BAREMETAL_GEMM_KERNELS="$BAREMETAL_OUTPUT_DIR/baremetal_gemm_profile.json"
-export BAREMETAL_TRACES="$BAREMETAL_OUTPUT_DIR/traces"
-
-# Tax break files (relative to experiment directory)
-export TAX_BREAK_SUMMARY="microbench/taxbreak.json"
-export TAX_BREAK_PLOT="microbench/taxbreak.png"
-
-# Log files (relative to experiment directory)
-export PYTORCH_VERIFY_LOG="$PYTORCH_OUTPUT_DIR/microbench.log"
-export ASSERT_LOG="assertions.log"
 
 # HuggingFace cache (set default if not already set)
 # export HF_HOME="${HF_HOME:-/tmp/hf_cache_$USER}"

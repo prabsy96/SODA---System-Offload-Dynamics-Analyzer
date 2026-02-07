@@ -7,15 +7,14 @@ baremetal/output/baremetal_gemm_runs.json, verifies kernel matching,
 computes per-kernel launch tax deltas and percentages, and emits
 baremetal/output/bm_vs_framework_report.json.
 """
-
-import json
 import os
-import sys
+import math
 import statistics
 from collections import defaultdict
 from typing import Any, Dict, List
 
 import matplotlib.pyplot as plt
+import torch
 
 from soda.common import utils, print_utils
 
@@ -35,7 +34,6 @@ def get_gpu_architecture() -> str:
         GPU architecture string (e.g., "H100", "H200", "A100")
     """
     try:
-        import torch
         if torch.cuda.is_available():
             gpu_name = torch.cuda.get_device_name(0).upper()
             if "H100" in gpu_name:
@@ -175,17 +173,17 @@ def generate_framework_summary(show_table: bool = True, include_all_kernels: boo
         fo = py_tax + aten_xlat_tax + launch_tax
         kernel_type = "GEMM" if is_gemm else "other"
         kernel_name = job_result["kernel"]
-        kernel_display = kernel_name[:40] + "..." if len(kernel_name) > 40 else kernel_name
-
+        
+        # Increased truncation length from 20 to 40 characters
         kernel_display = kernel_name[:40] + "..." if len(kernel_name) > 40 else kernel_name
         
         # Truncate ATen op name slightly if too long, but keep it readable
         aten_op = job_result["aten_op"]
-        aten_display = aten_op[:25] + "..." if len(aten_op) > 25 else aten_op 
+        aten_display = aten_op[:25] + "..." if len(aten_op) > 25 else aten_op
 
         framework_summary_table.append([
             job_id,
-            job_result["aten_op"],
+            aten_display,
             kernel_display,
             kernel_type,
             fmt_val(fo),
@@ -330,7 +328,7 @@ def generate_final_summary(show_table: bool = True, include_all_kernels: bool = 
             "freq": freq,
         })
 
-        kernel_display = kernel_name[:15] + "..." if kernel_name and len(kernel_name) > 15 else kernel_name
+        kernel_display = kernel_name[:40] + "..." if kernel_name and len(kernel_name) > 40 else kernel_name
         
         final_summary_table.append([
             job_id,
@@ -460,6 +458,7 @@ def get_derived_aten_baseline(final_summary_data: List[Dict[str, Any]]) -> float
         
     return statistics.median(non_gemm_vals)
 
+
 def summarize(model: str, precision: str, include_all_kernels: bool = False):
     """
     Main reporting function.
@@ -511,27 +510,15 @@ def summarize(model: str, precision: str, include_all_kernels: bool = False):
         # --- Step 3: Apply Subtraction Formula ---
         if is_gemm:
             # GEMM Kernel: Calculate T_cuda
-            # Formula: T_cuda = T_fo - T_py - T_aten_base - T_sys
-            # (Note: T_fo ≈ T_py + T_aten_xlat + T_sys, so this is equivalent to:
-            #  T_cuda = T_aten_xlat - T_aten_base)
-            
-            # We use the component-based formula for clarity:
             # T_cuda = T_aten_xlat - T_aten_base
-            # (Since T_aten_xlat includes both pure dispatch + library overhead)
-            
             raw_cuda = t_aten_xlat - t_aten_base
             t_cuda = max(0.0, raw_cuda)
-            
-            # For GEMM, "Compute Translation" is the baseline dispatch cost
             t_ct = t_aten_base
-            
             gemm_invocations += freq
         else:
             # Non-GEMM: Pure dispatch, no library overhead
             t_cuda = 0.0
-            # For non-GEMM, "Compute Translation" is the full measured cost
             t_ct = t_aten_xlat
-            
             non_gemm_invocations += freq
         
         # Store calculated T_cuda back to row
@@ -601,3 +588,354 @@ def summarize(model: str, precision: str, include_all_kernels: bool = False):
     # Plot
     plot_per_kernel_taxbreak(final_summary_data, f"{model} | {precision}")
     print("=== TaxBreak Report ===")
+
+
+
+def summarize_from_trace_directly(
+    unique_sequences: List[Dict[str, Any]],
+    model: str,
+    precision: str,
+    num_runs: int = 1
+):
+    """
+    Compute T_structural directly from trace-derived sequences.
+
+    Each sequence represents a unique kernel invocation (no deduplication).
+    Aggregates timing across the entire timeline to capture real-world variations.
+
+    Uses hardcoded null kernel T_sys for launch tax (excludes queue time).
+
+    When num_runs > 1, the trace contains multiple profiled inferences.
+    Totals are divided by num_runs to report mean per-inference metrics.
+
+    Args:
+        unique_sequences: List of kernel sequences (each invocation is unique)
+        model: Model name for reporting
+        precision: Precision setting for reporting
+        num_runs: Number of profiled inference runs in the trace (for averaging)
+    """
+    if not unique_sequences:
+        print("No kernel sequences provided.")
+        return
+    
+    # Get hardcoded baselines
+    t_sys_null = get_null_kernel_sys_tax()  # Hardcoded: 4.51 μs for H100
+    gpu_arch = get_gpu_architecture()
+    
+    # Build summary data from sequences
+    summary_data = []
+    for idx, seq in enumerate(unique_sequences):
+        job_id = f"{idx+1:04d}"
+        
+        # Extract timing - handle both raw values and dict format
+        launch_tax = seq.get("launch_tax", 0)
+        aten_xlat_tax = seq.get("aten_xlat_tax", 0)
+        py_tax = seq.get("py_tax", 0)
+        
+        # Handle dict format (from aggregated sequences)
+        t_py = py_tax.get("avg", py_tax) if isinstance(py_tax, dict) else py_tax
+        t_aten_xlat = aten_xlat_tax.get("avg", aten_xlat_tax) if isinstance(aten_xlat_tax, dict) else aten_xlat_tax
+        t_sys_measured = launch_tax.get("avg", launch_tax) if isinstance(launch_tax, dict) else launch_tax
+        
+        # Ensure numeric and non-negative
+        t_py = max(0.0, float(t_py or 0))
+        t_aten_xlat = max(0.0, float(t_aten_xlat or 0))
+        t_sys_measured = max(0.0, float(t_sys_measured or 0))
+        
+        # USE HARDCODED T_sys for structural calculation (no queue time)
+        t_sys = t_sys_null
+        
+        freq = seq.get("freq", 1)
+        is_gemm = seq.get("is_gemm", False)
+        
+        # Handle nested dict for kernel/aten_op names
+        kernel = seq.get("kernel", {})
+        aten_op = seq.get("aten_op", {})
+        kernel_name = kernel.get("name", "unknown") if isinstance(kernel, dict) else str(kernel)
+        aten_op_name = aten_op.get("name", "unknown") if isinstance(aten_op, dict) else str(aten_op)
+        
+        # T_fo uses hardcoded T_sys (structural overhead only)
+        t_fo = t_py + t_aten_xlat + t_sys
+        
+        summary_data.append({
+            "id": job_id,
+            "aten_op": aten_op_name,
+            "kernel": kernel_name,
+            "kernel_type": "GEMM" if is_gemm else "other",
+            "is_gemm": is_gemm,
+            "T_fo": t_fo,
+            "T_py": t_py,
+            "T_aten_xlat": t_aten_xlat,
+            "T_sys": t_sys,              # Hardcoded null kernel value
+            "T_sys_measured": t_sys_measured,  # Keep measured value for reference
+            "T_sys_fw": t_sys,
+            "freq": freq,
+        })
+    
+    # Derive T_aten_base from non-GEMM kernels
+    non_gemm_vals = [
+        row["T_aten_xlat"] for row in summary_data 
+        if not row.get("is_gemm", False) and row.get("T_aten_xlat", 0) > 0.1
+    ]
+    t_aten_base = statistics.median(non_gemm_vals) if non_gemm_vals else 2.0
+    
+    print(f"GPU Architecture: {gpu_arch}")
+    print(f"Null kernel T_sys baseline: {t_sys_null:.3f} μs (hardcoded, used for T_fo)")
+    print(f"Derived T_aten_base:        {t_aten_base:.3f} μs (median non-GEMM T_aten_xlat from trace)")
+    
+    # Print table (show first 100 rows max to avoid spam)
+    def fmt_val(v):
+        return None if v is None else f"{v:.2f}"
+    
+    table_data = []
+    for row in summary_data[:100]:  # Limit table output
+        kernel_display = row["kernel"][:40] + "..." if len(row["kernel"]) > 40 else row["kernel"]
+        table_data.append([
+            row["id"],
+            row["aten_op"],
+            kernel_display,
+            row["kernel_type"],
+            fmt_val(row["T_fo"]),
+            fmt_val(row["T_py"]),
+            fmt_val(row["T_aten_xlat"]),
+            fmt_val(row["T_sys"]),  # Now shows hardcoded value
+            row["freq"],
+        ])
+    
+    if len(summary_data) > 100:
+        print(f"(Showing first 100 of {len(summary_data)} kernel invocations)")
+    
+    print_utils.comp_table(
+        title="Framework Tax Break (μs) - Direct from Trace (Per Invocation)",
+        headers=["ID", "ATen op", "Kernel", "Type", "T_fo", "T_py", "T_aten_xlat", "T_sys", "freq"],
+        data=table_data,
+    )
+    
+    # Aggregate per-kernel overheads across entire timeline
+    # Also track variance for std/CI computation
+    total_structural_overhead_us = 0.0
+    total_FT_us = 0.0
+    total_CT_us = 0.0
+    total_KT_us = 0.0
+    total_CudaT_us = 0.0
+    total_invocations = 0
+    gemm_invocations = 0
+    non_gemm_invocations = 0
+
+    # Collect per-run samples for variance calculation
+    # Each unique kernel contributes ~1 invocation per run, so we can estimate per-run variance
+    per_kernel_fo_samples = []  # T_fo values for each kernel occurrence
+
+    for row in summary_data:
+        freq = row.get("freq", 1)
+        t_py = row.get("T_py", 0.0)
+        t_aten_xlat = row.get("T_aten_xlat", 0.0)
+        t_sys = row.get("T_sys", 0.0)  # Hardcoded value
+        t_fo = row.get("T_fo", 0.0)
+        is_gemm = row.get("is_gemm", False)
+
+        # Calculate T_cuda per kernel
+        if is_gemm:
+            t_cuda = max(0.0, t_aten_xlat - t_aten_base)
+            t_ct = t_aten_base
+            gemm_invocations += freq
+        else:
+            t_cuda = 0.0
+            t_ct = t_aten_xlat
+            non_gemm_invocations += freq
+
+        # Store T_cuda in row
+        row["T_cuda"] = t_cuda
+
+        # Aggregate (freq=1 for each unique invocation)
+        total_structural_overhead_us += t_fo * freq
+        total_FT_us += t_py * freq
+        total_CT_us += t_ct * freq
+        total_KT_us += t_sys * freq  # Uses hardcoded T_sys
+        total_CudaT_us += t_cuda * freq
+        total_invocations += freq
+
+        # Collect samples for variance (replicate t_fo for each occurrence)
+        per_kernel_fo_samples.extend([t_fo] * freq)
+    
+    # Convert to ms and normalize by num_runs for mean per-inference values
+    total_structural_overhead_ms = total_structural_overhead_us / 1000.0 / num_runs
+    total_FT_ms = total_FT_us / 1000.0 / num_runs
+    total_CT_ms = total_CT_us / 1000.0 / num_runs
+    total_KT_ms = total_KT_us / 1000.0 / num_runs
+    total_CudaT_ms = total_CudaT_us / 1000.0 / num_runs
+    invocations_per_run = total_invocations // num_runs if num_runs > 0 else total_invocations
+
+    # Compute standard deviation and 95% CI for T_structural
+    # We estimate per-inference variance from the per-kernel variance
+    std_structural_ms = 0.0
+    ci_lower_ms = total_structural_overhead_ms
+    ci_upper_ms = total_structural_overhead_ms
+    sem_ms = 0.0  # Standard error of the mean
+
+    if num_runs > 1 and len(per_kernel_fo_samples) > 1:
+        # Compute std of per-kernel T_fo values (in μs)
+        mean_fo = sum(per_kernel_fo_samples) / len(per_kernel_fo_samples)
+        variance_fo = sum((x - mean_fo) ** 2 for x in per_kernel_fo_samples) / (len(per_kernel_fo_samples) - 1)
+        std_fo_us = math.sqrt(variance_fo)
+
+        # Per-inference std: approximate as (std_per_kernel * sqrt(kernels_per_run)) / num_runs
+        # This is based on: var(sum) = n * var(each) for i.i.d., std(mean) = std/sqrt(n)
+        kernels_per_run = invocations_per_run if invocations_per_run > 0 else 1
+        # Total std per inference ≈ std_per_kernel * sqrt(kernels_per_run)
+        std_structural_us = std_fo_us * math.sqrt(kernels_per_run)
+        std_structural_ms = std_structural_us / 1000.0
+
+        # Standard error of the mean (SEM) for confidence interval
+        sem_ms = std_structural_ms / math.sqrt(num_runs)
+
+        # 95% CI: mean ± 1.96 * SEM
+        ci_lower_ms = total_structural_overhead_ms - 1.96 * sem_ms
+        ci_upper_ms = total_structural_overhead_ms + 1.96 * sem_ms
+
+    # Print summary
+    print()
+    if num_runs > 1:
+        print(f"=== Structural (Orchestrator) Overhead (Mean of {num_runs} runs) ===")
+    else:
+        print("=== Structural (Orchestrator) Overhead (Direct from Trace) ===")
+
+    if num_runs > 1 and std_structural_ms > 0:
+        print(f"T_structural (mean ± std) = {total_structural_overhead_ms:.3f} ± {std_structural_ms:.3f} ms")
+        print(f"  95% CI: [{ci_lower_ms:.3f}, {ci_upper_ms:.3f}] ms (n={num_runs})")
+    else:
+        print(f"T_structural (mean) = {total_structural_overhead_ms:.3f} ms")
+
+    print(f"  ├─ ΔFT   (Python Translation)   = {total_FT_ms:.3f} ms")
+    print(f"  ├─ ΔCT   (Compute Translation)  = {total_CT_ms:.3f} ms")
+    print(f"  ├─ ΔCudaT (CUDA Translation)    = {total_CudaT_ms:.3f} ms")
+    print(f"  └─ ΔKT   (Kernel Launch)        = {total_KT_ms:.3f} ms")
+    if num_runs > 1:
+        print(f"  (Mean over {num_runs} profiled runs, ~{invocations_per_run} kernels/run)")
+    else:
+        print(f"  (Aggregated over {total_invocations} kernel invocations)")
+    print()
+    print("Calculation Method (Direct Trace, Per-Invocation):")
+    print(f"  1. Profiled runs: {num_runs}")
+    print(f"  2. T_aten_base = Median(T_aten_xlat of non-GEMM) = {t_aten_base:.3f} μs")
+    print(f"  3. T_sys = {t_sys_null:.3f} μs (hardcoded null kernel baseline)")
+    print(f"  4. GEMM:     T_cuda = max(0, T_aten_xlat - T_aten_base)")
+    print(f"  5. Non-GEMM: T_cuda = 0.0")
+    print()
+    print("Invocation Breakdown (total across all runs):")
+    print(f"  * GEMM invocations:     {gemm_invocations}")
+    print(f"  * Non-GEMM invocations: {non_gemm_invocations}")
+    print(f"  * Total invocations:    {total_invocations}")
+    
+    # Save results
+    summary_path = utils.get_path("TAX_BREAK_SUMMARY")
+    output_data = {
+        "method": "direct_trace_per_invocation",
+        "num_profiled_runs": num_runs,
+        "gpu_architecture": gpu_arch,
+        "t_aten_base_us": t_aten_base,
+        "t_sys_null_us": t_sys_null,
+        "T_structural_mean_ms": total_structural_overhead_ms,
+        "T_structural_std_ms": std_structural_ms,
+        "T_structural_95ci_lower_ms": ci_lower_ms,
+        "T_structural_95ci_upper_ms": ci_upper_ms,
+        "breakdown_mean": {
+            "FT_python_ms": total_FT_ms,
+            "CT_aten_ms": total_CT_ms,
+            "CudaT_cuda_runtime_ms": total_CudaT_ms,
+            "KT_kernel_launch_ms": total_KT_ms,
+        },
+        "statistics": {
+            "std_ms": std_structural_ms,
+            "sem_ms": sem_ms,
+            "ci_95_lower_ms": ci_lower_ms,
+            "ci_95_upper_ms": ci_upper_ms,
+        },
+        "formula": {
+            "T_cuda_gemm": "max(0, T_aten_xlat - T_aten_base)",
+            "T_cuda_non_gemm": "0.0",
+            "T_aten_base": "Median(Non-GEMM T_aten_xlat)",
+            "T_sys": f"{t_sys_null:.3f} μs (hardcoded null kernel)"
+        },
+        "invocations": {
+            "total": total_invocations,
+            "per_run": invocations_per_run,
+            "gemm": gemm_invocations,
+            "non_gemm": non_gemm_invocations,
+        },
+        "per_kernel": summary_data,
+    }
+    utils.save_json(summary_path, output_data)
+    print(f"\nSaved direct trace summary to {summary_path}")
+    
+    # Plot per-kernel from trace
+    plot_per_kernel_taxbreak(summary_data, f"{model} | {precision} (Direct Trace)")
+    print("=== TaxBreak Report (Direct Trace) ===")
+
+class TaxBreakAnalyzer:
+    def __init__(self, tracer, args):
+        self.tracer = tracer
+        self.args = args
+
+    def run_direct_from_trace(self) -> None:
+        """
+        Simplified pipeline: compute T_structural directly from the original trace.
+        
+        No replay needed - uses the trace data already collected by ModelTracer.
+        Each kernel invocation is treated uniquely (no deduplication by config).
+        """
+        section = "Direct Trace Analysis"
+        print_utils.section_start(section)
+        
+        # Get sequences from tracer (already collected during tracing)
+        sequences = list(self.tracer.sequences)
+        
+        print(f"Raw sequences from tracer: {len(sequences)}")
+        
+        # Calculate metrics on all sequences (each invocation is unique)
+        sequences_with_metrics = utils.calculate_sequence_metrics(
+            sequences, 
+            metrics=["launch_tax", "aten_xlat_tax", "py_tax"]
+        )
+        
+        # Filter for valid kernel sequences and mark is_gemm
+        kernel_sequences = utils.filter_kernel_sequences(sequences_with_metrics)
+        
+        gemm_count = sum(1 for s in kernel_sequences if s.get("is_gemm", False))
+        non_gemm_count = len(kernel_sequences) - gemm_count
+        
+        print(f"Found {len(kernel_sequences)} kernel invocations in trace:")
+        print(f"  - {gemm_count} GEMM invocations")
+        print(f"  - {non_gemm_count} non-GEMM invocations")
+        
+        # NO DEDUPLICATION - each invocation is unique
+        # Just add freq=1 to each sequence for compatibility with report
+        for seq in kernel_sequences:
+            seq["freq"] = 1
+        
+        # Save all sequences (not deduplicated)
+        all_sequences_file = utils.get_path("UNIQUE_ALL_SEQUENCES")
+        all_data = {
+            "summary": {
+                "total_invocations": len(kernel_sequences),
+                "gemm_invocations": gemm_count,
+                "non_gemm_invocations": non_gemm_count,
+                "note": "Each kernel invocation is unique (no deduplication)"
+            },
+            "sequences": kernel_sequences
+        }
+        utils.save_json(all_sequences_file, all_data)
+        
+        print_utils.section_end(section)
+        
+        # Generate report directly from trace-derived sequences
+        section = "TaxBreak Report (Direct Trace)"
+        print_utils.section_start(section)
+        
+        summarize_from_trace_directly(
+            unique_sequences=kernel_sequences,  # All invocations, not deduplicated
+            model=self.args.model,
+            precision=self.args.precision
+        )
+        
+        print_utils.section_end(section)

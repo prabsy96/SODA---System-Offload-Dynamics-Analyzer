@@ -53,43 +53,85 @@ echo "Detected GPU: $GPU_NAME"
 echo ""
 
 # Configuration 
+# MODEL="gpt2"
+# # MODEL="meta-llama/Meta-Llama-3-8B"
+# # MODEL="meta-llama/Llama-3.2-3B"
+# # MODEL="meta-llama/Llama-3.2-1B"
+
+# PRECISION="bfloat16"
+# COMPILE_TYPE="eager"
+# WARMUP="1000"
+# RUNS="5000"
+# MAX_NEW_TOKENS="1"
+
+# # Sweep Configuration
+# BATCH_SIZES=(1 2 4 8 16)
+# SEQ_LENS=(128 256 512 1024)
+
+# echo "Starting sweep for model: $MODEL"
+# echo "Batch Sizes: ${BATCH_SIZES[*]}"
+# echo "Sequence Lengths: ${SEQ_LENS[*]}"
+# echo "---------------------------------------------------"
+
+# for BS in "${BATCH_SIZES[@]}"; do
+#     for SL in "${SEQ_LENS[@]}"; do
+#         echo "Running microbenchmark: BS=$BS, SL=$SL"
+        
+#         python -m soda \
+#           --model "$MODEL" \
+#           --batch-size "$BS" \
+#           --seq-len "$SL" \
+#           --max-new-tokens "$MAX_NEW_TOKENS" \
+#           --precision "$PRECISION" \
+#           --compile-type "$COMPILE_TYPE" \
+#           --warmup "$WARMUP" \
+#           --runs "$RUNS" --microbench \
+#           --direct-trace
+          
+#         echo "Completed: BS=$BS, SL=$SL"
+#         echo "---------------------------------------------------"
+#     done
+# done
+
+# echo "Sweep completed successfully."
+
+
+# GPT-2 microbenchmark sweep for Reviewer B Comment 1
+# Matches paper Section V setup: BS=1, SL=128, prefill (max_new_tokens=1)
+# Uses updated defaults: warmup=50, runs=150 for statistical robustness (mean of 50 runs)
 MODEL="gpt2"
-# MODEL="meta-llama/Meta-Llama-3-8B"
-# MODEL="meta-llama/Llama-3.2-3B"
-# MODEL="meta-llama/Llama-3.2-1B"
 
 PRECISION="bfloat16"
 COMPILE_TYPE="eager"
-WARMUP="1000"
-RUNS="5000"
-MAX_NEW_TOKENS="1"
+MAX_NEW_TOKENS="1"  # Prefill only (matches paper Table IV/V)
 
-# Sweep Configuration
+# Paper Section V uses BS=1, SL=128 for detailed TaxBreak analysis
 BATCH_SIZES=(1 2 4 8 16)
-SEQ_LENS=(128 256 512 1024)
+SEQ_LEN=512
 
-echo "Starting sweep for model: $MODEL"
+echo "Starting GPT-2 microbenchmark sweep (Reviewer B Comment 1)"
+echo "Model: $MODEL"
+echo "Sequence Length: $SEQ_LEN (matches paper Section V)"
+echo "Max New Tokens: $MAX_NEW_TOKENS (prefill only)"
 echo "Batch Sizes: ${BATCH_SIZES[*]}"
-echo "Sequence Lengths: ${SEQ_LENS[*]}"
+echo "Using default warmup=50, runs=150 for statistical averaging"
 echo "---------------------------------------------------"
 
 for BS in "${BATCH_SIZES[@]}"; do
-    for SL in "${SEQ_LENS[@]}"; do
-        echo "Running microbenchmark: BS=$BS, SL=$SL"
-        
-        python -m soda \
-          --model "$MODEL" \
-          --batch-size "$BS" \
-          --seq-len "$SL" \
-          --max-new-tokens "$MAX_NEW_TOKENS" \
-          --precision "$PRECISION" \
-          --compile-type "$COMPILE_TYPE" \
-          --warmup "$WARMUP" \
-          --runs "$RUNS" --microbench
-          
-        echo "Completed: BS=$BS, SL=$SL"
-        echo "---------------------------------------------------"
-    done
+    echo "Running microbenchmark: BS=$BS, SL=$SEQ_LEN"
+
+    python -m soda \
+      --model "$MODEL" \
+      --batch-size "$BS" \
+      --seq-len "$SEQ_LEN" \
+      --max-new-tokens "$MAX_NEW_TOKENS" \
+      --precision "$PRECISION" \
+      --compile-type "$COMPILE_TYPE" \
+      --microbench \
+      --direct-trace
+
+    echo "Completed: BS=$BS, SL=$SEQ_LEN"
+    echo "---------------------------------------------------"
 done
 
 echo "Sweep completed successfully."

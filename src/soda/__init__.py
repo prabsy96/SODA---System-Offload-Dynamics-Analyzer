@@ -18,13 +18,6 @@ from pathlib import Path
 from torch.profiler import ProfilerActivity, profile
 from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple
 
-# Treat this module as the root of the soda package so submodules like
-# soda.common.* resolve to the sibling directories under src/.
-_PACKAGE_ROOT = Path(__file__).resolve().parent
-__path__ = [str(_PACKAGE_ROOT)]
-if __spec__ is not None:
-    __spec__.submodule_search_locations = __path__
-
 # for fp8 e4m3 format support
 try:
     from transformers.utils.quantization_config import FP8Config
@@ -128,10 +121,11 @@ class SodaAnalyzer:
                     logger=None
                 )
 
-        # Framework overhead (CPU-side latency)
-        framework_overhead = utils.calculate_framework_tax(
-            inference_time,
-            true_gpu_busy_time
+        # HDBI calculation (TaxBreak Eq. 6)
+        hdbi_metrics = utils.calculate_hdbi(
+            total_kernel_exec_time_ms=utils.us_to_ms(kernel_exec_time["total"]),
+            total_xlat_tax_ms=utils.us_to_ms(total_xlat_tax),
+            num_total_kernels=len(self.events["gpu"]["kernels"])
         )
         tklqt_metrics = utils.calculate_tklqt(sequences)
 
@@ -145,7 +139,7 @@ class SodaAnalyzer:
                 "trace_calculated_inference_time_ms": utils.us_to_ms(trace_calculated_inference_time),
                 "profiler_overhead_ms": utils.us_to_ms(trace_calculated_inference_time - self.tracer.torch_measured_inference_time_us),
             },
-            "framework_overhead": framework_overhead,
+            "hdbi": hdbi_metrics,
             "active_streams": len(stream_info),
 
             # GPU metrics
@@ -196,17 +190,19 @@ class SodaAnalyzer:
         print("=== Performance Metrics ===")
         print(f"\t* Inference runtime (ms): {metrics['inference_time_ms']:.4f}")
         
-        # Framework Tax Analysis
-        framework_overhead = metrics["framework_overhead"]
+        # HDBI Analysis (TaxBreak Eq. 6)
+        hdbi = metrics["hdbi"]
         timing = metrics["inference_time_breakdown"]
         print("")
-        print("=== Framework Tax Analysis ===")
-        print(f"\t* T_exposed (Framework Tax): {framework_overhead['T_exposed_ms']:.4f} ms ({framework_overhead['T_exposed_percent']:.1f}%)")
-        print(f"\t* T_gpu_busy (GPU Active Time): {metrics['gpu_busy_time_ms']:.4f} ms ({framework_overhead['T_gpu_busy_percent']:.1f}%)")
-        
+        print("=== HDBI Analysis (Host-Device Balance Index) ===")
+        print(f"\t* HDBI: {hdbi['hdbi_value']:.3f} ({hdbi['hdbi_classification']})")
+        print(f"\t* T_DeviceActive: {hdbi['t_device_active_ms']:.4f} ms")
+        print(f"\t* T_Orchestrate: {hdbi['t_orchestrate_ms']:.4f} ms")
+        print(f"\t  - ΔKT (kernel launch tax): {hdbi['delta_kt_ms']:.4f} ms")
+        print(f"\t  - ΔFT + ΔCT (xlat tax): {metrics['total_xlat_tax_ms']:.4f} ms")
+
         # Timing breakdown
         print(f"\t  - Torch measured inference time (ms): {timing['torch_measured_inference_time_ms']:.4f}")
-        print(f"\t  - Trace calculated inference time (ms): {timing['trace_calculated_inference_time_ms']:.4f}")
         print(f"\t  - Profiler overhead (ms): {timing['profiler_overhead_ms']:.4f}")
         
         print("")
@@ -849,9 +845,12 @@ class ModelTracer:
     def trace_forward_pass_for_whisper(self) -> None:
         """
         Profiles the generate step of Whisper (encoder-decoder).
+
+        Runs multiple profiled inferences (controlled by --runs) for statistical robustness.
         """
-        LOGGER.info("=== Profiling Whisper Model Forward Pass ===")
-        
+        num_runs = getattr(self.args, 'runs', 1)
+        LOGGER.info(f"=== Profiling Whisper Model Forward Pass ({num_runs} runs) ===")
+
         # Warm-up runs
         with torch.no_grad():
             for _ in range(max(0, self.args.warmup)):
@@ -865,7 +864,10 @@ class ModelTracer:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
-        # Profiled run 
+        # Report GPU clocks for reproducibility
+        utils.report_gpu_clocks(context="after warmup, before profiling")
+
+        # Profiled runs
         with torch.no_grad():
             with profile(
                 activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
@@ -876,29 +878,37 @@ class ModelTracer:
             ) as prof:
                 start_time = torch.cuda.Event(enable_timing=True)
                 end_time = torch.cuda.Event(enable_timing=True)
-                
+
                 start_time.record()
-                self.model.generate(
-                    **self.model_inputs,
-                    max_new_tokens=self.max_new_tokens,
-                    do_sample=False,
-                )
+                for _ in range(num_runs):
+                    self.model.generate(
+                        **self.model_inputs,
+                        max_new_tokens=self.max_new_tokens,
+                        do_sample=False,
+                    )
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
                 end_time.record()
-                
+
                 torch.cuda.synchronize()
-                self.torch_measured_inference_time_us = utils.ms_to_us(start_time.elapsed_time(end_time))
-        
+                total_time_us = utils.ms_to_us(start_time.elapsed_time(end_time))
+                self.torch_measured_inference_time_us = total_time_us / num_runs
+
+        self.num_profiled_runs = num_runs
+        print(f"Mean time per inference: {utils.us_to_ms(self.torch_measured_inference_time_us):.2f} ms")
+
         prof.export_chrome_trace(str(self.trace_file))
 
     def trace_forward_pass_for_decoder(self) -> None:
         """
         Profiles the generate step of a decoder model.
-        
-        Args:
-            inputs: A dictionary of tokenized inputs.
+
+        Runs multiple profiled inferences (controlled by --runs) to compute
+        mean metrics for statistical robustness (addresses Reviewer B Comment 1).
         """
-        print("=== Profiling Model Forward Pass ===")
-        
+        num_runs = getattr(self.args, 'runs', 1)
+        print(f"=== Profiling Model Forward Pass ({num_runs} runs) ===")
+
         # Warm-up runs
         with torch.no_grad():
             for _ in range(max(0, self.args.warmup)):
@@ -913,7 +923,11 @@ class ModelTracer:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
-        # Profiled run 
+        # Report GPU clocks for reproducibility
+        utils.report_gpu_clocks(context="after warmup, before profiling")
+
+        # Profiled runs - run num_runs inferences within profiler
+        # All runs are captured in a single trace; metrics are averaged by frequency
         with torch.no_grad():
             with profile(
                 activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
@@ -924,53 +938,67 @@ class ModelTracer:
             ) as prof:
                 start_time = torch.cuda.Event(enable_timing=True)
                 end_time = torch.cuda.Event(enable_timing=True)
-                
+
                 start_time.record()
-                
-                # FIX: Use TE FP8 autocast if recipe is available
-                if self.is_fp8 and getattr(self, 'fp8_recipe', None):
-                    import transformer_engine.pytorch as te
-                    with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
+
+                for run_idx in range(num_runs):
+                    # FIX: Use TE FP8 autocast if recipe is available
+                    if self.is_fp8 and getattr(self, 'fp8_recipe', None):
+                        import transformer_engine.pytorch as te
+                        with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
+                            self.model.generate(
+                                **self.model_inputs,
+                                max_new_tokens=self.max_new_tokens,
+                                do_sample=False,
+                                pad_token_id=self.tokenizer.pad_token_id,
+                            )
+                    else:
                         self.model.generate(
                             **self.model_inputs,
                             max_new_tokens=self.max_new_tokens,
                             do_sample=False,
                             pad_token_id=self.tokenizer.pad_token_id,
                         )
-                else:
-                    self.model.generate(
-                        **self.model_inputs,
-                        max_new_tokens=self.max_new_tokens,
-                        do_sample=False,
-                        pad_token_id=self.tokenizer.pad_token_id,
-                    )
-                
+
+                    # Sync between runs to ensure clean measurements
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+
                 end_time.record()
-                
+
                 torch.cuda.synchronize()
-                self.torch_measured_inference_time_us = utils.ms_to_us(start_time.elapsed_time(end_time))
-        
+                total_time_us = utils.ms_to_us(start_time.elapsed_time(end_time))
+                self.torch_measured_inference_time_us = total_time_us / num_runs
+
+        # Store num_runs for downstream analysis
+        self.num_profiled_runs = num_runs
+        print(f"Total time for {num_runs} runs: {utils.us_to_ms(total_time_us):.2f} ms")
+        print(f"Mean time per inference: {utils.us_to_ms(self.torch_measured_inference_time_us):.2f} ms")
+
         prof.export_chrome_trace(str(self.trace_file))
 
     def trace_forward_pass_for_encoder(self) -> None:
         """
         Profiles the forward pass of an encoder model.
-        
-        Args:
-            inputs: A dictionary of tokenized inputs.
+
+        Runs multiple profiled inferences (controlled by --runs) for statistical robustness.
         """
-        print("=== Profiling Model Forward Pass ===")
-        
+        num_runs = getattr(self.args, 'runs', 1)
+        print(f"=== Profiling Model Forward Pass ({num_runs} runs) ===")
+
         # Warm-up runs
         with torch.no_grad():
             for _ in range(max(0, self.args.warmup)):
                 self.model(**self.model_inputs)
-        
+
         # Synchronize before timing
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
-        # Profiled run 
+        # Report GPU clocks for reproducibility
+        utils.report_gpu_clocks(context="after warmup, before profiling")
+
+        # Profiled runs
         with torch.no_grad():
             with profile(
                 activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
@@ -981,13 +1009,20 @@ class ModelTracer:
             ) as prof:
                 start_time = torch.cuda.Event(enable_timing=True)
                 end_time = torch.cuda.Event(enable_timing=True)
-                
+
                 start_time.record()
-                self.model(**self.model_inputs)
+                for _ in range(num_runs):
+                    self.model(**self.model_inputs)
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
                 end_time.record()
-                
+
                 torch.cuda.synchronize()
-                self.torch_measured_inference_time_us = utils.ms_to_us(start_time.elapsed_time(end_time))
+                total_time_us = utils.ms_to_us(start_time.elapsed_time(end_time))
+                self.torch_measured_inference_time_us = total_time_us / num_runs
+
+        self.num_profiled_runs = num_runs
+        print(f"Mean time per inference: {utils.us_to_ms(self.torch_measured_inference_time_us):.2f} ms")
 
         prof.export_chrome_trace(str(self.trace_file))
 

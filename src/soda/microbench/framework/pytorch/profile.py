@@ -859,7 +859,7 @@ def profile_operation(
     prof.export_chrome_trace(str(trace_file))
 
 def replay_all_sequences_from_aten_ops(
-    sequences: List[Dict[str, Any]], 
+    sequences: List[Dict[str, Any]],
     warmup: int,
     runs: int
 ) -> List[Dict[str, Any]]:
@@ -870,7 +870,10 @@ def replay_all_sequences_from_aten_ops(
     sequence_by_idx = {}
     supported_count = 0
     skipped_count = 0
-    
+
+    # Report GPU clock frequencies for reproducibility
+    utils.report_gpu_clocks(context="before replay profiling")
+
     print(f"Profiling {len(sequences)} PyTorch kernels with {runs} run{'s' if runs > 1 else ''} each (warmup={warmup})")
     
     for i, event_sequence in enumerate(sequences):

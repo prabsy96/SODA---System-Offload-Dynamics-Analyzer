@@ -521,7 +521,10 @@ def profile_baremetal_gemm_kernels(
     
     matched_jobs = [j for j in jobs if j.get("heur_idx") is not None and j.get("name") != "__null_kernel__"]
     print(f"Using {len(matched_jobs)} matched algorithms")
-    
+
+    # Report GPU clock frequencies for reproducibility
+    utils.report_gpu_clocks(context="before baremetal profiling")
+
     # Build binary
     print("Building C++ binary")
     build_binary()
