@@ -50,3 +50,6 @@ traces/
 *dev*
 *.csv
 *.pdf
+
+# Private SLURM scripts (never commit personal job configs)
+slurm/run_job.sh
