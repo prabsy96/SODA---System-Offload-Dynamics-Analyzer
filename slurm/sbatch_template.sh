@@ -142,10 +142,7 @@ echo ""
 # -----------------------------------------------------------------------------
 # 2) Prefill sweep — batch size x sequence length grid (max_new_tokens=1)
 #    SODA_SWEEP_CONFIG: prefill | decode | fp8 | debug | all
-#    SODA_SWEEP_MODEL:  leave empty for all, or comma-separated config keys:
-#      Prefill: gpt2_short_ctx, llama_3.2_1b_short_ctx, tinyllama_1.1b,
-#               olmoe_1b_7b, qwen1.5_moe_a2.7b, gpt_oss_20b,
-#               whisper_large_v3, gemma_2b
+
 # -----------------------------------------------------------------------------
 # export SODA_SWEEP_CONFIG="prefill"
 # export SODA_SWEEP_MODEL=""
@@ -155,8 +152,7 @@ echo ""
 # -----------------------------------------------------------------------------
 # 3) Decode sweep — autoregressive generation (max_new_tokens=10+)
 #    SODA_SWEEP_MODEL keys for decode:
-#      gpt_oss_20b, llama_3.2_1b_short_ctx, tinyllama_1.1b,
-#      qwen1.5_moe_a2.7b, olmoe_1b_7b, whisper_large_v3
+d
 # -----------------------------------------------------------------------------
 # export SODA_SWEEP_CONFIG="decode"
 # export SODA_SWEEP_MODEL=""
