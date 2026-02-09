@@ -20,7 +20,7 @@ conda install -y -c pytorch -c nvidia pytorch pytorch-cuda=12.1
 
 # Clone and install
 git clone https://github.com/prabsy96/soda.git
-cd soda
+cd SODA---System-Offload-Dynamics-Analyzer
 pip install -e .
 ```
 
