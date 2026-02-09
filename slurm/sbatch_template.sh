@@ -11,32 +11,19 @@
 #
 # =============================================================================
 
-# -----------------------------------------------------------------------------
-# SLURM Directives
-# -----------------------------------------------------------------------------
-# Cluster partitions and defaults:
-#   Partition   DefaultTime  MaxTime   CPUs/GPU  Mem/GPU  Max GPUs/user
-#   defq        12h          3d 23h    1         64G      H100:8
-#   HGPU        6h           2d        1         32G      H200:4
-#   deadline    4h           24h       1         32G      H100:4
-#
-# Node hardware:
-#   DGX H100 (node-gpu01/02): 8x H100 80GB, 2x Xeon 8480C (56c), 2TB RAM, 28TB /scratch
-#   H200 (node-gpu03):        10x H200 NVL 141GB, 2x Xeon 6538Y (32c), 2TB RAM, 5TB /scratch
-#   cyh-c0-gpu00x:            2x Tesla T4 (or 1x L4), 2x Xeon 6126, 256GB RAM, 768GB /scratch
-# -----------------------------------------------------------------------------
+
 
 #SBATCH --job-name=soda_run
 #SBATCH --output=soda_%j.out
 #SBATCH --error=soda_%j.err
 #SBATCH -t 0-06:00:00
 
-#SBATCH -p defq                    # Partition: defq | HGPU | deadline
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
+# SBATCH -p partition_name_here   # e.g., gpu, H100
+#SBATCH --nodes=1   # Number of nodes (adjust if your job requires multiple nodes)
+#SBATCH --ntasks=1  # Number of tasks (usually 1 for single-process jobs)
 #SBATCH --gres=gpu:1               # Number of GPUs (e.g., gpu:2 for multi-GPU)
-#SBATCH --cpus-per-gpu=6
-#SBATCH --mem-per-gpu=64G          # defq: up to 64G, HGPU: up to 180G
+#SBATCH --cpus-per-gpu=6     # CPU cores per GPU (adjust based on your workload)
+#SBATCH --mem-per-gpu=64G          # Memory per GPU (adjust based on your model size and batch size)
 
 # =============================================================================
 # USER CONFIGURATION — Edit these values for your setup
@@ -61,9 +48,10 @@ HF_TOKEN="${HF_TOKEN:-}"
 # HuggingFace cache directory (default: /scratch/$USER/hf_cache)
 HF_HOME="${HF_HOME:-/scratch/$USER/hf_cache}"
 
-# Additional pip packages to install at job start (space-separated)
-# Examples: "transformer-engine" for FP8, "flash-attn" for Flash Attention
-EXTRA_PIP_PACKAGES=""
+# Optional packages (space-separated, set to "" to skip)
+# flash-attn:         Flash Attention kernels (requires CUDA toolkit + ninja)
+# transformer-engine: FP8 support on H100/H200 (requires CUDA 12+)
+EXTRA_PIP_PACKAGES="flash-attn transformer-engine"
 
 # =============================================================================
 # ENVIRONMENT SETUP — Typically no changes needed below this line
@@ -110,10 +98,13 @@ fi
 # Install SODA package
 pip install -e "$SODA_PROJECT_ROOT" --quiet 2>/dev/null
 
-# Install extra packages
+# Install extra packages (flash-attn, transformer-engine, etc.)
 if [ -n "$EXTRA_PIP_PACKAGES" ]; then
     echo "Installing extra packages: $EXTRA_PIP_PACKAGES"
-    pip install $EXTRA_PIP_PACKAGES --quiet 2>/dev/null
+    for pkg in $EXTRA_PIP_PACKAGES; do
+        pip install "$pkg" --quiet --no-build-isolation 2>/dev/null || \
+            echo "Warning: Failed to install $pkg (may need CUDA toolkit or ninja)"
+    done
 fi
 
 # Verify environment
@@ -132,10 +123,12 @@ if torch.cuda.is_available():
 echo ""
 
 # =============================================================================
-# JOB COMMANDS — Replace with your SODA commands
+# JOB COMMANDS — Uncomment ONE section below (or write your own)
 # =============================================================================
 
-# Example 1: Run soda-cli
+# -----------------------------------------------------------------------------
+# 1) Single model analysis via soda-cli
+# -----------------------------------------------------------------------------
 # soda-cli \
 #     --model gpt2 \
 #     --output-dir output/ \
@@ -144,29 +137,71 @@ echo ""
 #     --precision float16 \
 #     2>&1 | tee "$SODA_OUTPUT/console.log"
 
-# Example 2: Programmatic API
-# python -u -c "
-# from soda import ModelTracer, SodaAnalyzer
-# from soda.common import utils
-#
-# args = utils.parse_and_validate_args([
-#     '--model', 'meta-llama/Llama-3.2-1B',
-#     '--output-dir', 'output/',
-#     '--batch-size', '1',
-#     '--seq-len', '512',
-#     '--precision', 'bfloat16',
-#     '--compile-type', 'eager',
-#     '--device', 'cuda',
-#     '--warmup', '3',
-# ])
-#
-# tracer = ModelTracer(args=args)
-# tracer.run()
-# analyzer = SodaAnalyzer(tracer=tracer, args=args)
-# analyzer.run()
-# "
 
-echo "YOUR COMMAND HERE"
+
+# -----------------------------------------------------------------------------
+# 2) Prefill sweep — batch size x sequence length grid (max_new_tokens=1)
+#    SODA_SWEEP_CONFIG: prefill | decode | fp8 | debug | all
+
+# -----------------------------------------------------------------------------
+# export SODA_SWEEP_CONFIG="prefill"
+# export SODA_SWEEP_MODEL=""
+# python -u "$SODA_ROOT/experiments/sweep/soda_sweep.py" \
+#     2>&1 | tee "$SODA_OUTPUT/prefill_sweep.log"
+
+# -----------------------------------------------------------------------------
+# 3) Decode sweep — autoregressive generation (max_new_tokens=10+)
+#    SODA_SWEEP_MODEL keys for decode:
+d
+# -----------------------------------------------------------------------------
+# export SODA_SWEEP_CONFIG="decode"
+# export SODA_SWEEP_MODEL=""
+# python -u "$SODA_ROOT/experiments/sweep/soda_sweep.py" \
+#     2>&1 | tee "$SODA_OUTPUT/decode_sweep.log"
+
+# -----------------------------------------------------------------------------
+# 4) FP8 sweep (H100/H200 only, requires transformer-engine)
+#    Model: gpt_oss_20b_fp8 with float8_e4m3fn precision
+# -----------------------------------------------------------------------------
+# export SODA_SWEEP_CONFIG="fp8"
+# python -u "$SODA_ROOT/experiments/sweep/soda_sweep.py" \
+#     2>&1 | tee "$SODA_OUTPUT/fp8_sweep.log"
+
+# -----------------------------------------------------------------------------
+# 5) Debug sweep — quick sanity check (gpt2, bs=[1,2], sl=[128,256])
+# -----------------------------------------------------------------------------
+# export SODA_SWEEP_CONFIG="debug"
+# python -u "$SODA_ROOT/experiments/sweep/soda_sweep.py" \
+#     2>&1 | tee "$SODA_OUTPUT/debug_sweep.log"
+
+# -----------------------------------------------------------------------------
+# 6) Microbenchmark sweep — GEMM kernel analysis (baremetal + PyTorch)
+#    Requires baremetal binary. Uses same SODA_SWEEP_CONFIG / SODA_SWEEP_MODEL
+#    / SODA_CUSTOM_MODEL env vars as soda_sweep.py.
+# -----------------------------------------------------------------------------
+# build
+# export SODA_SWEEP_CONFIG="prefill"
+# export SODA_SWEEP_MODEL=""
+# python -u "$SODA_ROOT/experiments/sweep/microbench_sweep.py" \
+#     2>&1 | tee "$SODA_OUTPUT/microbench_sweep.log"
+
+# -----------------------------------------------------------------------------
+# 7) Custom model sweep — any HuggingFace model, no config.py needed
+#    Works with both soda_sweep.py and microbench_sweep.py.
+#    Env vars:
+#      SODA_CUSTOM_MODEL   (required) Any HF model ID
+#      SODA_BATCH_SIZES    (default: "1,2,4,8,16")
+#      SODA_SEQ_LENS       (default: "128,256,512,1024")
+#      SODA_MAX_NEW_TOKENS (default: "1")
+#      SODA_PRECISION      (default: "bfloat16")
+# -----------------------------------------------------------------------------
+# export SODA_CUSTOM_MODEL="meta-llama/Llama-3.2-1B"
+# export SODA_BATCH_SIZES="1,2,4,8"
+# export SODA_SEQ_LENS="512,1024,2048,4096"
+# export SODA_MAX_NEW_TOKENS="1"
+# export SODA_PRECISION="bfloat16"
+# python -u "$SODA_ROOT/experiments/sweep/soda_sweep.py" \
+#     2>&1 | tee "$SODA_OUTPUT/custom_sweep.log"
 
 # =============================================================================
 

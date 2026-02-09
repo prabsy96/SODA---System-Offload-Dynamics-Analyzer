@@ -38,8 +38,8 @@ def get_gpu_suffix() -> str:
     if "H200" in name: return "H200"
     if "A100" in name: return "A100"
     if "V100" in name: return "V100"
-    if "T4" in name: return "T4"     # ADD THIS LINE
-    if "L4" in name: return "L4"     # ADD THIS LINE (for the L4 node)
+    if "T4" in name: return "T4"
+    if "L4" in name: return "L4"
     if "4090" in name: return "4090"
     return "gpu"
 
@@ -54,42 +54,72 @@ def main() -> None:
     device = PARAMS["device"]
     warmup = PARAMS["inference_warmup"]
 
-    # select config from env variable 
-    config_type = os.environ.get("SODA_SWEEP_CONFIG", "prefill").lower()
-    if config_type == "decode":
-        SWEEP_CONFIG = DEC_SWEEP_CONFIG
-    elif config_type == "debug":
-        SWEEP_CONFIG = DEBUG_SWEEP_CONFIG
-    elif config_type == "fp8":
-        # Verify H100/H200 for FP8
-        if gpu_suffix not in ("H100", "H200"):
-            print(f"Error: FP8 requires H100/H200 GPU. Detected: {gpu_suffix}", file=sys.stderr)
-            sys.exit(1)
-        SWEEP_CONFIG = FP8_SWEEP_CONFIG
-        # FIX: Update precision variable so the sweep root directory is named correctly
-        precision = "float8_e4m3fn"
-    elif config_type == "all":
-        SWEEP_CONFIG = dict(PREF_SWEEP_CONFIG)
-        for k, v in DEC_SWEEP_CONFIG.items():
-            key = f"{k}_dec" if k in SWEEP_CONFIG else k
-            SWEEP_CONFIG[key] = v
-    else:
-        SWEEP_CONFIG = PREF_SWEEP_CONFIG
+    # Custom model override: pass any HF model ID via SODA_CUSTOM_MODEL
+    # with optional SODA_BATCH_SIZES, SODA_SEQ_LENS, SODA_MAX_NEW_TOKENS
+    custom_model = os.environ.get("SODA_CUSTOM_MODEL")
+    if custom_model:
+        batch_sizes_str = os.environ.get("SODA_BATCH_SIZES", "1,2,4,8,16")
+        seq_lens_str = os.environ.get("SODA_SEQ_LENS", "128,256,512,1024")
+        max_new_tokens_str = os.environ.get("SODA_MAX_NEW_TOKENS", "1")
+        custom_precision = os.environ.get("SODA_PRECISION", precision)
 
-    model_filter = os.environ.get("SODA_SWEEP_MODEL")
-    if model_filter:
-        models = [m.strip() for m in model_filter.split(",")]
-        filtered = {}
-        for m in models:
-            if m in SWEEP_CONFIG:
-                filtered[m] = SWEEP_CONFIG[m]
-            else:
-                print(f"Warning: Model '{m}' not found in {config_type} config. Available: {list(SWEEP_CONFIG.keys())}", file=sys.stderr)
-        if not filtered:
-            print(f"Error: No valid models found. Exiting.", file=sys.stderr)
-            sys.exit(1)
-        SWEEP_CONFIG = filtered
-    
+        custom_batch_sizes = sorted([int(x.strip()) for x in batch_sizes_str.split(",")], reverse=True)
+        custom_seq_lens = sorted([int(x.strip()) for x in seq_lens_str.split(",")], reverse=True)
+        custom_max_new_toks = [int(x.strip()) for x in max_new_tokens_str.split(",")]
+
+        config_key = custom_model.replace("/", "_").replace("-", "_")
+        SWEEP_CONFIG = {
+            config_key: {
+                "model_name": custom_model,
+                "batch_sizes": custom_batch_sizes,
+                "seq_lens": custom_seq_lens,
+                "max_new_toks": custom_max_new_toks,
+                "precision": custom_precision,
+            }
+        }
+        if custom_precision != precision:
+            precision = custom_precision
+        config_type = "custom"
+        print(f"Running custom model: {custom_model}")
+        print(f"  batch_sizes:     {custom_batch_sizes}")
+        print(f"  seq_lens:        {custom_seq_lens}")
+        print(f"  max_new_tokens:  {custom_max_new_toks}")
+        print(f"  precision:       {custom_precision}")
+    else:
+        # Select config from env variable
+        config_type = os.environ.get("SODA_SWEEP_CONFIG", "prefill").lower()
+        if config_type == "decode":
+            SWEEP_CONFIG = DEC_SWEEP_CONFIG
+        elif config_type == "debug":
+            SWEEP_CONFIG = DEBUG_SWEEP_CONFIG
+        elif config_type == "fp8":
+            if gpu_suffix not in ("H100", "H200"):
+                print(f"Error: FP8 requires H100/H200 GPU. Detected: {gpu_suffix}", file=sys.stderr)
+                sys.exit(1)
+            SWEEP_CONFIG = FP8_SWEEP_CONFIG
+            precision = "float8_e4m3fn"
+        elif config_type == "all":
+            SWEEP_CONFIG = dict(PREF_SWEEP_CONFIG)
+            for k, v in DEC_SWEEP_CONFIG.items():
+                key = f"{k}_dec" if k in SWEEP_CONFIG else k
+                SWEEP_CONFIG[key] = v
+        else:
+            SWEEP_CONFIG = PREF_SWEEP_CONFIG
+
+        model_filter = os.environ.get("SODA_SWEEP_MODEL")
+        if model_filter:
+            models = [m.strip() for m in model_filter.split(",")]
+            filtered = {}
+            for m in models:
+                if m in SWEEP_CONFIG:
+                    filtered[m] = SWEEP_CONFIG[m]
+                else:
+                    print(f"Warning: Model '{m}' not found in {config_type} config. Available: {list(SWEEP_CONFIG.keys())}", file=sys.stderr)
+            if not filtered:
+                print(f"Error: No valid models found. Exiting.", file=sys.stderr)
+                sys.exit(1)
+            SWEEP_CONFIG = filtered
+
     print(f"Running sweep config: {config_type}")
     print(f"Models: {list(SWEEP_CONFIG.keys())}")
 
@@ -122,10 +152,8 @@ def main() -> None:
             if sl > max_pos:
                 print(f"Skipping bs={bs}, sl={sl}: exceeds model max_position_embeddings ({max_pos})")
                 continue
-            
-            
 
-            print(f"\n\n\n=== Running sweep point: batch_size={bs}, seq_len={sl}, max_new_tokens={max_new_tokens} ===")
+            print(f"\n=== Running sweep point: batch_size={bs}, seq_len={sl}, max_new_tokens={max_new_tokens} ===")
             exp_name = utils.generate_experiment_name(model, compile_type, run_precision, bs, sl, max_new_tokens)
             cli_args = [
                 "--model", model,
@@ -183,7 +211,6 @@ def main() -> None:
                     continue
                 raise
 
-        # === FIX START: Generate summary immediately after this model finishes ===
         if sweep_root.exists():
             print(f"\n=== Generating summary for {sweep_root} ===")
             try:
@@ -193,9 +220,7 @@ def main() -> None:
                 print(f"Warning: Could not generate summary for {sweep_root}: {e}")
                 import traceback
                 traceback.print_exc()
-        # === FIX END ===
 
-    # Remove the redundant summary blocks at the end of main()
     print("\n=== Sweep Completed ===")
 
 

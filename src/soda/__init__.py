@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sys
+import time
 from datetime import datetime
 import traceback
 import numpy as np
@@ -404,7 +405,17 @@ class ModelTracer:
         """
         self.args = args
         self.model_name = args.model
-        self.device = torch.device(args.device)
+        
+        # Detect CUDA availability once and store for use throughout
+        self._has_cuda = torch.cuda.is_available()
+        
+        # If device is explicitly set to cuda but CUDA is not available, fall back to CPU
+        requested_device = args.device
+        if 'cuda' in requested_device and not self._has_cuda:
+            print(f"Warning: CUDA requested ('{requested_device}') but not available. Falling back to CPU.")
+            requested_device = 'cpu'
+        
+        self.device = torch.device(requested_device)
         self.compile_type = args.compile_type
         # DEBUG: Print precision settings
         print(f"DEBUG: args.precision='{args.precision}'")
@@ -416,7 +427,7 @@ class ModelTracer:
         # Set random seeds
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
-        if torch.cuda.is_available():
+        if self._has_cuda:
             torch.cuda.manual_seed_all(args.seed)
 
         # Setup deterministic mode for microbench
@@ -474,6 +485,21 @@ class ModelTracer:
         self.sequences = None
         self.torch_measured_inference_time_us = None
     
+    def _get_profiler_activities(self) -> List:
+        """Returns the appropriate profiler activities based on device availability."""
+        activities = [ProfilerActivity.CPU]
+        if self._has_cuda:
+            activities.append(ProfilerActivity.CUDA)
+            print("Profiling: CPU + CUDA")
+        else:
+            print("Profiling: CPU-only (no CUDA device detected)")
+        return activities
+    
+    def _sync_device(self) -> None:
+        """Synchronize CUDA device if available, no-op otherwise."""
+        if self._has_cuda:
+            torch.cuda.synchronize()
+    
     def setup(self) -> None:
         """
         Loads the model/tokenizer and prepares synthetic inputs.
@@ -503,7 +529,7 @@ class ModelTracer:
         """Returns common kwargs for model loading."""
         kwargs = {
             "dtype": self.load_precision,
-            "device_map": self.device if self.device.type == 'cuda' else 'cpu',
+            "device_map": self.device if self._has_cuda else 'cpu',
             "trust_remote_code": True,
         }
         
@@ -571,7 +597,7 @@ class ModelTracer:
         
         # Force GC to reclaim memory after replacements
         gc.collect()
-        if torch.cuda.is_available():
+        if self._has_cuda:
             torch.cuda.empty_cache()
 
             
@@ -861,37 +887,44 @@ class ModelTracer:
                 )
 
         # Synchronize before timing
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        self._sync_device()
 
         # Report GPU clocks for reproducibility
-        utils.report_gpu_clocks(context="after warmup, before profiling")
+        if self._has_cuda:
+            utils.report_gpu_clocks(context="after warmup, before profiling")
 
         # Profiled runs
         with torch.no_grad():
             with profile(
-                activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
+                activities=self._get_profiler_activities(),
                 with_modules=True,
                 with_flops=True,
                 profile_memory=True,
                 record_shapes=True,
             ) as prof:
-                start_time = torch.cuda.Event(enable_timing=True)
-                end_time = torch.cuda.Event(enable_timing=True)
+                if self._has_cuda:
+                    start_event = torch.cuda.Event(enable_timing=True)
+                    end_event = torch.cuda.Event(enable_timing=True)
+                    start_event.record()
+                else:
+                    wall_start = time.perf_counter()
 
-                start_time.record()
                 for _ in range(num_runs):
                     self.model.generate(
                         **self.model_inputs,
                         max_new_tokens=self.max_new_tokens,
                         do_sample=False,
                     )
-                    if torch.cuda.is_available():
-                        torch.cuda.synchronize()
-                end_time.record()
+                    self._sync_device()
 
-                torch.cuda.synchronize()
-                total_time_us = utils.ms_to_us(start_time.elapsed_time(end_time))
+                if self._has_cuda:
+                    end_event.record()
+                    torch.cuda.synchronize()
+                    total_time_us = utils.ms_to_us(start_event.elapsed_time(end_event))
+                else:
+                    wall_end = time.perf_counter()
+                    total_time_us = (wall_end - wall_start) * 1e6  # seconds -> µs
+
                 self.torch_measured_inference_time_us = total_time_us / num_runs
 
         self.num_profiled_runs = num_runs
@@ -920,26 +953,28 @@ class ModelTracer:
                 )
 
         # Synchronize before timing
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        self._sync_device()
 
         # Report GPU clocks for reproducibility
-        utils.report_gpu_clocks(context="after warmup, before profiling")
+        if self._has_cuda:
+            utils.report_gpu_clocks(context="after warmup, before profiling")
 
         # Profiled runs - run num_runs inferences within profiler
         # All runs are captured in a single trace; metrics are averaged by frequency
         with torch.no_grad():
             with profile(
-                activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
+                activities=self._get_profiler_activities(),
                 with_modules=True,
                 with_flops=True,
                 profile_memory=True,
                 record_shapes=True,
             ) as prof:
-                start_time = torch.cuda.Event(enable_timing=True)
-                end_time = torch.cuda.Event(enable_timing=True)
-
-                start_time.record()
+                if self._has_cuda:
+                    start_event = torch.cuda.Event(enable_timing=True)
+                    end_event = torch.cuda.Event(enable_timing=True)
+                    start_event.record()
+                else:
+                    wall_start = time.perf_counter()
 
                 for run_idx in range(num_runs):
                     # FIX: Use TE FP8 autocast if recipe is available
@@ -961,13 +996,16 @@ class ModelTracer:
                         )
 
                     # Sync between runs to ensure clean measurements
-                    if torch.cuda.is_available():
-                        torch.cuda.synchronize()
+                    self._sync_device()
 
-                end_time.record()
+                if self._has_cuda:
+                    end_event.record()
+                    torch.cuda.synchronize()
+                    total_time_us = utils.ms_to_us(start_event.elapsed_time(end_event))
+                else:
+                    wall_end = time.perf_counter()
+                    total_time_us = (wall_end - wall_start) * 1e6  # seconds -> µs
 
-                torch.cuda.synchronize()
-                total_time_us = utils.ms_to_us(start_time.elapsed_time(end_time))
                 self.torch_measured_inference_time_us = total_time_us / num_runs
 
         # Store num_runs for downstream analysis
@@ -992,33 +1030,40 @@ class ModelTracer:
                 self.model(**self.model_inputs)
 
         # Synchronize before timing
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        self._sync_device()
 
         # Report GPU clocks for reproducibility
-        utils.report_gpu_clocks(context="after warmup, before profiling")
+        if self._has_cuda:
+            utils.report_gpu_clocks(context="after warmup, before profiling")
 
         # Profiled runs
         with torch.no_grad():
             with profile(
-                activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
+                activities=self._get_profiler_activities(),
                 with_modules=True,
                 with_flops=True,
                 profile_memory=True,
                 record_shapes=True,
             ) as prof:
-                start_time = torch.cuda.Event(enable_timing=True)
-                end_time = torch.cuda.Event(enable_timing=True)
+                if self._has_cuda:
+                    start_event = torch.cuda.Event(enable_timing=True)
+                    end_event = torch.cuda.Event(enable_timing=True)
+                    start_event.record()
+                else:
+                    wall_start = time.perf_counter()
 
-                start_time.record()
                 for _ in range(num_runs):
                     self.model(**self.model_inputs)
-                    if torch.cuda.is_available():
-                        torch.cuda.synchronize()
-                end_time.record()
+                    self._sync_device()
 
-                torch.cuda.synchronize()
-                total_time_us = utils.ms_to_us(start_time.elapsed_time(end_time))
+                if self._has_cuda:
+                    end_event.record()
+                    torch.cuda.synchronize()
+                    total_time_us = utils.ms_to_us(start_event.elapsed_time(end_event))
+                else:
+                    wall_end = time.perf_counter()
+                    total_time_us = (wall_end - wall_start) * 1e6  # seconds -> µs
+
                 self.torch_measured_inference_time_us = total_time_us / num_runs
 
         self.num_profiled_runs = num_runs

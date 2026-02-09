@@ -14,7 +14,7 @@ import torch
 from soda import ModelTracer
 from soda.microbench.microbench import SodaMicrobench
 from soda.common import utils
-from experiments.sweep.config import PARAMS, PREF_SWEEP_CONFIG, DEC_SWEEP_CONFIG, DEBUG_SWEEP_CONFIG  # Fixed import names
+from experiments.sweep.config import PARAMS, PREF_SWEEP_CONFIG, DEC_SWEEP_CONFIG, DEBUG_SWEEP_CONFIG, FP8_SWEEP_CONFIG
 
 
 def get_gpu_name() -> str:
@@ -40,26 +40,48 @@ def ensure_env_loaded() -> None:
 def get_sweep_configs():
     """
     Select sweep configs based on environment variables.
-    
-    SODA_SWEEP_CONFIG: "prefill", "decode", "debug", or "all" (default: "prefill")
+
+    SODA_CUSTOM_MODEL: Any HF model ID — bypasses config.py presets
+    SODA_SWEEP_CONFIG: "prefill", "decode", "debug", "fp8", or "all" (default: "prefill")
     SODA_SWEEP_MODEL: Specific model key to run, or "all" (default: "all")
     """
+    # Custom model override
+    custom_model = os.environ.get("SODA_CUSTOM_MODEL")
+    if custom_model:
+        precision = PARAMS["precision"]
+        batch_sizes_str = os.environ.get("SODA_BATCH_SIZES", "1,2,4,8,16")
+        seq_lens_str = os.environ.get("SODA_SEQ_LENS", "128,256,512,1024")
+        max_new_tokens_str = os.environ.get("SODA_MAX_NEW_TOKENS", "1")
+        custom_precision = os.environ.get("SODA_PRECISION", precision)
+
+        config_key = custom_model.replace("/", "_").replace("-", "_")
+        return {
+            config_key: {
+                "model_name": custom_model,
+                "batch_sizes": sorted([int(x.strip()) for x in batch_sizes_str.split(",")], reverse=True),
+                "seq_lens": sorted([int(x.strip()) for x in seq_lens_str.split(",")], reverse=True),
+                "max_new_toks": [int(x.strip()) for x in max_new_tokens_str.split(",")],
+                "precision": custom_precision,
+            }
+        }
+
     config_type = os.environ.get("SODA_SWEEP_CONFIG", "prefill").lower()
     model_filter = os.environ.get("SODA_SWEEP_MODEL", "all")
-    
+
     # Select config set based on type
     if config_type == "decode":
         base_configs = DEC_SWEEP_CONFIG
     elif config_type == "debug":
         base_configs = DEBUG_SWEEP_CONFIG
+    elif config_type == "fp8":
+        base_configs = FP8_SWEEP_CONFIG
     elif config_type == "all":
-        # Merge all configs
         base_configs = {}
         base_configs.update(PREF_SWEEP_CONFIG)
         base_configs.update({f"dec_{k}": v for k, v in DEC_SWEEP_CONFIG.items()})
     else:  # default to prefill
         base_configs = PREF_SWEEP_CONFIG
-    
+
     # Filter by model if specified
     if model_filter != "all":
         if model_filter in base_configs:
@@ -68,7 +90,7 @@ def get_sweep_configs():
             print(f"Warning: Model '{model_filter}' not found in {config_type} configs.", file=sys.stderr)
             print(f"Available models: {list(base_configs.keys())}", file=sys.stderr)
             sys.exit(1)
-    
+
     return base_configs
 
 
