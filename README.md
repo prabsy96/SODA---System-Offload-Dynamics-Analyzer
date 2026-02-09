@@ -37,9 +37,12 @@ soda-cli --model gpt2 --output-dir output/ --seq-len 512 --batch-size 1 --precis
 python -m soda --model gpt2 --output-dir output/ --seq-len 512 --batch-size 1 --precision float16
 ```
 
-For SLURM clusters:
+## Running on SLURM Clusters
+
+A template SLURM sbatch script is provided at [`slurm/run_job.sh`](slurm/sbatch_template.sh). Edit the configuration variables at the top and the job commands at the bottom, then submit:
+
 ```bash
-sbatch examples/sbatch_h100.sh
+sbatch slurm/sbatch_template.sh
 ```
 
 ## Project Structure
@@ -51,43 +54,15 @@ SODA---System-Offload-Dynamics-Analyzer/
 │   ├── __main__.py                # python -m soda support
 │   ├── common/                    # Utilities, data structures, trace parsing
 │   └── microbench/                # Microbenchmarking pipeline
-│       ├── framework/pytorch/     # PyTorch GEMM profiling
-│       └── baremetal/             # cuBLAS comparison (C++)
-├── examples/                      # General-purpose examples and sbatch scripts
 ├── experiments/
-│   ├── sweep/                     # Parameter sweep infrastructure
-│   └── rebuttal/                  # ISPASS 2026 reviewer experiments
-│       ├── ct_standalone_microbench.py
-│       ├── ct_validation_microbench.py
-│       ├── optimization_comparison.py
-│       ├── validate_ct.py
-│       ├── moe_fragmentation_analysis.py
+│   ├── sweep/                     # Parameter sweep orchestration
+│   └── rebuttal/
 │       └── slurm/                 # SLURM scripts for rebuttal experiments
-├── pyproject.toml
-├── env.sh                         # Environment setup (source before running)
-└── CLAUDE.md
-```
-
-## CLI Reference
-
-| Argument | Description |
-|----------|-------------|
-| `--model MODEL` | HuggingFace model name (gpt2, meta-llama/Llama-3.2-3B, etc.) |
-| `--output-dir PATH` | Output directory for results |
-| `--seq-len INT` | Input sequence length |
-| `--batch-size INT` | Batch size |
-| `--precision DTYPE` | float16, bfloat16, float32, float8_e4m3fn |
-| `--fusion K` | Kernel fusion analysis (K=2 or 3) |
-| `--microbench` | Enable microbenchmarking mode |
-
-## Running Experiments
-
-Experiments are run via SLURM sbatch scripts that handle environment setup and sweep configuration:
-
-```bash
-# Set sweep config
-export SODA_SWEEP_CONFIG="decode"  # Options: prefill, decode, debug, all
-sbatch examples/sbatch_h100.sh
+├── slurm/
+│   └── run_job.sh                 # SLURM job template
+├── env.sh                         # Environment setup & helper functions
+├── FORMULAS.md                    # Comprehensive formula reference
+└── README.md
 ```
 
 ## Building the Baremetal Binary

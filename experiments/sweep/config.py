@@ -3,7 +3,7 @@
 # Soda Analyzer
 INFERENCE_WARMUP = "5" # Default; inference time can be in seconds so 5x = 5 seconds
 
-# Soda Microbench 
+# Soda Microbench
 MICROBENCH_WARMUP = "1000"
 MICROBENCH_RUNS = "5000"
 
@@ -23,7 +23,7 @@ PARAMS = {
     "microbench_runs": MICROBENCH_RUNS,
 }
 
-## PREFILL
+## PREFILL (max_new_tokens=1)
 PREF_SWEEP_CONFIG = {
     "gpt2_short_ctx": {
         "model_name": "gpt2",
@@ -43,7 +43,7 @@ PREF_SWEEP_CONFIG = {
         "seq_lens": sorted([128, 256, 512, 1024, 2048], reverse=True),
         "max_new_toks": [1],
     },
-    "olmoe_1b_7b_prefill": {
+    "olmoe_1b_7b": {
         "model_name": "allenai/OLMoE-1B-7B-0924",
         "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
         "seq_lens": sorted([512, 1024, 2048, 4096, 8192], reverse=True),
@@ -53,58 +53,36 @@ PREF_SWEEP_CONFIG = {
         "model_name": "Qwen/Qwen1.5-MoE-A2.7B",
         "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
         "seq_lens": sorted([512, 1024, 2048, 4096, 8192], reverse=True),
-        # "max_new_toks": [10],
         "max_new_toks": [1],
     },
     "gpt_oss_20b": {
-    "model_name": "openai/gpt-oss-20b",
-    "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),  # lightweight MoE, smaller active params
-    "seq_lens": sorted([512, 1024, 2048, 4096], reverse=True),  # supports up to 4k context
-    "max_new_toks": [1],
+        "model_name": "openai/gpt-oss-20b",
+        "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
+        "seq_lens": sorted([512, 1024, 2048, 4096], reverse=True),
+        "max_new_toks": [1],
     },
-    # "mixtral_8x7b": {
-    #     "model_name": "mistralai/Mixtral-8x7B-v0.1",
-    #     "batch_sizes": sorted([1, 2, 4], reverse=True),  # Reduced due to model size
-    #     "seq_lens": sorted([512, 1024, 2048, 4096], reverse=True),  # Max 4k to avoid OOM
-    #     "max_new_toks": [10],
-    # },
-    "whisper_large_v3_prefill": {
+    "whisper_large_v3": {
         "model_name": "openai/whisper-large-v3",
         "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
-        # Sweep Audio Durations: 30s (Standard), 10s, 2s
-        # Note: Whisper pads to 30s internally, so these might have similar runtime
         "seq_lens": sorted([32000, 160000, 480000], reverse=True),
         "max_new_toks": [1],
     },
-    # Added for Reviewer B: HDBI on modern models
-    "gemma_2b_hsb": {
+    "gemma_2b": {
         "model_name": "google/gemma-2b",
-        "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
-        "seq_lens": sorted([512, 1024, 2048, 4096, 8192], reverse=True),
-        "max_new_toks": [1],
-    },
-    "olmoe_1b_7b_hsb": {
-        "model_name": "allenai/OLMoE-1B-7B-0924",
         "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
         "seq_lens": sorted([512, 1024, 2048, 4096, 8192], reverse=True),
         "max_new_toks": [1],
     },
 }
 
-# DECODE
+## DECODE (max_new_tokens=10+)
 DEC_SWEEP_CONFIG = {
     "gpt_oss_20b": {
-    "model_name": "openai/gpt-oss-20b",
-    "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),  # lightweight MoE, smaller active params
-    "seq_lens": sorted([512, 1024, 2048, 4096], reverse=True),  # supports up to 4k context
-    "max_new_toks": [10],
+        "model_name": "openai/gpt-oss-20b",
+        "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
+        "seq_lens": sorted([512, 1024, 2048, 4096], reverse=True),
+        "max_new_toks": [10],
     },
-    # "gpt2_short_ctx": {
-    #     "model_name": "gpt2",
-    #     "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
-    #     "seq_lens":  sorted([128, 256, 512, 1024], reverse=True),
-    #     "max_new_toks": [10], # FIXME: @prabhu should this be 10? 
-    # },
     "llama_3.2_1b_short_ctx": {
         "model_name": "meta-llama/Llama-3.2-1B",
         "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
@@ -121,123 +99,39 @@ DEC_SWEEP_CONFIG = {
         "model_name": "Qwen/Qwen1.5-MoE-A2.7B",
         "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
         "seq_lens": sorted([512, 1024, 2048, 4096, 8192], reverse=True),
-        # "max_new_toks": [10],
         "max_new_toks": [10],
     },
-    "olmoe_1b_7b_prefill": {
+    "olmoe_1b_7b": {
         "model_name": "allenai/OLMoE-1B-7B-0924",
         "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
         "seq_lens": sorted([512, 1024, 2048, 4096, 8192], reverse=True),
         "max_new_toks": [10],
     },
-    "whisper_large_v3_prefill": {
+    "whisper_large_v3": {
         "model_name": "openai/whisper-large-v3",
         "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
-        # Sweep Audio Durations: 30s (Standard), 10s, 2s
-        # Note: Whisper pads to 30s internally, so these might have similar runtime
         "seq_lens": sorted([32000, 160000, 480000], reverse=True),
-        "max_new_toks": [50], 
+        "max_new_toks": [50],
     },
 }
 
+## DEBUG (quick sanity check)
 DEBUG_SWEEP_CONFIG = {
-    # GPT-2 short context
     "gpt2_short_ctx": {
         "model_name": "gpt2",
         "batch_sizes": sorted([1, 2], reverse=True),
         "seq_lens": sorted([128, 256], reverse=True),
         "max_new_toks": [1],
     },
-    
-    # # Llama-3.2-1B short context
-    # "llama_3.2_1b_short_ctx": {
-    #     "model_name": "meta-llama/Llama-3.2-1B",
-    #     # "batch_sizes": sorted([1, 2, 4, 8], reverse=True),
-    #     # "seq_lens": sorted([512, 1024, 2048], reverse=True),
-    #     "max_new_toks": [1],
-    # },
-
-    # # TinyLlama-1.1B short context
-    # "tinyllama_1.1b": {
-    #     "model_name": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    #     "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
-    #     "seq_lens": sorted([128, 256, 512, 1024, 2048], reverse=True),
-    #     # FIXME: DEBUG ONLY
-    #     # "batch_sizes": sorted([1, 2, 4, 8], reverse=True),
-    #     # "seq_lens": sorted([512, 1024, 2048], reverse=True),
-    #     "max_new_toks": [1],
-    # },
 }
 
+## FP8 (H100/H200 only)
 FP8_SWEEP_CONFIG = {
     "gpt_oss_20b_fp8": {
         "model_name": "openai/gpt-oss-20b",
         "batch_sizes": sorted([8, 16]),
         "seq_lens": sorted([512, 1024, 2048, 4096]),
         "max_new_toks": [1],
-        "precision": "float8_e4m3fn",  # Override default precision
-    },
-}
-
-
-# HSB Analysis Configuration
-HSB_CONFIG = {
-    # Default T_fo (framework overhead) for kernels not in LUT (in microseconds)
-    # If None, uses average of known kernels
-    "default_t_fo": None,
-    
-    # Minimum T_Structural threshold to avoid division issues
-    "t_structural_epsilon": 1e-6,
-    
-    # HSB classification thresholds
-    "hsb_thresholds": {
-        "hardware_bound": 0.5,      # HSB >= 0.5 is hardware-bound
-        "balanced_upper": 0.5,      # HSB < 0.5 and >= 0 is balanced
-        "framework_bound": 0.0,     # HSB < 0 is framework-bound
-    },
-    
-    # Whether to generate reference taxbreak LUT if not found
-    "auto_generate_lut": True,
-    
-    # Reference configuration for LUT generation
-    "lut_reference_config": {
-        "batch_size": 1,
-        "seq_len": 128,
-        "max_new_tokens": 1,
-    },
-}
-
-# HSB Sweep Configuration
-HSB_SWEEP_CONFIG = {
-    "gpt2_hsb": {
-        "model_name": "gpt2",
-        "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
-        "seq_lens": sorted([128, 256, 512, 1024], reverse=True),
-        "max_new_toks": [1],
-    },
-    "llama_3.2_1b_hsb": {
-        "model_name": "meta-llama/Llama-3.2-1B",
-        "batch_sizes": sorted([1, 2, 4, 8], reverse=True),
-        "seq_lens": sorted([512, 1024, 2048, 4096], reverse=True),
-        "max_new_toks": [1],
-    },
-    "tinyllama_1.1b_hsb": {
-        "model_name": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
-        "seq_lens": sorted([128, 256, 512, 1024, 2048], reverse=True),
-        "max_new_toks": [1],
-    },
-    # Added for Reviewer B: HDBI on modern models (Gemma, OLMoE-7B)
-    "gemma_2b_hsb": {
-        "model_name": "google/gemma-2b",
-        "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
-        "seq_lens": sorted([512, 1024, 2048, 4096, 8192], reverse=True),
-        "max_new_toks": [1],
-    },
-    "olmoe_1b_7b_hsb": {
-        "model_name": "allenai/OLMoE-1B-7B-0924",
-        "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
-        "seq_lens": sorted([512, 1024, 2048, 4096, 8192], reverse=True),
-        "max_new_toks": [1],
+        "precision": "float8_e4m3fn",
     },
 }
