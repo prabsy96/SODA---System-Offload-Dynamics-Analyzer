@@ -27,6 +27,7 @@ METRIC_LABEL = "inference time (ms)"
 T_EXPOSED_LABEL = "T_exposed (ms)"
 GPU_ACTIVE_LABEL = "GPU Active Time (ms)"
 TKLQT_LABEL = "TKLQT (µs)"
+PEAK_MEMORY_LABEL = "Peak Memory (MB)"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Summarize a SODA sweep directory.")
@@ -78,6 +79,20 @@ def safe_t_exposed(report: Dict) -> Optional[float]:
     if t_exposed is not None:
         return float(t_exposed)
     
+    return None
+
+def safe_peak_memory(report: Dict) -> Union[float, str, None]:
+    """Extract peak memory allocated from report."""
+    perf = report.get("performance_metrics") or report.get("metrics") or {}
+    mem = perf.get("memory_metrics", {})
+    value = mem.get("peak_memory_allocated_mb")
+    if value == "OOM":
+        return "OOM"
+    if value is not None:
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            pass
     return None
 
 def get_gpu_name(data: Dict) -> str:
@@ -181,6 +196,10 @@ def collect_reports(root: Path) -> List[Dict]:
         tklqt_data = perf.get("tklqt", {})
         tklqt_us = tklqt_data.get("total", None) if isinstance(tklqt_data, dict) else None
 
+        peak_memory_mb = safe_peak_memory(data)
+        if peak_memory_mb == "OOM":
+            peak_memory_mb = None
+
         rows.append(
             {
                 "model_name": model_name,
@@ -192,8 +211,9 @@ def collect_reports(root: Path) -> List[Dict]:
                 "seq_len": seq_len,
                 "inference_time_ms": inference_time_ms,
                 "t_exposed_ms": t_exposed_ms,
-                "gpu_active_ms": gpu_active_ms,  # ADD
-                "tklqt_us": tklqt_us,            # ADD
+                "gpu_active_ms": gpu_active_ms,
+                "tklqt_us": tklqt_us,
+                "peak_memory_mb": peak_memory_mb,
                 "status": status,
             }
         )
@@ -245,36 +265,41 @@ def build_sections(rows: List[Dict]) -> List[Dict]:
 
         values = []
         statuses = []
-        gpu_active_values = [] 
+        gpu_active_values = []
         t_exposed_values = []
-        tklqt_values = []   
+        tklqt_values = []
+        peak_memory_values = []
 
         for sl in seq_lens:
             value_row: List[Optional[float]] = []
             status_row: List[Optional[str]] = []
             t_exposed_row: List[Optional[float]] = []
-            gpu_active_row: List[Optional[float]] = []  # ADD
-            tklqt_row: List[Optional[float]] = []       # ADD
-            
+            gpu_active_row: List[Optional[float]] = []
+            tklqt_row: List[Optional[float]] = []
+            peak_memory_row: List[Optional[float]] = []
+
             for bs in batch_sizes:
                 entry = lookup.get((sl, bs))
                 if entry is None:
                     value_row.append(None)
                     status_row.append(None)
                     t_exposed_row.append(None)
-                    gpu_active_row.append(None)  # ADD
-                    tklqt_row.append(None)       # ADD
+                    gpu_active_row.append(None)
+                    tklqt_row.append(None)
+                    peak_memory_row.append(None)
                 else:
                     value_row.append(entry.get("inference_time_ms"))
                     status_row.append(entry.get("status"))
                     t_exposed_row.append(entry.get("t_exposed_ms"))
-                    gpu_active_row.append(entry.get("gpu_active_ms"))  # ADD
-                    tklqt_row.append(entry.get("tklqt_us"))            # ADD
+                    gpu_active_row.append(entry.get("gpu_active_ms"))
+                    tklqt_row.append(entry.get("tklqt_us"))
+                    peak_memory_row.append(entry.get("peak_memory_mb"))
             values.append(value_row)
             statuses.append(status_row)
             t_exposed_values.append(t_exposed_row)
-            gpu_active_values.append(gpu_active_row)  # ADD
-            tklqt_values.append(tklqt_row)            # ADD
+            gpu_active_values.append(gpu_active_row)
+            tklqt_values.append(tklqt_row)
+            peak_memory_values.append(peak_memory_row)
 
         sections.append(
             {
@@ -287,8 +312,9 @@ def build_sections(rows: List[Dict]) -> List[Dict]:
                 "values": values,
                 "statuses": statuses,
                 "t_exposed_values": t_exposed_values,
-                "gpu_active_values": gpu_active_values,  # ADD
-                "tklqt_values": tklqt_values,            # ADD
+                "gpu_active_values": gpu_active_values,
+                "tklqt_values": tklqt_values,
+                "peak_memory_values": peak_memory_values,
             }
         )
     return sections
@@ -539,12 +565,21 @@ def summarize(root: Path, gpu_name_override: Optional[str] = None, max_tok_overr
         
         write_pivot(section, tklqt_csv, metric_key="tklqt_values", metric_name="tklqt_us")
         plot_heatmap(section, [tklqt_png, tklqt_pdf], metric_key="tklqt_values", metric_label=TKLQT_LABEL)
-        
+
+        # 5. Peak Memory outputs
+        peak_mem_csv = summary_dir / f"{slug}_peak_memory_pivot.csv"
+        peak_mem_png = summary_dir / f"{slug}_peak_memory_heatmap.png"
+        peak_mem_pdf = summary_dir / f"{slug}_peak_memory_heatmap.pdf"
+
+        write_pivot(section, peak_mem_csv, metric_key="peak_memory_values", metric_name="peak_memory_mb")
+        plot_heatmap(section, [peak_mem_png, peak_mem_pdf], metric_key="peak_memory_values", metric_label=PEAK_MEMORY_LABEL)
+
         print("Wrote")
         print(f"* Inference time: {csv_path.name}, {png_path.name}")
         print(f"* GPU Idle (T_exposed): {t_exposed_csv.name}, {t_exposed_png.name}")
         print(f"* GPU Active: {gpu_active_csv.name}, {gpu_active_png.name}")
         print(f"* TKLQT: {tklqt_csv.name}, {tklqt_png.name}")
+        print(f"* Peak Memory: {peak_mem_csv.name}, {peak_mem_png.name}")
 
 
 def main() -> int:

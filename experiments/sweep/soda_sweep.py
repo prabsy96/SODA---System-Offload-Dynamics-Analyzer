@@ -7,13 +7,14 @@ using the SodaAnalyzer + ModelTracer pipeline with an HF model. Swap the lists
 below to try different shapes or precisions.
 """
 
+import gc
 import os
 import sys
 from itertools import product
 from pathlib import Path
 
 import torch
-import json 
+import json
 from datetime import datetime 
 from transformers import AutoConfig
 from soda import ModelTracer, SodaAnalyzer
@@ -168,6 +169,8 @@ def main() -> None:
             ]
             args = utils.parse_and_validate_args(cli_args)
 
+            tracer = None
+            analyzer = None
             try:
                 tracer = ModelTracer(args=args)
                 tracer.run()
@@ -178,11 +181,11 @@ def main() -> None:
             except RuntimeError as e:
                 if "out of memory" in str(e).lower():
                     print(f"Skipping bs={bs}, sl={sl}, max_new_tokens={max_new_tokens} due to OOM: {e}", file=sys.stderr)
-                    
+
                     # Generate a report.json that MATCHES soda.py structure
                     run_output_dir = sweep_root / exp_name
                     run_output_dir.mkdir(parents=True, exist_ok=True)
-                    
+
                     oom_report = {
                         "metadata": {
                             "model_name": model,
@@ -199,17 +202,25 @@ def main() -> None:
                         },
                         "performance_metrics": {
                             "inference_time_ms": "OOM",
-                            "error": str(e)
+                            "error": str(e),
+                            "memory_metrics": {
+                                "peak_memory_allocated_mb": "OOM",
+                            }
                         }
                     }
-                    
+
                     with open(run_output_dir / "report.json", "w") as f:
                         json.dump(oom_report, f, indent=4)
-
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
                     continue
                 raise
+            finally:
+                # Free GPU memory before the next sweep point so that
+                # torch.cuda.memory_allocated() reports only the new model.
+                del analyzer
+                del tracer
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
         if sweep_root.exists():
             print(f"\n=== Generating summary for {sweep_root} ===")

@@ -130,7 +130,13 @@ class SodaAnalyzer:
         )
         tklqt_metrics = utils.calculate_tklqt(sequences)
 
-        # Build metrics dictionary 
+        # Memory metrics from tracer + GPU memory transfer events
+        memory_metrics = dict(self.tracer.memory_metrics) if self.tracer.memory_metrics else {}
+        gpu_mem_events = self.events["gpu"]["memory"]
+        memory_metrics["num_memcpy_memset_ops"] = len(gpu_mem_events)
+        memory_metrics["total_memcpy_memset_time_ms"] = round(sum(e["dur"] for e in gpu_mem_events) / 1000.0, 4)
+
+        # Build metrics dictionary
         metrics = {
             # Inference time 
             "inference_time_ms": utils.us_to_ms(inference_time),
@@ -159,8 +165,11 @@ class SodaAnalyzer:
             "total_launch_tax_ms": utils.us_to_ms(total_launch_tax),
             "avg_launch_tax_ms": utils.us_to_ms(avg_launch_tax),
             
-            # TKLQT (ADD THIS)
+            # TKLQT
             "tklqt": tklqt_metrics,
+
+            # Memory profiling
+            "memory_metrics": memory_metrics,
         }
         
         self.results = {
@@ -224,6 +233,26 @@ class SodaAnalyzer:
             print(f"\t* Avg. launch tax (+ queue latency) per kernel (ms): {metrics['avg_launch_tax_ms']:.4f}")
             print(f"\t* Avg. execution time per kernel (ms): {metrics['avg_kernel_exec_time_ms']:.4f}")
         
+        # Memory profiling
+        mem = metrics.get("memory_metrics", {})
+        if mem:
+            print("")
+            print("=== Memory Profiling ===")
+            if "model_memory_mb" in mem:
+                print(f"\t* Model memory (allocated): {mem['model_memory_mb']:.2f} MB")
+            if "pre_inference_memory_mb" in mem:
+                print(f"\t* Pre-inference memory: {mem['pre_inference_memory_mb']:.2f} MB")
+            if "peak_memory_allocated_mb" in mem:
+                print(f"\t* Peak memory (allocated): {mem['peak_memory_allocated_mb']:.2f} MB")
+            if "peak_memory_reserved_mb" in mem:
+                print(f"\t* Peak memory (reserved): {mem['peak_memory_reserved_mb']:.2f} MB")
+            if "memory_delta_mb" in mem:
+                print(f"\t* Inference memory delta: {mem['memory_delta_mb']:.2f} MB")
+            if "num_memcpy_memset_ops" in mem:
+                print(f"\t* GPU memcpy/memset ops: {mem['num_memcpy_memset_ops']}")
+            if "total_memcpy_memset_time_ms" in mem:
+                print(f"\t* Total memcpy/memset time (ms): {mem['total_memcpy_memset_time_ms']:.4f}")
+
         print("")
         # --- Per-Stream Breakdown ---
         print("=== Per-Stream Analysis ===")
@@ -484,6 +513,14 @@ class ModelTracer:
         self.events = None
         self.sequences = None
         self.torch_measured_inference_time_us = None
+
+        # Memory profiling (populated during setup/trace)
+        self.memory_metrics = None
+        self._model_memory_bytes = 0
+        self._model_memory_reserved_bytes = 0
+        self._pre_inference_bytes = 0
+        self._peak_allocated_bytes = 0
+        self._peak_reserved_bytes = 0
     
     def _get_profiler_activities(self) -> List:
         """Returns the appropriate profiler activities based on device availability."""
@@ -499,7 +536,25 @@ class ModelTracer:
         """Synchronize CUDA device if available, no-op otherwise."""
         if self._has_cuda:
             torch.cuda.synchronize()
-    
+
+    def _reset_memory_stats(self) -> None:
+        """Reset peak memory stats before profiling."""
+        if self._has_cuda:
+            torch.cuda.reset_peak_memory_stats()
+
+    def _capture_pre_inference_memory(self) -> None:
+        """Capture memory baseline after warmup, before profiled inference."""
+        if self._has_cuda:
+            torch.cuda.synchronize()
+            self._pre_inference_bytes = torch.cuda.memory_allocated()
+
+    def _capture_peak_memory(self) -> None:
+        """Capture peak memory after profiled inference completes."""
+        if self._has_cuda:
+            torch.cuda.synchronize()
+            self._peak_allocated_bytes = torch.cuda.max_memory_allocated()
+            self._peak_reserved_bytes = torch.cuda.max_memory_reserved()
+
     def setup(self) -> None:
         """
         Loads the model/tokenizer and prepares synthetic inputs.
@@ -524,6 +579,11 @@ class ModelTracer:
                 self.tokenizer, self.device, self.batch_size, self.seq_len, model_config=self.model.config
             )
 
+        # Capture model memory footprint after loading model + inputs
+        if self._has_cuda:
+            torch.cuda.synchronize()
+            self._model_memory_bytes = torch.cuda.memory_allocated()
+            self._model_memory_reserved_bytes = torch.cuda.memory_reserved()
 
     def get_kwargs(self) -> Dict[str, Any]:
         """Returns common kwargs for model loading."""
@@ -860,6 +920,17 @@ class ModelTracer:
         self.trace_data = utils.load_json(self.trace_file)
         print(f"Chrome trace file generated at: {self.trace_file}")
 
+        # Build memory metrics from snapshots captured during setup/trace
+        if self._has_cuda:
+            self.memory_metrics = {
+                "model_memory_mb": round(self._model_memory_bytes / (1024**2), 2),
+                "model_memory_reserved_mb": round(self._model_memory_reserved_bytes / (1024**2), 2),
+                "pre_inference_memory_mb": round(self._pre_inference_bytes / (1024**2), 2),
+                "peak_memory_allocated_mb": round(self._peak_allocated_bytes / (1024**2), 2),
+                "peak_memory_reserved_mb": round(self._peak_reserved_bytes / (1024**2), 2),
+                "memory_delta_mb": round((self._peak_allocated_bytes - self._pre_inference_bytes) / (1024**2), 2),
+            }
+
     def process(self) -> None:
         """
         Parses the trace to collect events and build linked event sequences.
@@ -877,6 +948,9 @@ class ModelTracer:
         num_runs = getattr(self.args, 'runs', 1)
         LOGGER.info(f"=== Profiling Whisper Model Forward Pass ({num_runs} runs) ===")
 
+        # Reset peak memory stats before warmup
+        self._reset_memory_stats()
+
         # Warm-up runs
         with torch.no_grad():
             for _ in range(max(0, self.args.warmup)):
@@ -888,6 +962,10 @@ class ModelTracer:
 
         # Synchronize before timing
         self._sync_device()
+
+        # Capture pre-inference memory baseline (after warmup, before profiling)
+        self._reset_memory_stats()
+        self._capture_pre_inference_memory()
 
         # Report GPU clocks for reproducibility
         if self._has_cuda:
@@ -930,6 +1008,9 @@ class ModelTracer:
         self.num_profiled_runs = num_runs
         print(f"Mean time per inference: {utils.us_to_ms(self.torch_measured_inference_time_us):.2f} ms")
 
+        # Capture peak memory after profiled inference
+        self._capture_peak_memory()
+
         prof.export_chrome_trace(str(self.trace_file))
 
     def trace_forward_pass_for_decoder(self) -> None:
@@ -941,6 +1022,9 @@ class ModelTracer:
         """
         num_runs = getattr(self.args, 'runs', 1)
         print(f"=== Profiling Model Forward Pass ({num_runs} runs) ===")
+
+        # Reset peak memory stats before warmup
+        self._reset_memory_stats()
 
         # Warm-up runs
         with torch.no_grad():
@@ -954,6 +1038,10 @@ class ModelTracer:
 
         # Synchronize before timing
         self._sync_device()
+
+        # Capture pre-inference memory baseline (after warmup, before profiling)
+        self._reset_memory_stats()
+        self._capture_pre_inference_memory()
 
         # Report GPU clocks for reproducibility
         if self._has_cuda:
@@ -1013,6 +1101,9 @@ class ModelTracer:
         print(f"Total time for {num_runs} runs: {utils.us_to_ms(total_time_us):.2f} ms")
         print(f"Mean time per inference: {utils.us_to_ms(self.torch_measured_inference_time_us):.2f} ms")
 
+        # Capture peak memory after profiled inference
+        self._capture_peak_memory()
+
         prof.export_chrome_trace(str(self.trace_file))
 
     def trace_forward_pass_for_encoder(self) -> None:
@@ -1024,6 +1115,9 @@ class ModelTracer:
         num_runs = getattr(self.args, 'runs', 1)
         print(f"=== Profiling Model Forward Pass ({num_runs} runs) ===")
 
+        # Reset peak memory stats before warmup
+        self._reset_memory_stats()
+
         # Warm-up runs
         with torch.no_grad():
             for _ in range(max(0, self.args.warmup)):
@@ -1031,6 +1125,10 @@ class ModelTracer:
 
         # Synchronize before timing
         self._sync_device()
+
+        # Capture pre-inference memory baseline (after warmup, before profiling)
+        self._reset_memory_stats()
+        self._capture_pre_inference_memory()
 
         # Report GPU clocks for reproducibility
         if self._has_cuda:
@@ -1068,6 +1166,9 @@ class ModelTracer:
 
         self.num_profiled_runs = num_runs
         print(f"Mean time per inference: {utils.us_to_ms(self.torch_measured_inference_time_us):.2f} ms")
+
+        # Capture peak memory after profiled inference
+        self._capture_peak_memory()
 
         prof.export_chrome_trace(str(self.trace_file))
 
