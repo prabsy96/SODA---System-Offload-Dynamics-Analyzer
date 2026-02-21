@@ -3,12 +3,19 @@
 Utilities for baremetal microbenchmarking: nsys profiling, trace extraction, and build helpers.
 """
 
+import shutil
 import subprocess
 import sqlite3
 from typing import Optional, Tuple, List, Dict, Any
 
 from soda.common import utils
 from soda.common.data import Kernel
+
+
+def nsys_check_available() -> bool:
+    """Verify that ``nsys`` is in PATH and can run."""
+    return shutil.which("nsys") is not None
+
 
 def nsys_profile(
     trace_file_name: str,
@@ -21,6 +28,13 @@ def nsys_profile(
 
     Returns: (success, trace_file_sql|None, message)
     """
+    if not nsys_check_available():
+        return False, None, (
+            "nsys not found in PATH. "
+            "Load the Nsight module (e.g. 'module load cuda12.8/nsight/12.8.1') "
+            "or install NVIDIA Nsight Systems."
+        )
+
     traces_dir = utils.get_path("BAREMETAL_TRACES")
     utils.ensure_dir(traces_dir)
     trace_file = traces_dir / trace_file_name
@@ -107,23 +121,26 @@ def to_hashable(obj: Any) -> Any:
     else:
         return obj
 
-def extract_kernels_sql(trace_file_sql):
-    """Extract all kernels from nsys sqlite trace.
-    
+def extract_kernels_sql(trace_file_sql, filter_gemm_only: bool = True):
+    """Extract kernels from nsys sqlite trace.
+
     Args:
         trace_file_sql: Path to SQLite trace file
-    
-    Returns: 
+        filter_gemm_only: If True (default), only keep GEMM and null kernels.
+            Set to False to extract all kernel types (needed by the enhanced
+            TaxBreak pipeline).
+
+    Returns:
         List of Kernel objects.
     """
     kernels = []
     try:
         conn = sqlite3.connect(trace_file_sql)
         cursor = conn.cursor()
-        
+
         # Query for all kernel events with all available fields
         cursor.execute("""
-            SELECT k.start, k.end, k.correlationId, s.value, 
+            SELECT k.start, k.end, k.correlationId, s.value,
                    k.gridX, k.gridY, k.gridZ,
                    k.blockX, k.blockY, k.blockZ,
                    k.staticSharedMemory, k.dynamicSharedMemory,
@@ -132,14 +149,15 @@ def extract_kernels_sql(trace_file_sql):
             FROM CUPTI_ACTIVITY_KIND_KERNEL as k
             JOIN StringIds as s ON k.demangledName = s.id
         """)
-        
+
         # Fetch all rows and filter in Python
         for row in cursor.fetchall():
             start_ns, end_ns, corr_id, name, gx, gy, gz, bx, by, bz, static_smem, dyn_smem, device_id, context_id, stream_id, regs = row
 
-            # Filter: only keep GEMM or null kernels
-            if "gemm" not in name.lower() and "null" not in name.lower():
-                continue
+            # Filter: only keep GEMM or null kernels (legacy baremetal behavior)
+            if filter_gemm_only:
+                if "gemm" not in name.lower() and "null" not in name.lower():
+                    continue
             
             kernels.append(Kernel(
                 name=name,
@@ -157,7 +175,13 @@ def extract_kernels_sql(trace_file_sql):
             
         conn.close()
     except Exception as e:
-        print(f"Error extracting kernel from trace: {e}")
+        err = str(e)
+        if "no such table" in err and "CUPTI_ACTIVITY_KIND_KERNEL" in err:
+            # Expected for CPU-only ops (e.g., aten::arange) that dispatch no GPU kernels.
+            # The nsys trace contains no kernel activity table for this replay.
+            pass
+        else:
+            print(f"Error extracting kernel from trace: {e}")
         return []
 
     return kernels

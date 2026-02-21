@@ -1,0 +1,65 @@
+# Version control
+.git
+.gitignore
+
+# Output and results (mount as volumes)
+output/
+results/
+soda_results/
+
+# Experiments and SLURM (core-only image)
+experiments/
+slurm/
+
+# Build artifacts (rebuilt inside container)
+build/
+dist/
+*.egg-info/
+src/soda.egg-info/
+src/soda/microbench/baremetal/build/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Nsight traces and profiling artifacts
+*.nsys-rep
+*.qdrep
+*.sqlite
+*.nvvp
+traces/
+
+# Docker files (no recursion)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Logs and job output
+*.log
+*.out
+*.err
+
+# Misc
+*.tmp
+*.csv
+*.pdf
+FORMULAS.md
+CHANGELOG.md
+CITATION.cff
+CONTRIBUTING.md

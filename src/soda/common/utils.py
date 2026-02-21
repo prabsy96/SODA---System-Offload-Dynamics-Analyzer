@@ -23,10 +23,10 @@ from .data import Kernel, ATenOp, Sequence, clean_kernel_name
 # TaxBreak Constants (from paper)
 # =============================================================================
 
-# T_floor_sys: Minimum kernel launch latency from nullKernel measurement
+# T_floor_sys: Legacy fallback constant — used only by baremetal/report.py.
+# Do NOT use inside calculate_hdbi(); pass t_sys_us explicitly instead.
 # Source: TaxBreak paper, measured on H100 (~4.5µs)
 T_FLOOR_SYS_MS = 0.0045  # 4.5 microseconds in milliseconds
-
 
 # =============================================================================
 # GPU Clock Frequency Reporting (read-only, no root required)
@@ -143,9 +143,7 @@ def filter_kernel_sequences(sequences: List[Dict[str, Any]]) -> List[Dict[str, A
         seq["is_gemm"] = is_gemm_op(aten_name) or is_gemm_kernel(kernel_name)
         
         kernel_sequences.append(seq)
-    
-    return kernel_sequences
-    
+
     return kernel_sequences
 
 def calculate_avg_min_max(values, base_name=None):
@@ -617,28 +615,6 @@ def calculate_hsb_metrics(
         "hsb_classification": classification,
     }
 
-def make_kernel_identity_key(kernel, aten_op):
-    """
-    Build a stable identity key for a kernel + its originating ATen op.
-    Components:
-      - kernel name
-      - grid dims
-      - block dims
-      - shared memory
-      - input dims (tuplized to make hashable)
-    
-    Args:
-        kernel: Kernel object
-        aten_op: ATenOp object
-    """
-    return (
-        kernel.name, 
-        tuple(kernel.grid), 
-        tuple(kernel.block), 
-        kernel.shared_memory, 
-        tuple(tuple(d) if isinstance(d, list) else d for d in aten_op.input_dims)
-    )
-
 def to_hashable(obj: Any) -> Any:
     """
     Recursively convert an object to a hashable type.
@@ -717,84 +693,6 @@ def agg_seq_metric(seq_group, metric_name: str):
     values = [seq[metric_name] for seq in seq_group]
     return summarize_metric(values)
 
-def aggregate_sequences(grouped_sequences, metrics: List[str], event_types: List[str]):
-    """
-    Aggregate grouped sequences into unique GEMM sequences.
-
-    Args:
-        grouped_sequences: Dict mapping identity key -> list[sequence dict]
-        metrics: Sequence-level metrics to summarize (e.g., ["launch_tax", "aten_xlat_tax"])
-        event_types: Event types to aggregate (e.g., ["kernel", "aten_op", "cuda_launch", "torch_op"])
-    """
-    unique_sequences = []
-    for key, seq_group in grouped_sequences.items():
-        # Use first sequence as template for aggregation.
-        first_seq = seq_group[0]
-
-        # Create template for aggregated sequence.
-        agg_seq = {"count": len(seq_group)}
-        for event_type in event_types:
-            # Generic path for standard events (kernel, aten_op, cuda_launch, torch_op).
-            if event_type !="culib":
-                agg_seq[event_type] = dict(first_seq[event_type])
-
-            # Special handling for cuBLASLt culib markers.
-            elif event_type == "culib":
-                culib = first_seq["culib"]
-                # Create template for culib sequence 
-                agg_culib = {"temperature": culib.get("temperature")}
-                for phase in culib:
-                    # Skip temperature since it not a phase and doens't have numeric metrics
-                    if phase != "temperature":
-                        agg_culib[phase] = {}
-                agg_seq["culib"] = agg_culib
-            else: 
-                raise ValueError(f"Invalid event type: {event_type}")
-        ##########
-
-        # Aggregate sequence-level metrics (eg launch tax, xlat tax, shim tax etc)
-        for metric in metrics:
-            if metric in first_seq:
-                agg_seq[metric] = agg_seq_metric(seq_group, metric)
-
-        # Aggregate event-level metrics (eg dur, ts, etc)
-        event_metrics = ["dur"]
-        for event_type in event_types:
-            # Generic path for standard events (kernel, aten_op, cuda_launch, torch_op).
-            if event_type != "culib":
-                for metric in event_metrics:
-                    agg_seq[event_type][metric] = agg_event_metric(
-                        seq_group, event_type, metric
-                    )
-            elif event_type == "culib":
-                phases = [p for p in agg_seq["culib"].keys() if p != "temperature"]
-                for phase in phases:
-                    phase_dict = agg_seq["culib"][phase]
-                    for metric in event_metrics:
-                        values = [seq["culib"][phase][metric] for seq in seq_group]
-                        phase_dict[metric] = summarize_metric(values)
-            else: 
-                raise ValueError(f"Invalid event type: {event_type}")
-
-        # Clean up; ts has no meaning after aggregation for standard events.
-        for event_type in event_types:
-            # Clean up ts for standard events.
-            if event_type != "culib":
-                agg_seq[event_type]["ts"] = None
-            # Clean up for special case of cuBLASLt culib markers.
-            elif event_type == "culib":
-                for phase in agg_seq["culib"]:
-                    if phase != "temperature":
-                        agg_seq["culib"][phase]["ts"] = None 
-                
-
-        # Save aggregated unique sequence.
-        unique_sequences.append(agg_seq)
-
-    # Validate the aggregated sequences.
-    validate_sequences(unique_sequences)
-    return unique_sequences
-
 def get_args_parser() -> argparse.ArgumentParser:
     """Create and return argument parser."""
     parser = argparse.ArgumentParser(
@@ -804,7 +702,7 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-m",
         "--model",
-        required=True,
+        default="",
         help="Hugging Face model name or path for profiling and analysis.",
     )
     parser.add_argument(
@@ -917,7 +815,64 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version", action="version", version="%(prog)s 0.1.0"
     )
-    
+    parser.add_argument(
+        "--kernel-db",
+        dest="kernel_db",
+        action="store_true",
+        help="Generate op-kernel database after profiling.",
+    )
+    parser.add_argument(
+        "--taxbreak",
+        dest="taxbreak",
+        action="store_true",
+        help="Run enhanced TaxBreak pipeline (requires --kernel-db-path).",
+    )
+    parser.add_argument(
+        "--kernel-db-path",
+        dest="kernel_db_path",
+        type=str,
+        default=None,
+        help="Path to kernel_database.json for --taxbreak mode.",
+    )
+    parser.add_argument(
+        "--ncu",
+        dest="ncu",
+        action="store_true",
+        help="Run ncu profiling on top-N kernels (use with --taxbreak).",
+    )
+    parser.add_argument(
+        "--ncu-top-n",
+        dest="ncu_top_n",
+        type=int,
+        default=10,
+        help="Number of top kernels (by duration) to profile with ncu (default: 10).",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print full expert-level output (per-kernel tables, HDBI decomposition, "
+             "derivation details). Default shows only the compact layperson summary.",
+    )
+    parser.add_argument(
+        "--carbon-intensity",
+        dest="carbon_intensity",
+        type=float,
+        default=400.0,
+        help="Grid carbon intensity in gCO2eq/kWh for carbon footprint estimation "
+             "(default: 400.0). Regional presets (approx): US=386, EU=295, FR=58, "
+             "DE=380, CN=581, global=475.",
+    )
+    parser.add_argument(
+        "--pue",
+        dest="pue",
+        type=float,
+        default=1.1,
+        help="Data-center Power Usage Effectiveness for carbon estimation "
+             "(default: 1.1). Values: 1.0=bare GPU server, 1.1=efficient DC, "
+             "1.5=average DC.",
+    )
+
     return parser
 
 def parse_and_validate_args(args=None) -> argparse.Namespace:
@@ -926,6 +881,10 @@ def parse_and_validate_args(args=None) -> argparse.Namespace:
     parsed_args = parser.parse_args(args)
     
     # Validate arguments
+    # --model is required unless running in --taxbreak mode (Stage 2)
+    if not getattr(parsed_args, "taxbreak", False) and not parsed_args.model:
+        parser.error("the following arguments are required: -m/--model")
+
     if parsed_args.device == "cpu" and parsed_args.precision in ["float16", "float8_e4m3fn", "float8_e5m2", "bfloat16"]:
         print(f"Warning: {parsed_args.precision} is not supported on CPU. Forcing float32.")
         parsed_args.precision = "float32"
@@ -1818,6 +1777,7 @@ def calculate_hdbi(
     total_kernel_exec_time_ms: float,
     total_xlat_tax_ms: float,
     num_total_kernels: int,
+    t_sys_us: float = T_FLOOR_SYS_MS * 1000.0,
 ) -> Dict[str, Any]:
     """
     Calculate HDBI (Host-Device Balance Index) per TaxBreak paper Eq. 6.
@@ -1827,7 +1787,7 @@ def calculate_hdbi(
     Where:
         T_DeviceActive = Σ(t_k) = sum of kernel execution times
         T_Orchestrate = Σ(ΔFT + I_lib·ΔCT + ΔKT)
-                      = total_xlat_tax + (num_kernels × T_floor_sys)
+                      = total_xlat_tax + (num_kernels × t_sys)
 
     Classification:
         HDBI ≥ 0.5: device-bound (GPU compute dominates)
@@ -1836,8 +1796,11 @@ def calculate_hdbi(
 
     Args:
         total_kernel_exec_time_ms: Sum of kernel durations (T_DeviceActive)
-        total_xlat_tax_ms: Sum of ATen translation overhead (ΔFT + ΔCT)
-        num_total_kernels: Number of kernels (for ΔKT calculation)
+        total_xlat_tax_ms: Sum of translation overhead (ΔFT + ΔCT)
+        num_total_kernels: Number of kernel invocations (for ΔKT calculation)
+        t_sys_us: System floor in microseconds from dynamic null-kernel measurement.
+                  Defaults to the H100 hardcoded value (T_FLOOR_SYS_MS × 1000).
+                  Always pass the dynamically-measured value from TaxBreak pipeline.
 
     Returns:
         Dictionary containing HDBI metrics and classification.
@@ -1845,8 +1808,8 @@ def calculate_hdbi(
     # T_DeviceActive = sum of kernel execution times
     t_device_active = total_kernel_exec_time_ms
 
-    # ΔKT = num_kernels × T_floor_sys
-    delta_kt = num_total_kernels * T_FLOOR_SYS_MS
+    # ΔKT = num_kernels × T_sys (using dynamically-measured floor)
+    delta_kt = num_total_kernels * (t_sys_us / 1000.0)
 
     # T_Orchestrate = xlat_tax (ΔFT + ΔCT) + ΔKT
     t_orchestrate = total_xlat_tax_ms + delta_kt
@@ -2032,6 +1995,35 @@ def analyze_kernel_fusion_candidates(sequences: List[Dict], exact_length: int, p
             for chain, count, score in sorted_recommendations
         ]
     }
+
+def compute_kernel_fragmentation(events: Dict[str, Any], total_output_tokens: int) -> Dict[str, Any]:
+    """
+    Compute kernel launch fragmentation metrics for MoE and dense model analysis.
+
+    MoE models dispatch many small kernels per output token (routing, gating, expert
+    selection).  This function quantifies that fragmentation signal.
+
+    Args:
+        events: Dictionary from collect_events() with hierarchical GPU event structure.
+        total_output_tokens: Number of output (decode) tokens in the profiled run.
+
+    Returns:
+        Dictionary with fragmentation metrics:
+            total_kernel_launches: Raw kernel count in this trace.
+            kernels_per_output_token: Normalized launch rate (None if tokens==0).
+            unique_kernel_count: Number of distinct kernel names.
+            kernel_diversity_ratio: unique_kernel_count / total_kernel_launches.
+    """
+    kernels = events.get("gpu", {}).get("kernels", [])
+    n = len(kernels)
+    unique_names = len(set(k.get("name", "") for k in kernels))
+    return {
+        "total_kernel_launches": n,
+        "kernels_per_output_token": round(n / total_output_tokens, 2) if total_output_tokens > 0 else None,
+        "unique_kernel_count": unique_names,
+        "kernel_diversity_ratio": round(unique_names / n, 4) if n > 0 else 0.0,
+    }
+
 
 def generate_synthetic_inputs(
     tokenizer, 

@@ -29,6 +29,76 @@ GPU_ACTIVE_LABEL = "GPU Active Time (ms)"
 TKLQT_LABEL = "TKLQT (µs)"
 PEAK_MEMORY_LABEL = "Peak Memory (MB)"
 
+_SWEEP_HTML_CSS = """
+:root {
+  --bg: #0d1117; --bg-alt: #161b22; --bg-card: #1c2128;
+  --text: #c9d1d9; --text-dim: #8b949e; --border: #30363d;
+  --green: #3fb950; --yellow: #d29922; --red: #f85149;
+  --cyan: #79c0ff; --blue: #388bfd;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Liberation Sans", sans-serif;
+  font-size: 14px; line-height: 1.6; padding: 24px;
+}
+h1 { font-size: 20px; margin-bottom: 6px; color: var(--cyan); }
+h2 { font-size: 16px; margin: 28px 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+.meta { color: var(--text-dim); font-size: 12px; margin-bottom: 24px; }
+.heatmap-row { display: flex; gap: 20px; overflow-x: auto; margin-bottom: 28px; padding-bottom: 4px; }
+.heatmap-item { flex: 0 0 auto; text-align: center; }
+.heatmap-item img { max-height: 340px; border: 1px solid var(--border); border-radius: 4px; }
+.heatmap-label { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+table { width: 100%; border-collapse: collapse; margin-bottom: 28px; font-size: 13px; }
+thead tr { background: var(--bg-alt); }
+th { padding: 8px 12px; text-align: left; font-weight: 600; border-bottom: 2px solid var(--border); white-space: nowrap; }
+td { padding: 7px 12px; border-bottom: 1px solid var(--border); }
+tr:nth-child(even) { background: var(--bg-alt); }
+tr:hover { background: var(--bg-card); }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--cyan); }
+th.asc::after { content: " ▲"; }
+th.desc::after { content: " ▼"; }
+.oom { color: var(--red);   font-weight: 600; }
+.na  { color: var(--text-dim); }
+.gpu-high { color: var(--green); }
+.gpu-mid  { color: var(--yellow); }
+.gpu-low  { color: var(--red); }
+footer { margin-top: 32px; padding-top: 12px; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 11px; }
+"""
+
+_SWEEP_HTML_JS = """
+(function () {
+  function sortTable(table, colIdx, asc) {
+    var tbody = table.querySelector('tbody');
+    var rows = Array.from(tbody.querySelectorAll('tr'));
+    rows.sort(function (a, b) {
+      var ca = a.cells[colIdx], cb = b.cells[colIdx];
+      var va = ca ? (ca.getAttribute('data-val') || ca.textContent.trim()) : '';
+      var vb = cb ? (cb.getAttribute('data-val') || cb.textContent.trim()) : '';
+      var na = parseFloat(va), nb = parseFloat(vb);
+      if (!isNaN(na) && !isNaN(nb)) return asc ? na - nb : nb - na;
+      return asc ? va.localeCompare(vb) : vb.localeCompare(va);
+    });
+    rows.forEach(function (r) { tbody.appendChild(r); });
+  }
+  document.addEventListener('DOMContentLoaded', function () {
+    document.querySelectorAll('th.sortable').forEach(function (th) {
+      th.addEventListener('click', function () {
+        var table = th.closest('table');
+        var idx = Array.from(th.parentNode.children).indexOf(th);
+        var asc = !th.classList.contains('asc');
+        th.parentNode.querySelectorAll('th').forEach(function (h) {
+          h.classList.remove('asc', 'desc');
+        });
+        th.classList.add(asc ? 'asc' : 'desc');
+        sortTable(table, idx, asc);
+      });
+    });
+  });
+}());
+"""
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Summarize a SODA sweep directory.")
     parser.add_argument(
@@ -81,6 +151,19 @@ def safe_t_exposed(report: Dict) -> Optional[float]:
     
     return None
 
+def safe_kv_cache_mb(report: Dict) -> Optional[float]:
+    """Extract empirical KV cache size from report."""
+    perf = report.get("performance_metrics") or report.get("metrics") or {}
+    mem = perf.get("memory_metrics", {})
+    value = mem.get("kv_cache_mb")
+    if value is not None:
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
 def safe_peak_memory(report: Dict) -> Union[float, str, None]:
     """Extract peak memory allocated from report."""
     perf = report.get("performance_metrics") or report.get("metrics") or {}
@@ -98,13 +181,17 @@ def safe_peak_memory(report: Dict) -> Union[float, str, None]:
 def get_gpu_name(data: Dict) -> str:
     """Extract GPU name from report data with fallbacks."""
     meta = data.get("metadata", {})
+    # Primary: stored in metadata.config (current SODA schema)
+    config = meta.get("config", {})
+    if config.get("gpu_name"):
+        return config["gpu_name"]
+    # Legacy: direct metadata keys
     if "gpu_name" in meta: return meta["gpu_name"]
     if "device_name" in meta: return meta["device_name"]
-    
+    # Legacy: environment block
     env = data.get("environment", {})
     if "gpu" in env: return env["gpu"]
     if "gpu_name" in env: return env["gpu_name"]
-    
     return "gpu"
 
 
@@ -200,6 +287,12 @@ def collect_reports(root: Path) -> List[Dict]:
         if peak_memory_mb == "OOM":
             peak_memory_mb = None
 
+        kv_cache_mb = safe_kv_cache_mb(data)
+
+        throughput_info = perf.get("inference_throughput", {})
+        throughput_tok_s = throughput_info.get("throughput_tok_s") if isinstance(throughput_info, dict) else None
+        gpu_util_pct = perf.get("gpu_utilization_percent")
+
         rows.append(
             {
                 "model_name": model_name,
@@ -214,6 +307,9 @@ def collect_reports(root: Path) -> List[Dict]:
                 "gpu_active_ms": gpu_active_ms,
                 "tklqt_us": tklqt_us,
                 "peak_memory_mb": peak_memory_mb,
+                "kv_cache_mb": kv_cache_mb,
+                "throughput_tok_s": throughput_tok_s,
+                "gpu_util_pct": gpu_util_pct,
                 "status": status,
             }
         )
@@ -235,11 +331,17 @@ def collect_reports(root: Path) -> List[Dict]:
                 "compile_type": ct_guess,
                 "precision": prec_guess,
                 "device": None,
-                "gpu_name": None,  # FIX: OOM dirs don't have GPU name
+                "gpu_name": None,
                 "batch_size": bs_guess,
                 "seq_len": sl_guess,
                 "inference_time_ms": None,
                 "t_exposed_ms": None,
+                "gpu_active_ms": None,
+                "tklqt_us": None,
+                "peak_memory_mb": None,
+                "kv_cache_mb": None,
+                "throughput_tok_s": None,
+                "gpu_util_pct": None,
                 "status": "oom",
             }
         )
@@ -509,6 +611,183 @@ def plot_heatmap(section: Dict, out_paths: List[Path], metric_key: str = "values
     plt.close(fig)
 
 
+def _build_section_slug(section: Dict, max_tok_override: Optional[str] = None) -> str:
+    """Reconstruct the slug string used when writing PNGs for a section."""
+    gpu_suffix = short_gpu_name(section.get("gpu_name") or "")
+    slug_str = f"{section['model_name']}_{section['compile_type']}_{section['precision']}"
+    if max_tok_override:
+        slug_str += f"_{max_tok_override}"
+    if gpu_suffix:
+        slug_str += f"_{gpu_suffix}"
+    return slugify(slug_str)
+
+
+def _html_escape(s: str) -> str:
+    return (
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _fmt_val(value: Optional[float], fmt: str = "{:.1f}", suffix: str = "") -> str:
+    if value is None:
+        return '<span class="na">–</span>'
+    return f"{fmt.format(value)}{suffix}"
+
+
+def _td(value: Optional[float], is_oom: bool = False, fmt: str = "{:.1f}", suffix: str = "") -> str:
+    if is_oom and value is None:
+        return '<td class="oom">OOM</td>'
+    dv = value if value is not None else ""
+    return f'<td data-val="{dv}">{_fmt_val(value, fmt, suffix)}</td>'
+
+
+def _td_gpu_util(value: Optional[float], is_oom: bool = False) -> str:
+    if is_oom and value is None:
+        return '<td class="oom">OOM</td>'
+    if value is None:
+        return '<td class="na">–</td>'
+    cls = "gpu-high" if value >= 60 else ("gpu-mid" if value >= 30 else "gpu-low")
+    return f'<td data-val="{value}"><span class="{cls}">{value:.1f}%</span></td>'
+
+
+def _img_data_uri(path: Path) -> str:
+    """Return a base64 data URI for a PNG so the HTML is fully self-contained."""
+    import base64
+    return "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+
+
+def _html_heatmap_row(heatmap_files: List[Tuple[str, str]], summary_dir: Path) -> str:
+    items = []
+    for filename, label in heatmap_files:
+        img_path = summary_dir / filename
+        if img_path.exists():
+            src = _img_data_uri(img_path)
+            items.append(
+                f'<div class="heatmap-item">'
+                f'<img src="{src}" alt="{_html_escape(label)}">'
+                f'<div class="heatmap-label">{_html_escape(label)}</div>'
+                f'</div>'
+            )
+    if not items:
+        return '<p class="na" style="margin-bottom:28px">No heatmap images found.</p>\n'
+    return '<div class="heatmap-row">' + "".join(items) + '</div>\n'
+
+
+def _html_run_table(section_rows: List[Dict]) -> str:
+    sorted_rows = sorted(
+        section_rows,
+        key=lambda r: (r.get("seq_len") or 0, r.get("batch_size") or 0),
+    )
+    headers = [
+        ("Seq Len",          True),
+        ("Batch Size",       True),
+        ("Inference (ms)",   True),
+        ("Throughput (tok/s)", True),
+        ("GPU Util (%)",     True),
+        ("GPU Active (ms)",  True),
+        ("TKLQT (µs)",       True),
+        ("Peak Mem (MB)",    True),
+        ("KV Cache (MB)",    True),
+    ]
+    th_parts = []
+    for label, sortable in headers:
+        cls = ' class="sortable"' if sortable else ""
+        th_parts.append(f"<th{cls}>{_html_escape(label)}</th>")
+    rows_html = []
+    for row in sorted_rows:
+        status  = row.get("status", "ok")
+        is_oom  = status == "oom"
+        sl      = row.get("seq_len")
+        bs      = row.get("batch_size")
+        rows_html.append(
+            "<tr>"
+            f'<td data-val="{sl or 0}">{sl if sl is not None else "–"}</td>'
+            f'<td data-val="{bs or 0}">{bs if bs is not None else "–"}</td>'
+            + _td(row.get("inference_time_ms"), is_oom)
+            + _td(row.get("throughput_tok_s"),  is_oom)
+            + _td_gpu_util(row.get("gpu_util_pct"), is_oom)
+            + _td(row.get("gpu_active_ms"),     is_oom)
+            + _td(row.get("tklqt_us"),          is_oom, fmt="{:.0f}")
+            + _td(row.get("peak_memory_mb"),    is_oom, fmt="{:.0f}")
+            + _td(row.get("kv_cache_mb"),       False,  fmt="{:.1f}")
+            + "</tr>\n"
+        )
+    return (
+        f'<table>\n<thead><tr>{"".join(th_parts)}</tr></thead>\n'
+        f'<tbody>\n{"".join(rows_html)}</tbody>\n</table>\n'
+    )
+
+
+def generate_comparative_html(
+    sections: List[Dict],
+    rows: List[Dict],
+    summary_dir: Path,
+    max_tok_override: Optional[str] = None,
+) -> None:
+    """Write summary/comparative_report.html referencing the already-written PNGs."""
+    from datetime import datetime
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    parts = [
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
+        "<meta charset=\"UTF-8\">\n"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
+        "<title>SODA Sweep Report</title>\n"
+        f"<style>{_SWEEP_HTML_CSS}</style>\n"
+        "</head>\n<body>\n"
+        "<h1>SODA Sweep Report</h1>\n"
+        f'<div class="meta">Generated: {_html_escape(now_str)}'
+        f" &nbsp;·&nbsp; {len(rows)} run(s)"
+        f" &nbsp;·&nbsp; {len(sections)} group(s)</div>\n",
+    ]
+
+    for section in sections:
+        slug = _build_section_slug(section, max_tok_override)
+        model        = section.get("model_name") or "unknown"
+        compile_type = section.get("compile_type") or ""
+        precision    = section.get("precision") or ""
+        gpu_name     = section.get("gpu_name") or ""
+        gpu_short    = short_gpu_name(gpu_name)
+
+        meta_parts = [p for p in [compile_type, precision, gpu_short or gpu_name] if p]
+        meta_span  = (
+            f" &nbsp;<span style='color:var(--text-dim);font-weight:400;font-size:13px'>"
+            f"({_html_escape(' · '.join(meta_parts))})</span>"
+            if meta_parts else ""
+        )
+        parts.append(f"<h2>{_html_escape(model)}{meta_span}</h2>\n")
+
+        heatmap_files: List[Tuple[str, str]] = [
+            (f"{slug}_heatmap.png",             "Inference Time (ms)"),
+            (f"{slug}_gpu_active_heatmap.png",   "GPU Active (ms)"),
+            (f"{slug}_t_exposed_heatmap.png",    "T_exposed (ms)"),
+            (f"{slug}_tklqt_heatmap.png",        "TKLQT (µs)"),
+            (f"{slug}_peak_memory_heatmap.png",  "Peak Memory (MB)"),
+        ]
+        parts.append(_html_heatmap_row(heatmap_files, summary_dir))
+
+        section_rows = [
+            r for r in rows
+            if (r.get("model_name")    or "unknown_model")    == (section.get("model_name")    or "unknown_model")
+            and (r.get("compile_type") or "unknown_compile")  == (section.get("compile_type")  or "unknown_compile")
+            and (r.get("precision")    or "unknown_precision") == (section.get("precision")    or "unknown_precision")
+            and (r.get("gpu_name")     or "unknown_gpu")       == (section.get("gpu_name")     or "unknown_gpu")
+        ]
+        parts.append(_html_run_table(section_rows))
+
+    parts.append(
+        f'<footer>Generated by SODA summarize_soda_sweep.py &nbsp;·&nbsp; {_html_escape(now_str)}</footer>\n'
+        f"<script>{_SWEEP_HTML_JS}</script>\n"
+        "</body>\n</html>\n"
+    )
+
+    out_path = summary_dir / "comparative_report.html"
+    out_path.write_text("".join(parts), encoding="utf-8")
+
+
 def summarize(root: Path, gpu_name_override: Optional[str] = None, max_tok_override: Optional[str] = None) -> None:
     rows = collect_reports(root)
     if not rows:
@@ -580,6 +859,9 @@ def summarize(root: Path, gpu_name_override: Optional[str] = None, max_tok_overr
         print(f"* GPU Active: {gpu_active_csv.name}, {gpu_active_png.name}")
         print(f"* TKLQT: {tklqt_csv.name}, {tklqt_png.name}")
         print(f"* Peak Memory: {peak_mem_csv.name}, {peak_mem_png.name}")
+
+    generate_comparative_html(sections, rows, summary_dir, max_tok_override)
+    print(f"* Comparative HTML: comparative_report.html")
 
 
 def main() -> int:

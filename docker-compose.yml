@@ -1,0 +1,59 @@
+# ==============================================================================
+# SODA Docker Compose
+#
+# Usage:
+#   docker compose run --rm soda soda-cli --model gpt2 --seq-len 512
+#   docker compose run --rm soda soda-cli --model gpt2 --microbench
+#   docker compose run --rm soda /bin/bash   # interactive shell
+#
+# Enhanced TaxBreak (two-stage):
+#   docker compose run --rm soda soda-cli -m gpt2 --kernel-db
+#   docker compose run --rm soda soda-cli --taxbreak --kernel-db-path output/gpt2_eager_bfloat16_bs1_sl128_mt1/kernel_database.json
+#
+# For gated models, set HF_TOKEN in your shell or a .env file:
+#   export HF_TOKEN=hf_your_token_here
+#   docker compose run --rm soda soda-cli --model meta-llama/Llama-3.2-1B
+#
+# Build with flash-attn:
+#   docker compose build soda-flash
+#   docker compose run --rm soda-flash soda-cli --model gpt2 --compile-type flash-attention
+# ==============================================================================
+
+services:
+  soda:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PYTHON_VERSION: "3.11"
+        CUDA_ARCHS: "70;75;80;86;89;90"
+    image: soda:latest
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ./output:/app/output
+      - hf-cache:/app/hf_cache
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HF_HOME=/app/hf_cache
+      - NVIDIA_VISIBLE_DEVICES=all
+    working_dir: /app
+    command: ["soda-cli", "--help"]
+
+  # Build variant with flash-attn pre-installed
+  soda-flash:
+    extends:
+      service: soda
+    build:
+      args:
+        INSTALL_FLASH_ATTN: "1"
+    image: soda:flash
+
+volumes:
+  hf-cache:
+    # Named volume for persistent HuggingFace model cache across runs

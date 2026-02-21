@@ -49,13 +49,22 @@ def get_gpu_architecture() -> str:
     return "DEFAULT"
 
 
-def get_null_kernel_sys_tax() -> float:
+def get_null_kernel_sys_tax(dynamic_value: float | None = None) -> float:
     """
-    Get the null kernel's system launch tax (hardcoded by GPU architecture).
-    
+    Get the null kernel's system launch tax.
+
+    If *dynamic_value* is provided (from a runtime null-kernel measurement),
+    it is returned directly.  Otherwise falls back to the hardcoded
+    per-architecture baselines.
+
+    Args:
+        dynamic_value: Dynamically measured T_sys in microseconds, or None.
+
     Returns:
-        T_sys for null kernel in microseconds
+        T_sys for null kernel in microseconds.
     """
+    if dynamic_value is not None:
+        return dynamic_value
     gpu_arch = get_gpu_architecture()
     return NULL_KERNEL_SYS_TAX.get(gpu_arch, NULL_KERNEL_SYS_TAX["DEFAULT"])
 
