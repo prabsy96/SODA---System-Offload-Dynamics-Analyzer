@@ -1,6 +1,6 @@
 """
 SODA: System Offload Dynamics Analyzer
-Analyze CPU–GPU dynamics of PyTorch models.
+
 """
 
 import argparse
@@ -86,7 +86,7 @@ class SodaAnalyzer:
         """
         print("=== Analyzing Trace Data ===")
         print(f"Analyzing {len(self.sequences)} event sequences")
-        sequences = utils.calculate_sequence_metrics(list(self.sequences), metrics=["launch_tax", "aten_xlat_tax"])
+        sequences = utils.calculate_sequence_metrics(list(self.sequences), metrics=["launch_tax", "aten_xlat_tax", "py_tax"])
         
         # Analyze per-stream metrics
         stream_info = utils.analyze_per_stream(self.events)
@@ -106,7 +106,9 @@ class SodaAnalyzer:
         avg_launch_tax = utils.calculate_avg_tax(sequences, "launch")
         total_xlat_tax = utils.calculate_total_tax(sequences, "aten_xlat")
         avg_xlat_tax = utils.calculate_avg_tax(sequences, "aten_xlat")
-        avg_kernel_dur = utils.get_average_kernel_duration(self.events) 
+        total_py_tax = utils.calculate_total_tax(sequences, "py")
+        avg_py_tax = utils.calculate_avg_tax(sequences, "py")
+        avg_kernel_dur = utils.get_average_kernel_duration(self.events)
         top_k_kernels = utils.get_top_k_kernels(self.events, k=3)
         
         # Fusion analysis
@@ -122,34 +124,64 @@ class SodaAnalyzer:
                     logger=None
                 )
 
-        # HDBI calculation (TaxBreak Eq. 6)
-        hdbi_metrics = utils.calculate_hdbi(
-            total_kernel_exec_time_ms=utils.us_to_ms(kernel_exec_time["total"]),
-            total_xlat_tax_ms=utils.us_to_ms(total_xlat_tax),
-            num_total_kernels=len(self.events["gpu"]["kernels"])
-        )
+        # TKLQT
         tklqt_metrics = utils.calculate_tklqt(sequences)
 
-        # Build metrics dictionary 
+        # Inference throughput: TPOT vs TTFT labeling
+        output_tokens = getattr(self.args, "max_new_tokens", 1) or 1
+        is_ttft_run = (output_tokens == 1)
+        inference_s = inference_time / 1_000_000.0
+        tpot_ms = (inference_time / 1000.0) / output_tokens if output_tokens > 0 else None
+        throughput_tok_s = (self.args.batch_size * output_tokens) / inference_s if inference_s > 0 else None
+        interactivity_tok_s = output_tokens / inference_s if inference_s > 0 else None
+
+        # Kernel fragmentation (MoE diagnostic)
+        fragmentation_metrics = utils.compute_kernel_fragmentation(self.events, output_tokens)
+
+        # Memory metrics from tracer + GPU memory transfer events
+        memory_metrics = dict(self.tracer.memory_metrics) if self.tracer.memory_metrics else {}
+        gpu_mem_events = self.events["gpu"]["memory"]
+        memory_metrics["num_memcpy_memset_ops"] = len(gpu_mem_events)
+        memory_metrics["total_memcpy_memset_time_ms"] = round(sum(e["dur"] for e in gpu_mem_events) / 1000.0, 4)
+
+        # Carbon footprint estimation
+        carbon_metrics = None
+        try:
+            from soda.carbon import compute_carbon_footprint, get_gpu_tdp
+            device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else ""
+            gpu_tdp = get_gpu_tdp(device_name)
+            if gpu_tdp is not None and inference_time > 0:
+                carbon_metrics = compute_carbon_footprint(
+                    inference_time_s=inference_time / 1_000_000.0,
+                    gpu_tdp_w=gpu_tdp,
+                    gpu_util_pct=gpu_utilization if gpu_utilization is not None else 50.0,
+                    batch_size=getattr(self.args, "batch_size", 1),
+                    num_tokens=getattr(self.args, "seq_len", 0),
+                    carbon_intensity_g_kwh=getattr(self.args, "carbon_intensity", 400.0),
+                    pue=getattr(self.args, "pue", 1.1),
+                )
+        except Exception:
+            pass
+
+        # Build metrics dictionary
         metrics = {
             # Inference time 
             "inference_time_ms": utils.us_to_ms(inference_time),
             # Inference time breakdown
             "inference_time_breakdown": {
                 "torch_measured_inference_time_ms": utils.us_to_ms(self.tracer.torch_measured_inference_time_us),
-                "trace_calculated_inference_time_ms": utils.us_to_ms(trace_calculated_inference_time),
+                #"trace_calculated_inference_time_ms": utils.us_to_ms(trace_calculated_inference_time),
                 "profiler_overhead_ms": utils.us_to_ms(trace_calculated_inference_time - self.tracer.torch_measured_inference_time_us),
             },
-            "hdbi": hdbi_metrics,
             "active_streams": len(stream_info),
 
             # GPU metrics
             "total_gpu_time_span_ms": utils.us_to_ms(total_gpu_time_span),
             "gpu_busy_time_ms": utils.us_to_ms(true_gpu_busy_time),
-            "true_gpu_busy_time_us": true_gpu_busy_time,  # ADD: Keep µs version for summarizer
+            "true_gpu_busy_time_us": true_gpu_busy_time,  # Keep µs version for summarizer
             "gpu_idle_time_ms": utils.us_to_ms(max(0.0, total_gpu_time_span - true_gpu_busy_time)),
             "gpu_utilization_percent": gpu_utilization,
- 
+
             # Kernel metrics
             "total_kernel_exec_time_ms": utils.us_to_ms(kernel_exec_time["total"]),
             "num_total_kernels": len(self.events["gpu"]["kernels"]),
@@ -158,9 +190,29 @@ class SodaAnalyzer:
             "avg_xlat_tax_ms": utils.us_to_ms(avg_xlat_tax),
             "total_launch_tax_ms": utils.us_to_ms(total_launch_tax),
             "avg_launch_tax_ms": utils.us_to_ms(avg_launch_tax),
-            
-            # TKLQT (ADD THIS)
+            "total_py_tax_ms": utils.us_to_ms(total_py_tax),
+            "avg_py_tax_ms": utils.us_to_ms(avg_py_tax),
+
+            # TKLQT (HDBI requires accurate i_lib decomposition from --taxbreak)
             "tklqt": tklqt_metrics,
+
+            # Inference throughput / latency
+            "inference_throughput": {
+                "tpot_ms": tpot_ms,
+                "output_tokens": output_tokens,
+                "is_ttft_run": is_ttft_run,
+                "throughput_tok_s": throughput_tok_s,
+                "interactivity_tok_s": interactivity_tok_s,
+            },
+
+            # Kernel fragmentation (MoE diagnostic)
+            "kernel_fragmentation": fragmentation_metrics,
+
+            # Memory profiling
+            "memory_metrics": memory_metrics,
+
+            # Carbon footprint
+            "carbon_footprint": carbon_metrics,
         }
         
         self.results = {
@@ -178,29 +230,38 @@ class SodaAnalyzer:
         """
         Prints performance metrics, stream analysis, and top-k kernels.
         Uses results stored in self.results from analyze().
+        Default: compact layperson summary + summary.md written to output_dir.
+        With --verbose: layperson summary followed by full expert tables.
         """
         if self.results is None:
             raise ValueError("No analysis results available. Call analyze() first.")
-        
+
+        # --- Layperson summary (always shown) ---
+        from soda.common.summary_report import render_main_analysis
+        render_main_analysis(self.results, self.args, self.output_dir)
+
+        # --- Expert output (only with --verbose) ---
+        verbose = getattr(self.args, "verbose", False)
+        if not verbose:
+            return
+
         metrics = self.results["metrics"]
         stream_info = self.results["stream_info"]
         top_k_kernels = self.results["top_k_kernels"]
-        
+
         # --- Enhanced Reporting ---
         print("")
         print("=== Performance Metrics ===")
         print(f"\t* Inference runtime (ms): {metrics['inference_time_ms']:.4f}")
         
-        # HDBI Analysis (TaxBreak Eq. 6)
-        hdbi = metrics["hdbi"]
+        # TKLQT Analysis (HDBI requires TaxBreak pipeline for dynamic T_sys)
+        tklqt = metrics.get("tklqt", {})
         timing = metrics["inference_time_breakdown"]
         print("")
-        print("=== HDBI Analysis (Host-Device Balance Index) ===")
-        print(f"\t* HDBI: {hdbi['hdbi_value']:.3f} ({hdbi['hdbi_classification']})")
-        print(f"\t* T_DeviceActive: {hdbi['t_device_active_ms']:.4f} ms")
-        print(f"\t* T_Orchestrate: {hdbi['t_orchestrate_ms']:.4f} ms")
-        print(f"\t  - ΔKT (kernel launch tax): {hdbi['delta_kt_ms']:.4f} ms")
-        print(f"\t  - ΔFT + ΔCT (xlat tax): {metrics['total_xlat_tax_ms']:.4f} ms")
+        print("=== TKLQT Analysis ===")
+        if tklqt:
+            for k, v in tklqt.items():
+                print(f"\t* {k}: {v:.4f}" if isinstance(v, float) else f"\t* {k}: {v}")
 
         # Timing breakdown
         print(f"\t  - Torch measured inference time (ms): {timing['torch_measured_inference_time_ms']:.4f}")
@@ -217,13 +278,35 @@ class SodaAnalyzer:
         
         print("")
         print("=== Taxes ===")
-        print(f"\t* Total xlat tax (t_op -> t_api) (ms): {metrics['total_xlat_tax_ms']:.4f}")
-        print(f"\t* Total launch tax (+ queue latency) (ms): {metrics['total_launch_tax_ms']:.4f}")
+        print(f"\t* ΔFT  (py_tax, Python layer) (ms): {metrics['total_py_tax_ms']:.4f}")
+        print(f"\t* ΔCT  (xlat tax, ATen dispatch) (ms): {metrics['total_xlat_tax_ms']:.4f}")
+        print(f"\t* ΔKT  (launch tax + queue latency) (ms): {metrics['total_launch_tax_ms']:.4f}")
         if metrics['num_total_kernels'] > 0:
+            print(f"\t* Avg. py_tax per kernel (ms): {metrics['avg_py_tax_ms']:.4f}")
             print(f"\t* Avg. xlat tax per kernel (ms): {metrics['avg_xlat_tax_ms']:.4f}")
             print(f"\t* Avg. launch tax (+ queue latency) per kernel (ms): {metrics['avg_launch_tax_ms']:.4f}")
             print(f"\t* Avg. execution time per kernel (ms): {metrics['avg_kernel_exec_time_ms']:.4f}")
         
+        # Memory profiling
+        mem = metrics.get("memory_metrics", {})
+        if mem:
+            print("")
+            print("=== Memory Profiling ===")
+            if "model_memory_mb" in mem:
+                print(f"\t* Model memory (allocated): {mem['model_memory_mb']:.2f} MB")
+            if "pre_inference_memory_mb" in mem:
+                print(f"\t* Pre-inference memory: {mem['pre_inference_memory_mb']:.2f} MB")
+            if "peak_memory_allocated_mb" in mem:
+                print(f"\t* Peak memory (allocated): {mem['peak_memory_allocated_mb']:.2f} MB")
+            if "peak_memory_reserved_mb" in mem:
+                print(f"\t* Peak memory (reserved): {mem['peak_memory_reserved_mb']:.2f} MB")
+            if "memory_delta_mb" in mem:
+                print(f"\t* Inference memory delta: {mem['memory_delta_mb']:.2f} MB")
+            if "num_memcpy_memset_ops" in mem:
+                print(f"\t* GPU memcpy/memset ops: {mem['num_memcpy_memset_ops']}")
+            if "total_memcpy_memset_time_ms" in mem:
+                print(f"\t* Total memcpy/memset time (ms): {mem['total_memcpy_memset_time_ms']:.4f}")
+
         print("")
         # --- Per-Stream Breakdown ---
         print("=== Per-Stream Analysis ===")
@@ -393,6 +476,31 @@ class SodaLogger:
         self.logger.handlers.clear()
 
 
+def _compute_kv_cache_bytes(past_key_values) -> int:
+    """Sum actual bytes of all K and V tensors in a HuggingFace KV cache.
+    Handles DynamicCache/StaticCache (HF>=4.36) and legacy tuple-of-tuples.
+    Returns 0 for None or unrecognised types.
+    """
+    if past_key_values is None:
+        return 0
+    # DynamicCache / StaticCache (transformers >= 4.36)
+    if hasattr(past_key_values, "key_cache") and hasattr(past_key_values, "value_cache"):
+        return sum(
+            k.element_size() * k.nelement() + v.element_size() * v.nelement()
+            for k, v in zip(past_key_values.key_cache, past_key_values.value_cache)
+        )
+    # Legacy: tuple/list of (key_tensor, value_tensor) per layer
+    if isinstance(past_key_values, (tuple, list)):
+        total = 0
+        for layer in past_key_values:
+            if isinstance(layer, (tuple, list)) and len(layer) >= 2:
+                k, v = layer[0], layer[1]
+                if hasattr(k, "element_size"):
+                    total += k.element_size() * k.nelement() + v.element_size() * v.nelement()
+        return total
+    return 0
+
+
 class ModelTracer:
     """Handles loading of Hugging Face models with specific configurations."""
 
@@ -484,6 +592,15 @@ class ModelTracer:
         self.events = None
         self.sequences = None
         self.torch_measured_inference_time_us = None
+
+        # Memory profiling (populated during setup/trace)
+        self.memory_metrics = None
+        self._model_memory_bytes = 0
+        self._model_memory_reserved_bytes = 0
+        self._pre_inference_bytes = 0
+        self._peak_allocated_bytes = 0
+        self._peak_reserved_bytes = 0
+        self._kv_cache_bytes = 0
     
     def _get_profiler_activities(self) -> List:
         """Returns the appropriate profiler activities based on device availability."""
@@ -499,7 +616,25 @@ class ModelTracer:
         """Synchronize CUDA device if available, no-op otherwise."""
         if self._has_cuda:
             torch.cuda.synchronize()
-    
+
+    def _reset_memory_stats(self) -> None:
+        """Reset peak memory stats before profiling."""
+        if self._has_cuda:
+            torch.cuda.reset_peak_memory_stats()
+
+    def _capture_pre_inference_memory(self) -> None:
+        """Capture memory baseline after warmup, before profiled inference."""
+        if self._has_cuda:
+            torch.cuda.synchronize()
+            self._pre_inference_bytes = torch.cuda.memory_allocated()
+
+    def _capture_peak_memory(self) -> None:
+        """Capture peak memory after profiled inference completes."""
+        if self._has_cuda:
+            torch.cuda.synchronize()
+            self._peak_allocated_bytes = torch.cuda.max_memory_allocated()
+            self._peak_reserved_bytes = torch.cuda.max_memory_reserved()
+
     def setup(self) -> None:
         """
         Loads the model/tokenizer and prepares synthetic inputs.
@@ -524,6 +659,11 @@ class ModelTracer:
                 self.tokenizer, self.device, self.batch_size, self.seq_len, model_config=self.model.config
             )
 
+        # Capture model memory footprint after loading model + inputs
+        if self._has_cuda:
+            torch.cuda.synchronize()
+            self._model_memory_bytes = torch.cuda.memory_allocated()
+            self._model_memory_reserved_bytes = torch.cuda.memory_reserved()
 
     def get_kwargs(self) -> Dict[str, Any]:
         """Returns common kwargs for model loading."""
@@ -533,9 +673,6 @@ class ModelTracer:
             "trust_remote_code": True,
         }
         
-        if self.is_fp8 and FP8_CONFIG_AVAILABLE and not self.is_decoder:
-            pass
-
         return kwargs
 
     def _convert_to_fp8(self, model: transformers.PreTrainedModel) -> transformers.PreTrainedModel:
@@ -860,6 +997,18 @@ class ModelTracer:
         self.trace_data = utils.load_json(self.trace_file)
         print(f"Chrome trace file generated at: {self.trace_file}")
 
+        # Build memory metrics from snapshots captured during setup/trace
+        if self._has_cuda:
+            self.memory_metrics = {
+                "model_memory_mb": round(self._model_memory_bytes / (1024**2), 2),
+                "model_memory_reserved_mb": round(self._model_memory_reserved_bytes / (1024**2), 2),
+                "pre_inference_memory_mb": round(self._pre_inference_bytes / (1024**2), 2),
+                "peak_memory_allocated_mb": round(self._peak_allocated_bytes / (1024**2), 2),
+                "peak_memory_reserved_mb": round(self._peak_reserved_bytes / (1024**2), 2),
+                "memory_delta_mb": round((self._peak_allocated_bytes - self._pre_inference_bytes) / (1024**2), 2),
+                "kv_cache_mb": round(self._kv_cache_bytes / (1024**2), 2),
+            }
+
     def process(self) -> None:
         """
         Parses the trace to collect events and build linked event sequences.
@@ -877,6 +1026,9 @@ class ModelTracer:
         num_runs = getattr(self.args, 'runs', 1)
         LOGGER.info(f"=== Profiling Whisper Model Forward Pass ({num_runs} runs) ===")
 
+        # Reset peak memory stats before warmup
+        self._reset_memory_stats()
+
         # Warm-up runs
         with torch.no_grad():
             for _ in range(max(0, self.args.warmup)):
@@ -888,6 +1040,10 @@ class ModelTracer:
 
         # Synchronize before timing
         self._sync_device()
+
+        # Capture pre-inference memory baseline (after warmup, before profiling)
+        self._reset_memory_stats()
+        self._capture_pre_inference_memory()
 
         # Report GPU clocks for reproducibility
         if self._has_cuda:
@@ -930,6 +1086,9 @@ class ModelTracer:
         self.num_profiled_runs = num_runs
         print(f"Mean time per inference: {utils.us_to_ms(self.torch_measured_inference_time_us):.2f} ms")
 
+        # Capture peak memory after profiled inference
+        self._capture_peak_memory()
+
         prof.export_chrome_trace(str(self.trace_file))
 
     def trace_forward_pass_for_decoder(self) -> None:
@@ -941,6 +1100,9 @@ class ModelTracer:
         """
         num_runs = getattr(self.args, 'runs', 1)
         print(f"=== Profiling Model Forward Pass ({num_runs} runs) ===")
+
+        # Reset peak memory stats before warmup
+        self._reset_memory_stats()
 
         # Warm-up runs
         with torch.no_grad():
@@ -954,6 +1116,10 @@ class ModelTracer:
 
         # Synchronize before timing
         self._sync_device()
+
+        # Capture pre-inference memory baseline (after warmup, before profiling)
+        self._reset_memory_stats()
+        self._capture_pre_inference_memory()
 
         # Report GPU clocks for reproducibility
         if self._has_cuda:
@@ -976,24 +1142,31 @@ class ModelTracer:
                 else:
                     wall_start = time.perf_counter()
 
+                _last_kv_output = None
                 for run_idx in range(num_runs):
+                    _is_last = (run_idx == num_runs - 1)
                     # FIX: Use TE FP8 autocast if recipe is available
                     if self.is_fp8 and getattr(self, 'fp8_recipe', None):
                         import transformer_engine.pytorch as te
                         with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
-                            self.model.generate(
+                            _out = self.model.generate(
                                 **self.model_inputs,
                                 max_new_tokens=self.max_new_tokens,
                                 do_sample=False,
                                 pad_token_id=self.tokenizer.pad_token_id,
+                                return_dict_in_generate=_is_last,
                             )
                     else:
-                        self.model.generate(
+                        _out = self.model.generate(
                             **self.model_inputs,
                             max_new_tokens=self.max_new_tokens,
                             do_sample=False,
                             pad_token_id=self.tokenizer.pad_token_id,
+                            return_dict_in_generate=_is_last,
                         )
+                    if _is_last:
+                        _last_kv_output = _out
+                    del _out
 
                     # Sync between runs to ensure clean measurements
                     self._sync_device()
@@ -1013,7 +1186,21 @@ class ModelTracer:
         print(f"Total time for {num_runs} runs: {utils.us_to_ms(total_time_us):.2f} ms")
         print(f"Mean time per inference: {utils.us_to_ms(self.torch_measured_inference_time_us):.2f} ms")
 
+        # Capture peak memory after profiled inference
+        self._capture_peak_memory()
+
         prof.export_chrome_trace(str(self.trace_file))
+
+        # Measure KV cache from last profiled run
+        if _last_kv_output is not None:
+            try:
+                self._kv_cache_bytes = _compute_kv_cache_bytes(
+                    getattr(_last_kv_output, "past_key_values", None)
+                )
+            except Exception:
+                self._kv_cache_bytes = 0
+            finally:
+                del _last_kv_output
 
     def trace_forward_pass_for_encoder(self) -> None:
         """
@@ -1024,6 +1211,9 @@ class ModelTracer:
         num_runs = getattr(self.args, 'runs', 1)
         print(f"=== Profiling Model Forward Pass ({num_runs} runs) ===")
 
+        # Reset peak memory stats before warmup
+        self._reset_memory_stats()
+
         # Warm-up runs
         with torch.no_grad():
             for _ in range(max(0, self.args.warmup)):
@@ -1031,6 +1221,10 @@ class ModelTracer:
 
         # Synchronize before timing
         self._sync_device()
+
+        # Capture pre-inference memory baseline (after warmup, before profiling)
+        self._reset_memory_stats()
+        self._capture_pre_inference_memory()
 
         # Report GPU clocks for reproducibility
         if self._has_cuda:
@@ -1069,6 +1263,9 @@ class ModelTracer:
         self.num_profiled_runs = num_runs
         print(f"Mean time per inference: {utils.us_to_ms(self.torch_measured_inference_time_us):.2f} ms")
 
+        # Capture peak memory after profiled inference
+        self._capture_peak_memory()
+
         prof.export_chrome_trace(str(self.trace_file))
 
 def main() -> int:
@@ -1082,14 +1279,34 @@ def main() -> int:
         sys.exit(1)
 
     try:
-        # Parse and validate arguments 
+        # Parse and validate arguments
         args = utils.parse_and_validate_args()
+
+        # --- Enhanced TaxBreak mode (Stage 2: no model loading) ---
+        if getattr(args, "taxbreak", False):
+            from soda.taxbreak.pipeline import TaxBreakPipeline
+
+            db_path = getattr(args, "kernel_db_path", None)
+            if not db_path:
+                print("Error: --taxbreak requires --kernel-db-path", file=sys.stderr)
+                return 1
+            db_path = Path(db_path)
+            if not db_path.exists():
+                print(f"Error: kernel DB not found: {db_path}", file=sys.stderr)
+                return 1
+
+            # Set EXPERIMENT_DIR so relative path resolution works
+            os.environ["EXPERIMENT_DIR"] = str(db_path.parent.resolve())
+
+            pipeline = TaxBreakPipeline(kernel_db_path=db_path, args=args)
+            pipeline.run()
+            return 0
 
         # Create tracer (derives experiment/output paths internally)
         print(f"Loading model: {args.model} with precision {args.precision}")
         tracer = ModelTracer(args=args)
         print(f"Results will be saved to: {tracer.output_dir.resolve()}")
-        
+
         # Run the tracing pipeline
         tracer.run()
 
@@ -1098,10 +1315,17 @@ def main() -> int:
             microbench = SodaMicrobench(tracer=tracer, args=args)
             microbench.run()
             return 0
-        else:
-            # Create analyzer and run
-            analyzer = SodaAnalyzer(tracer=tracer, args=args)
-            analyzer.run()
+
+        # Standard analysis
+        analyzer = SodaAnalyzer(tracer=tracer, args=args)
+        analyzer.run()
+
+        # Optional: generate kernel database after analysis
+        if getattr(args, "kernel_db", False):
+            from soda.kerneldb import generate_kernel_database
+            db_path = tracer.output_dir / "kernel_database.json"
+            generate_kernel_database(tracer=tracer, args=args, output_path=db_path)
+
         return 0
 
     except FileNotFoundError as e:

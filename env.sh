@@ -71,6 +71,9 @@ export PYTORCH_TRACES="microbench/framework/pytorch/traces"
 export PYTORCH_GEMM_SEQUENCES="microbench/framework/pytorch/output/pytorch_gemm_sequences.json"
 export PYTORCH_ALL_SEQUENCES="microbench/framework/pytorch/output/pytorch_all_sequences.json"
 
+# Baremetal traces (nsys profiles)
+export BAREMETAL_TRACES="microbench/baremetal/traces"
+
 # Baremetal outputs (GEMM only - cuBLAS comparison)
 export BAREMETAL_JOBS="microbench/baremetal/output/jobs.json"
 export BAREMETAL_GEMM_KERNELS="microbench/baremetal/output/baremetal_gemm_kernels.json"
@@ -78,6 +81,13 @@ export BAREMETAL_GEMM_KERNELS="microbench/baremetal/output/baremetal_gemm_kernel
 # TaxBreak report outputs
 export TAX_BREAK_SUMMARY="microbench/taxbreak.json"
 export TAX_BREAK_PLOT="microbench/taxbreak_plot.png"
+
+# Enhanced TaxBreak pipeline outputs (informational — paths constructed by pipeline)
+export KERNEL_DATABASE="kernel_database.json"
+export NCU_OUTPUT_DIR="taxbreak/ncu"
+export ENHANCED_TAXBREAK_SUMMARY="taxbreak/enhanced_taxbreak.json"
+export ROOFLINE_PLOT="taxbreak/roofline.png"
+export PARETO_PLOT="pareto.png"
 
 # Logs
 export ASSERT_LOG="microbench/assert.log"

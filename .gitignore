@@ -38,6 +38,7 @@ soda_results/
 # Output directories 
 output
 results
+summary
 
 # Microbench-specific
 *.nsys-rep
@@ -53,3 +54,10 @@ traces/
 
 # Private SLURM scripts (never commit personal job configs)
 slurm/run_job.sh
+
+# Private research papers
+tools_papers
+
+# Markdown files — only README.md is tracked
+*.md
+!README.md

@@ -165,6 +165,27 @@ def _get_dim_arg(inputs: List[Any], idx: int, default: Any) -> Any:
             return int(val.item())
     return default
 
+def _safe_scatter_add(inputs: List[Any], inplace: bool = False) -> torch.Tensor:
+    """Safe scatter_add / scatter_add_ with index clamping."""
+    if not inputs or not isinstance(inputs[0], torch.Tensor):
+        return torch.tensor(0.0, device="cuda")
+    out = inputs[0] if inplace else inputs[0].clone()
+    dim = int(inputs[1]) if len(inputs) > 1 and isinstance(inputs[1], (int, float)) else 0
+    if dim < 0:
+        dim += out.dim()
+    if dim < 0 or dim >= out.dim():
+        dim = 0
+    index = inputs[2] if len(inputs) > 2 and isinstance(inputs[2], torch.Tensor) else None
+    src   = inputs[3] if len(inputs) > 3 and isinstance(inputs[3], torch.Tensor) else None
+    if index is None or src is None:
+        return out
+    max_idx = max(0, out.shape[dim] - 1)
+    index = index.long().clamp_(0, max_idx)
+    try:
+        return out.scatter_add_(dim, index, src)
+    except Exception:
+        return out
+
 # ==============================================================================
 # Supported Operations Map
 # ==============================================================================
@@ -214,7 +235,9 @@ SUPPORTED_OPS = {
     "aten::flatten": lambda inputs: inputs[0].flatten(),
     
     # Copy/memory operations
-    "aten::copy_": lambda inputs: inputs[0].clone() if len(inputs) >= 1 else None,
+    # Use actual copy_() so non-contiguous sources and cross-dtype casts
+    # dispatch the correct elementwise kernel instead of cudaMemcpyAsync.
+    "aten::copy_": lambda inputs: inputs[0].copy_(inputs[1]) if len(inputs) >= 2 and isinstance(inputs[1], torch.Tensor) else inputs[0].clone() if len(inputs) >= 1 else None,
     "aten::clone": lambda inputs: inputs[0].clone(),
     "aten::to": lambda inputs: inputs[0].clone(),
     "aten::_to_copy": lambda inputs: inputs[0].clone(),
@@ -250,7 +273,8 @@ SUPPORTED_OPS = {
     
     # Indexing operations
     "aten::gather": lambda inputs: _safe_gather(inputs),
-    "aten::index": lambda inputs: inputs[0], # Simplified
+    # Use 1D integer-index gather to dispatch index_elementwise_kernel.
+    "aten::index": lambda inputs: inputs[0].reshape(-1)[torch.arange(inputs[0].numel(), device=inputs[0].device, dtype=torch.long)] if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else inputs[0],
     "aten::index_select": lambda inputs: _safe_index_select(inputs),
     "aten::index_put_": lambda inputs: inputs[0], # Simplified
     
@@ -322,8 +346,7 @@ SUPPORTED_OPS = {
     "aten::ge": lambda inputs: torch.ge(inputs[0], inputs[1]) if len(inputs) >= 2 else inputs[0],
     "aten::le": lambda inputs: torch.le(inputs[0], inputs[1]) if len(inputs) >= 2 else inputs[0],
     
-    # Indexing operations
-    "aten::gather": lambda inputs: torch.gather(inputs[0], 0, torch.zeros_like(inputs[0]).long()) if len(inputs) >= 1 else None,
+    # Indexing operations (aten::gather defined above via _safe_gather; no duplicate here)
     "aten::scatter": lambda inputs: torch.scatter(inputs[0], 0, torch.zeros_like(inputs[0]).long(), inputs[1]) if len(inputs) >= 2 else None,
     "aten::index_select": lambda inputs: torch.index_select(inputs[0], 0, torch.zeros(inputs[0].shape[0], dtype=torch.long)) if len(inputs) >= 1 else None,
     "aten::masked_select": lambda inputs: torch.masked_select(inputs[0], torch.ones_like(inputs[0], dtype=torch.bool)) if len(inputs) >= 1 else None,
@@ -350,6 +373,115 @@ SUPPORTED_OPS = {
     # Additional embedding
     "aten::embedding_bag": lambda inputs: torch.nn.functional.embedding_bag(inputs[0].long() % 1000, torch.randn(1000, inputs[1].shape[-1] if len(inputs) > 1 else 768)) if len(inputs) >= 1 else None,
 }
+
+# ==============================================================================
+# Extended ops for MoE and MLA architectures
+# Added via update() to avoid silent shadowing from the duplicate-key block above.
+# ==============================================================================
+SUPPORTED_OPS.update({
+
+    # ---- MoE routing ---------------------------------------------------
+    # topk: inputs[1] = k (Python int parsed from concrete_inputs by create_input_tensors)
+    "aten::topk": lambda inputs: torch.topk(
+        inputs[0],
+        k=max(1, int(inputs[1])) if len(inputs) > 1 and isinstance(inputs[1], (int, float)) else 2,
+    ) if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else None,
+
+    "aten::sort": lambda inputs: torch.sort(
+        inputs[0],
+        dim=_get_dim_arg(inputs, 1, -1),
+    )[0] if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else None,
+
+    "aten::argsort": lambda inputs: torch.argsort(
+        inputs[0], dim=_get_dim_arg(inputs, 1, -1),
+    ) if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else None,
+
+    # nonzero dispatches nonzero_cuda kernel
+    "aten::nonzero": lambda inputs: torch.nonzero(inputs[0]) if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else None,
+
+    # scatter_add / scatter_add_ for accumulating expert outputs
+    "aten::scatter_add":  lambda inputs: _safe_scatter_add(inputs, inplace=False),
+    "aten::scatter_add_": lambda inputs: _safe_scatter_add(inputs, inplace=True),
+
+    # repeat_interleave for token-to-expert expansion / GQA KV head expansion
+    "aten::repeat_interleave": lambda inputs: inputs[0].repeat_interleave(
+        int(inputs[1]) if len(inputs) > 1 and isinstance(inputs[1], (int, float)) else 2,
+        dim=_get_dim_arg(inputs, 2, 0),
+    ) if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else None,
+
+    # bincount: expert load statistics (output on CPU for small inputs)
+    "aten::bincount": lambda inputs: torch.bincount(
+        inputs[0].long().cpu().clamp_(0, 1023), minlength=1024,
+    ) if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else None,
+
+    # ---- Flash / efficient attention (MLA, GQA, standard SDPA) ----------
+    # create_input_tensors only passes Q, K, V (stops at i=3); optional
+    # attn_mask / dropout_p / is_causal / scale are skipped.
+    "aten::scaled_dot_product_attention": lambda inputs: (
+        torch.nn.functional.scaled_dot_product_attention(inputs[0], inputs[1], inputs[2])
+        if len(inputs) >= 3 and all(isinstance(x, torch.Tensor) for x in inputs[:3]) else None
+    ),
+
+    # baddbmm: fused bias + batch matmul used in some attention paths
+    "aten::baddbmm": lambda inputs: torch.baddbmm(inputs[0], inputs[1], inputs[2]) if len(inputs) >= 3 and all(isinstance(x, torch.Tensor) for x in inputs[:3]) else None,
+
+    # ---- Elementwise (RMS norm, activations, clipping) ------------------
+    "aten::rsqrt":      lambda inputs: torch.rsqrt(inputs[0]) if len(inputs) >= 1 else None,
+    "aten::abs":        lambda inputs: torch.abs(inputs[0]) if len(inputs) >= 1 else None,
+    "aten::neg":        lambda inputs: torch.neg(inputs[0]) if len(inputs) >= 1 else None,
+    "aten::reciprocal": lambda inputs: torch.reciprocal(inputs[0]) if len(inputs) >= 1 else None,
+    "aten::sign":       lambda inputs: torch.sign(inputs[0]) if len(inputs) >= 1 else None,
+    "aten::floor":      lambda inputs: torch.floor(inputs[0]) if len(inputs) >= 1 else None,
+    "aten::ceil":       lambda inputs: torch.ceil(inputs[0]) if len(inputs) >= 1 else None,
+    "aten::round":      lambda inputs: torch.round(inputs[0]) if len(inputs) >= 1 else None,
+
+    "aten::clamp": lambda inputs: torch.clamp(
+        inputs[0],
+        min=inputs[1] if len(inputs) > 1 and isinstance(inputs[1], (int, float)) else None,
+        max=inputs[2] if len(inputs) > 2 and isinstance(inputs[2], (int, float)) else None,
+    ) if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else None,
+
+    "aten::clamp_": lambda inputs: inputs[0].clamp_(
+        min=inputs[1] if len(inputs) > 1 and isinstance(inputs[1], (int, float)) else None,
+        max=inputs[2] if len(inputs) > 2 and isinstance(inputs[2], (int, float)) else None,
+    ) if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else None,
+
+    # ---- Normalization (LLaMA / DeepSeek RMS norm) ----------------------
+    # rms_norm: fused kernel in some backends; fallback dispatches elementwise ops
+    "aten::rms_norm": lambda inputs: (
+        inputs[0] * torch.rsqrt(inputs[0].float().pow(2).mean(-1, keepdim=True) + 1e-6).to(inputs[0].dtype)
+    ) if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else None,
+
+    "aten::log_softmax":  lambda inputs: torch.nn.functional.log_softmax(inputs[0], dim=_get_dim_arg(inputs, 1, -1)) if len(inputs) >= 1 else None,
+    "aten::_log_softmax": lambda inputs: torch.nn.functional.log_softmax(inputs[0], dim=_get_dim_arg(inputs, 1, -1)) if len(inputs) >= 1 else None,
+
+    # ---- Complex ops (MLA decoupled RoPE) -------------------------------
+    # view_as_complex: input must be float32 with last dim = 2
+    "aten::view_as_complex": lambda inputs: (
+        torch.view_as_complex(inputs[0].float().contiguous())
+        if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) and inputs[0].shape[-1] == 2 else None
+    ),
+    "aten::view_as_real": lambda inputs: (
+        torch.view_as_real(inputs[0])
+        if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else None
+    ),
+    "aten::polar": lambda inputs: (
+        torch.polar(inputs[0].float(), inputs[1].float())
+        if len(inputs) >= 2 and all(isinstance(x, torch.Tensor) for x in inputs[:2]) else None
+    ),
+    "aten::angle": lambda inputs: torch.angle(inputs[0]) if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else None,
+    "aten::real":  lambda inputs: torch.real(inputs[0])  if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else None,
+    "aten::imag":  lambda inputs: torch.imag(inputs[0])  if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else None,
+    "aten::conj":  lambda inputs: torch.conj(inputs[0])  if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else None,
+    "aten::conj_physical": lambda inputs: inputs[0].conj_physical() if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else None,
+
+    # ---- Matrix / shape ops (causal masking, windowed attention) --------
+    "aten::triu": lambda inputs: torch.triu(inputs[0], diagonal=_get_dim_arg(inputs, 1, 0)) if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else None,
+    "aten::tril": lambda inputs: torch.tril(inputs[0], diagonal=_get_dim_arg(inputs, 1, 0)) if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else None,
+    "aten::diag":  lambda inputs: torch.diag(inputs[0])  if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else None,
+    "aten::roll":  lambda inputs: torch.roll(inputs[0], shifts=_get_dim_arg(inputs, 1, 1), dims=_get_dim_arg(inputs, 2, 0)) if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else None,
+    "aten::unfold": lambda inputs: inputs[0].unfold(_get_dim_arg(inputs, 1, -1), size=_get_dim_arg(inputs, 2, 1), step=_get_dim_arg(inputs, 3, 1)) if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else None,
+})
 
 def is_op_supported(aten_op_name: str) -> bool:
     """Check if an ATen operation is supported for replay."""
@@ -519,7 +651,13 @@ def create_input_tensors(aten_op: Dict[str, Any], device: str = "cuda") -> List[
         dims = input_dims[i] if i < len(input_dims) else []
         strides = input_strides[i] if i < len(input_strides) else None
         concrete_val = concrete_inputs[i] if i < len(concrete_inputs) else None
-        
+
+        # scaled_dot_product_attention: only Q, K, V are needed for kernel dispatch.
+        # Inputs 3+ (attn_mask, dropout_p, is_causal, scale) are optional and their
+        # types (Optional[Tensor], double, bool) confuse create_tensor → skip them.
+        if op_name == "aten::scaled_dot_product_attention" and i >= 3:
+            break
+
         # Handle TensorList
         if type_str == "TensorList":
             inputs.append(create_tensor_list(dims, concrete_val, device))
@@ -581,7 +719,13 @@ def create_input_tensors(aten_op: Dict[str, Any], device: str = "cuda") -> List[
                 if isinstance(source_tensor, torch.Tensor):
                     dim_arg = inputs[1] if len(inputs) > 1 and isinstance(inputs[1], int) else 0
                     source_dims = list(source_tensor.shape)
-                    inputs.append(create_valid_index_tensor(source_dims, dim_arg, torch.int64, device))
+                    # Use the actual index shape from dims when available so the replay
+                    # dispatches the same kernel variant as the original trace (e.g.
+                    # vectorized_gather_kernel for [512,768] output vs
+                    # _scatter_gather_elementwise_kernel for [50257,768] output).
+                    index_shape = dims if dims else source_dims
+                    max_idx = source_dims[dim_arg] if dim_arg < len(source_dims) else source_dims[0]
+                    inputs.append(torch.randint(0, max(1, max_idx), index_shape, dtype=torch.int64, device=device))
                     continue
         
         # Handle standard Tensor - this should work for most cases
