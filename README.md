@@ -36,7 +36,7 @@ SODA profiles a model over 150 inference runs and reports the following:
 
 ## Output Files
 
-Each run writes an experiment directory under `<output-dir>/<model>_<precision>_bs<B>_sl<S>_mt<T>/`:
+Each run writes an experiment directory under `<output-dir>/<model>_<precision>_bs<B>_sl<S>_mt<T>/` (single GPU) or `…_mt<T>_gpu<N>/` (multi-GPU, N > 1):
 
 | File | Description |
 |------|-------------|
@@ -75,6 +75,9 @@ soda-cli --model gpt2 --output-dir output/ --seq-len 512 --batch-size 1
 
 # With verbose expert output
 soda-cli --model gpt2 --output-dir output/ --seq-len 512 --batch-size 1 --verbose
+
+# Distribute model across 2 GPUs (model parallelism)
+soda-cli --model gpt2 --output-dir output/ --seq-len 512 --batch-size 1 --num-gpus 2
 ```
 
 ## CLI Reference
@@ -109,6 +112,12 @@ soda-cli --model gpt2 --output-dir output/ --seq-len 512 --batch-size 1 --verbos
 | `--carbon-intensity` | `400` | Grid carbon intensity in gCO₂eq/kWh. Presets: FR=58, EU=295, US=386, CN=581 |
 | `--pue` | `1.1` | Power Usage Effectiveness of the data centre (1.05–1.6 typical) |
 
+### Multi-GPU
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--num-gpus` | `1` | Number of GPUs to use via `device_map="balanced"` (model parallelism). Values exceeding available GPU count are clamped. Single-GPU behaviour is unchanged. |
+
 ### Enhanced TaxBreak (Stage 2)
 
 | Argument | Description |
@@ -123,7 +132,7 @@ soda-cli --model gpt2 --output-dir output/ --seq-len 512 --batch-size 1 --verbos
 The pipeline replaces hardcoded baselines with dynamic per-kernel measurements. It runs in two decoupled stages:
 
 ```bash
-# Stage 1: Profile model and generate kernel database
+# Stage 1: Profile model and generate kernel database (single GPU)
 soda-cli -m gpt2 --output-dir output/ --kernel-db
 
 # Stage 2: Run enhanced TaxBreak (reads kernel database, no model loading)
@@ -133,6 +142,10 @@ soda-cli --taxbreak --kernel-db-path output/gpt2_eager_bfloat16_bs1_sl128_mt1/ke
 soda-cli --taxbreak \
   --kernel-db-path output/gpt2_eager_bfloat16_bs1_sl128_mt1/kernel_database.json \
   --ncu --ncu-top-n 5
+
+# Multi-GPU TaxBreak: Stage 1 with 2 GPUs, then Stage 2 (T_sys measured on both GPUs)
+soda-cli -m gpt2 --output-dir output/ --kernel-db --num-gpus 2
+soda-cli --taxbreak --kernel-db-path output/gpt2_eager_bfloat16_bs1_sl128_mt1_gpu2/kernel_database.json
 ```
 
 Stage 2 performs:
@@ -228,6 +241,49 @@ experiments/
 
 slurm/
 └── sbatch_template.sh     # SLURM job template
+```
+
+## Development & Testing
+
+### Running the unit tests
+
+SODA includes a pytest suite covering 225 tests across 7 modules. No GPU is required.
+
+```bash
+# Python 3.11+ is required (login node Python 3.9 fails on str|Path unions)
+# The conda base environment at /home/pvellais/miniconda3 has all dependencies.
+
+PYTHONPATH=src /home/pvellais/miniconda3/bin/python3.13 -m pytest
+```
+
+Expected output:
+```
+225 passed in ~4.5s
+```
+
+Install pytest once if needed:
+```bash
+/home/pvellais/miniconda3/bin/python3.13 -m pip install pytest
+```
+
+### Test coverage summary
+
+| File | Tests | Area |
+|---|---|---|
+| `tests/test_data.py` | 33 | `clean_kernel_name`, `Kernel`, `ATenOp`, `Sequence` |
+| `tests/test_utils.py` | 77 | Conversions, GEMM detection, sequence parsing, tax metrics, HDBI, GPU utilization, fragmentation |
+| `tests/test_carbon.py` | 12 | TDP lookup, carbon intensity presets, `compute_carbon_footprint` |
+| `tests/test_roofline.py` | 15 | GPU specs, `compute_gemm_flops`, Pareto frontier |
+| `tests/test_summary_report.py` | 21 | Formatting helpers, Rich table builders |
+| `tests/test_kerneldb.py` | 20 | Vendor-replayability, three-way kernel class, last-run extraction |
+| `tests/test_multi_gpu.py` | 47 | `num_gpus` naming, clamping, `device_map` selection, multi-GPU metadata |
+
+pytest configuration is in `pyproject.toml` under `[tool.pytest.ini_options]`.
+
+### Syntax check (works on Python 3.9)
+
+```bash
+python3 -c "import py_compile; py_compile.compile('src/soda/<file>.py', doraise=True)"
 ```
 
 ## Citation

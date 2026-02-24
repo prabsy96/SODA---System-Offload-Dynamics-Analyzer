@@ -9,6 +9,7 @@ resulting SQLite trace.  This extends nsys profiling from baremetal-only
 
 import json
 import math
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -143,6 +144,7 @@ def nsys_profile_pytorch_kernel(
     kernel_entry: Dict[str, Any],
     warmup: int = 50,
     runs: int = 200,
+    extra_env: Optional[dict] = None,
 ) -> Optional[Dict[str, Any]]:
     """Profile a single kernel via PyTorch replay under nsys.
 
@@ -181,9 +183,13 @@ def nsys_profile_pytorch_kernel(
 
     # 1. Generate replay script in a temporary file
     tmp_dir = Path(tempfile.mkdtemp(prefix="soda_replay_"))
-    script_path = tmp_dir / f"replay_{kernel_id}.py"
-    _generate_replay_script(aten_op, warmup, runs, script_path,
-                            inferred_size=inferred_size)
+    try:
+        script_path = tmp_dir / f"replay_{kernel_id}.py"
+        _generate_replay_script(aten_op, warmup, runs, script_path,
+                                inferred_size=inferred_size)
+    except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
 
     # 2. Profile under nsys
     trace_name = f"pytorch_replay_{kernel_id}"
@@ -191,7 +197,10 @@ def nsys_profile_pytorch_kernel(
         trace_file_name=trace_name,
         args=["python", str(script_path)],
         timeout=300,
+        extra_env=extra_env,
     )
+
+    shutil.rmtree(tmp_dir, ignore_errors=True)
 
     if not success:
         print(f"nsys replay failed for {kernel_id} ({op_name}): {msg}")

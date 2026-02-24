@@ -113,6 +113,7 @@ def ncu_profile(
     launch_skip: int = 5,
     launch_count: int = 1,
     timeout: int = 300,
+    extra_env: Optional[dict] = None,
 ) -> Tuple[bool, str]:
     """Run ``ncu`` with the given metrics on *command_args*.
 
@@ -125,6 +126,7 @@ def ncu_profile(
         launch_skip: Number of kernel launches to skip (warmup).
         launch_count: Number of kernel launches to measure.
         timeout: Seconds before killing the process.
+        extra_env: Optional environment dict forwarded to the subprocess.
 
     Returns:
         ``(success, message)`` tuple.
@@ -152,6 +154,7 @@ def ncu_profile(
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=extra_env,
         )
     except subprocess.TimeoutExpired:
         return False, f"ncu timed out after {timeout}s"
@@ -280,6 +283,7 @@ def ncu_profile_kernel(
     runs: int = 1,
     metrics: Optional[List[str]] = None,
     timeout: int = 300,
+    extra_env: Optional[dict] = None,
 ) -> Optional[Dict[str, Any]]:
     """Profile a single kernel with ncu and return cache/memory metrics.
 
@@ -316,8 +320,12 @@ def ncu_profile_kernel(
 
     # 1. Generate replay script
     tmp_dir = Path(tempfile.mkdtemp(prefix="soda_ncu_"))
-    script_path = tmp_dir / f"ncu_replay_{kernel_id}.py"
-    _generate_ncu_replay_script(aten_op, warmup, runs, script_path)
+    try:
+        script_path = tmp_dir / f"ncu_replay_{kernel_id}.py"
+        _generate_ncu_replay_script(aten_op, warmup, runs, script_path)
+    except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
 
     # 2. Run ncu
     csv_path = output_dir / f"ncu_{kernel_id}.csv"
@@ -330,7 +338,10 @@ def ncu_profile_kernel(
         launch_skip=warmup,
         launch_count=runs,
         timeout=timeout,
+        extra_env=extra_env,
     )
+
+    shutil.rmtree(tmp_dir, ignore_errors=True)
 
     if not success:
         print(f"ncu profiling failed for {kernel_id} ({op_name}): {msg}")

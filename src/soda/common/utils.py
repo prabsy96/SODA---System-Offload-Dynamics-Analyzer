@@ -872,6 +872,15 @@ def get_args_parser() -> argparse.ArgumentParser:
              "(default: 1.1). Values: 1.0=bare GPU server, 1.1=efficient DC, "
              "1.5=average DC.",
     )
+    parser.add_argument(
+        "--num-gpus",
+        dest="num_gpus",
+        type=int,
+        default=1,
+        help="Number of GPUs to use for inference via model parallelism "
+             "(device_map=\"balanced\"). Default: 1 (single GPU). "
+             "Values > available GPUs are clamped to available count.",
+    )
 
     return parser
 
@@ -983,6 +992,9 @@ def collect_env_metadata():
             "device_name": torch.cuda.get_device_name(0),
             "sm_capability": torch.cuda.get_device_capability(0),
         })
+        n = torch.cuda.device_count()
+        metadata["num_gpus"] = n
+        metadata["all_gpu_names"] = [torch.cuda.get_device_name(i) for i in range(n)]
         # Driver/runtime versions can affect JIT/PTX compilation
         try:
             metadata["driver_version"] = torch.cuda.driver_version()
@@ -1088,24 +1100,32 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
         
         # GPU kernel events
         if cat == "kernel":
+            args = event.get("args", {})
             kernel_events.append({
                 "name": name,
                 "ts": event["ts"],
                 "dur": event.get("dur", 0),
-                "correlation": event.get("args", {}).get("correlation"),
-                "external_id": event.get("args", {}).get("External id"),
-                "grid": event.get("args", {}).get("grid", [0, 0, 0]),
-                "block": event.get("args", {}).get("block", [0, 0, 0]),
-                "shared_memory": event.get("args", {}).get("shared memory", 0),
+                "type": "kernel",               # used by analyze_per_stream
+                "correlation": args.get("correlation"),
+                "external_id": args.get("External id"),
+                "grid": args.get("grid", [0, 0, 0]),
+                "block": args.get("block", [0, 0, 0]),
+                "shared_memory": args.get("shared memory", 0),
+                "stream": args.get("stream"),   # CUDA stream ID (Fix A)
+                "device": args.get("device"),   # GPU device index (Fix A)
             })
-        
+
         # GPU memory events
         elif cat in ("gpu_memcpy", "gpu_memset"):
+            args = event.get("args", {})
             gpu_mem_events.append({
                 "name": name,
                 "ts": event["ts"],
                 "dur": event.get("dur", 0),
+                "type": "gpu_memory",           # used by analyze_per_stream
                 "cat": cat,
+                "stream": args.get("stream"),   # Fix A
+                "device": args.get("device"),   # Fix A
             })
         
         # CUDA launch events (CPU side)
@@ -1536,6 +1556,61 @@ def get_top_k_kernels(events: Dict[str, Any], k: int = 3) -> Dict[str, List[Tupl
         "by_duration": top_k_by_dur
     }
 
+
+def get_kernel_stats(
+    events: Dict[str, Any],
+    k: int = 3,
+) -> Tuple[Dict[str, float], Dict[str, List[Tuple[str, Dict]]]]:
+    """Single-pass replacement for get_average_kernel_duration + get_top_k_kernels.
+
+    Iterates ``events["gpu"]["kernels"]`` once to build per-kernel totals, then
+    derives both results without a second pass.
+
+    Args:
+        events: Dictionary with hierarchical structure from collect_events.
+        k: Number of top kernels for the top-k result.
+
+    Returns:
+        (avg_durations, top_k) where:
+          avg_durations — {kernel_name: avg_duration_us}
+          top_k         — {"by_frequency": [...], "by_duration": [...]}
+    """
+    kernel_events = events["gpu"]["kernels"]
+
+    if not kernel_events:
+        return {}, {"by_frequency": [], "by_duration": []}
+
+    # Single accumulation pass
+    acc: Dict[str, Dict[str, float]] = defaultdict(lambda: {"count": 0.0, "total": 0.0})
+    for ke in kernel_events:
+        name = ke["name"]
+        acc[name]["count"] += 1.0
+        acc[name]["total"] += float(ke["dur"])
+
+    # Derive avg_durations
+    avg_durations: Dict[str, float] = {
+        name: s["total"] / s["count"] for name, s in acc.items()
+    }
+
+    # Derive top-k by frequency and by total duration
+    top_k_by_freq = sorted(
+        ((name, {"frequency": int(s["count"]), "duration": s["total"]})
+         for name, s in acc.items()),
+        key=lambda x: x[1]["frequency"],
+        reverse=True,
+    )[:k]
+
+    top_k_by_dur = sorted(
+        ((name, {"frequency": int(s["count"]), "duration": s["total"]})
+         for name, s in acc.items()),
+        key=lambda x: x[1]["duration"],
+        reverse=True,
+    )[:k]
+
+    top_k = {"by_frequency": top_k_by_freq, "by_duration": top_k_by_dur}
+    return avg_durations, top_k
+
+
 def generate_experiment_name(
     model: str,
     compile_type: str,
@@ -1543,10 +1618,11 @@ def generate_experiment_name(
     batch_size: int,
     seq_len: int,
     max_new_tokens: int,
+    num_gpus: int = 1,
 ) -> str:
     """
     Generates a unique experiment directory name from arguments.
-    
+
     Args:
         model: Model name (e.g., "gpt2" or "meta-llama/Llama-3.2-3B").
         compile_type: Compilation type (e.g., "eager", "torch.compile").
@@ -1554,14 +1630,16 @@ def generate_experiment_name(
         batch_size: Batch size.
         seq_len: Sequence length.
         max_new_tokens: Number of new tokens generated during tracing.
-        
+        num_gpus: Number of GPUs used. Appends ``_gpuN`` suffix when > 1.
+
     Returns:
         Experiment directory name string.
     """
-    return (
+    base = (
         f"{model.replace('/', '_')}_{compile_type}_{precision}"
         f"_bs{batch_size}_sl{seq_len}_mt{max_new_tokens}"
     )
+    return f"{base}_gpu{num_gpus}" if num_gpus > 1 else base
 
 
 def calculate_total_inference_time(trace: Dict[str, Any]) -> float:
@@ -1725,6 +1803,89 @@ def calculate_gpu_utilization(events: Dict[str, Any]) -> float:
 
     return gpu_utilization
 
+def calculate_gpu_metrics(
+    events: Dict[str, Any],
+) -> Tuple[float, float, float, Dict[int, Dict[str, float]]]:
+    """Compute GPU span, busy time, and utilization — correctly for multi-GPU.
+
+    Groups GPU events by physical device index, merges overlapping intervals
+    per device, then aggregates across devices.  This fixes the previous
+    flat-merge approach that treated simultaneous work on different GPUs as
+    overlapping (and thus undercounted total GPU work).
+
+    Replaces three separate passes (``calculate_total_gpu_time_span``,
+    ``calculate_true_gpu_busy_time``, ``calculate_gpu_utilization``) with a
+    single O(n log n) sort + O(n) merge per device.
+
+    Args:
+        events: Dictionary with hierarchical structure from collect_events.
+
+    Returns:
+        4-tuple:
+          wall_span_us       — global wall-clock span across all devices
+          avg_busy_us        — average merged-busy time per physical GPU
+          avg_util_pct       — avg_busy_us / wall_span_us × 100
+          per_device         — {device_id: {span_us, busy_us, utilization_pct}}
+        All zeros / empty dict if there are no GPU events.
+    """
+    gpu_events = events.get("gpu", {}).get("all", [])
+    if not gpu_events:
+        return 0.0, 0.0, 0.0, {}
+
+    # --- Group intervals by device ----------------------------------------
+    device_intervals: Dict[int, List[Tuple[float, float]]] = defaultdict(list)
+    global_min_start = float("inf")
+    global_max_end   = float("-inf")
+
+    for e in gpu_events:
+        ts  = float(e["ts"])
+        end = ts + float(e["dur"])
+        # device field added by Fix A; fall back to 0 for single-GPU traces
+        dev = int(e["device"]) if e.get("device") is not None else 0
+        device_intervals[dev].append((ts, end))
+        if ts  < global_min_start: global_min_start = ts
+        if end > global_max_end:   global_max_end   = end
+
+    wall_span = global_max_end - global_min_start
+    if wall_span == 0.0:
+        return 0.0, 0.0, 0.0, {}
+
+    # --- Per-device merge -------------------------------------------------
+    per_device: Dict[int, Dict[str, float]] = {}
+    total_busy = 0.0
+
+    for dev, ivs in device_intervals.items():
+        ivs.sort()
+        ms, me = ivs[0]
+        dev_max_end = me
+        busy = 0.0
+        for s, e in ivs[1:]:
+            if e > dev_max_end:
+                dev_max_end = e
+            if s < me:
+                if e > me:
+                    me = e
+            else:
+                busy += me - ms
+                ms, me = s, e
+        busy += me - ms   # flush last segment
+
+        dev_span = dev_max_end - ivs[0][0]
+        dev_util = (busy / dev_span * 100.0) if dev_span > 0.0 else 0.0
+        per_device[dev] = {
+            "span_us":         dev_span,
+            "busy_us":         busy,
+            "utilization_pct": dev_util,
+        }
+        total_busy += busy
+
+    num_devices = len(device_intervals)
+    avg_busy = total_busy / num_devices
+    avg_util = (avg_busy / wall_span) * 100.0
+
+    return wall_span, avg_busy, avg_util, per_device
+
+
 def calculate_framework_tax(
     inference_time_us: float,
     gpu_busy_time_us: float
@@ -1864,7 +2025,16 @@ def analyze_per_stream(events: Dict[str, Any]) -> Dict:
     })
     
     for op in gpu_events:
-        stream_id = op.get("stream", "unknown_stream")
+        # Key by (device, stream) so that stream 7 on GPU 0 and stream 7 on
+        # GPU 1 are treated as distinct streams in multi-GPU runs.
+        device = op.get("device")
+        stream = op.get("stream")
+        if device is not None and stream is not None:
+            stream_id = f"gpu{device}:stream{stream}"
+        elif stream is not None:
+            stream_id = f"stream{stream}"
+        else:
+            stream_id = "unknown_stream"
         stream_info[stream_id]["ops"].append(op)
     
     for stream_id, data in stream_info.items():

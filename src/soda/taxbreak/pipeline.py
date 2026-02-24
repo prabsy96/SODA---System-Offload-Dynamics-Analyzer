@@ -10,6 +10,10 @@ Usage (Stage 2 — no model loading required):
     soda-cli --taxbreak --kernel-db-path <path> [--ncu] [--ncu-top-n 10]
 """
 
+import os
+import queue
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -27,6 +31,7 @@ class TaxBreakPipeline:
         self.db = utils.load_json(str(self.kernel_db_path))
         self.args = args
         self.output_dir = self.kernel_db_path.parent / "taxbreak"
+        self.num_gpus = self.db.get("metadata", {}).get("num_gpus", 1)
 
     def run(self) -> Path:
         """Execute the full pipeline and return the report path.
@@ -53,7 +58,7 @@ class TaxBreakPipeline:
         # --- Step 1: Dynamic system floor ---
         section = "Dynamic System Floor"
         print_utils.section_start(section)
-        floor = measure_system_floor()
+        floor = measure_system_floor(num_gpus=self.num_gpus)
         print_utils.section_end(section)
 
         # --- Step 2: Isolation replay (nsys) for each kernel ---
@@ -84,28 +89,82 @@ class TaxBreakPipeline:
     # Internal methods
     # ------------------------------------------------------------------
 
+    def _make_gpu_queue(self) -> "queue.Queue[int]":
+        """Return a queue pre-loaded with one token per GPU."""
+        q: queue.Queue[int] = queue.Queue()
+        for gpu_id in range(self.num_gpus):
+            q.put(gpu_id)
+        return q
+
     def _run_nsys_replay(
         self, kernels: List[Dict[str, Any]]
     ) -> Dict[str, Dict[str, Any]]:
-        """Replay each kernel in isolation under nsys."""
+        """Replay each kernel in isolation under nsys.
+
+        Single GPU: runs serially — the GPU is the serialisation point and
+        there is nothing to overlap.
+
+        Multi-GPU: runs ``num_gpus`` replays concurrently, one per GPU, using
+        ``CUDA_VISIBLE_DEVICES`` to pin each subprocess to a specific device.
+        A ``queue.Queue`` of GPU IDs acts as a per-device semaphore so that at
+        most one replay occupies each GPU at any time.
+        """
         results: Dict[str, Dict[str, Any]] = {}
+        total = len(kernels)
 
-        for i, entry in enumerate(kernels, 1):
-            kid = entry["id"]
-            op = entry["aten_op"].get("name", "?")
+        if self.num_gpus <= 1:
+            # ── serial path ──────────────────────────────────────────────
+            for i, entry in enumerate(kernels, 1):
+                kid   = entry["id"]
+                op    = entry["aten_op"].get("name", "?")
+                kname = entry["kernel"]["name"]
+                print(f"[{i}/{total}] {kid}: {op} -> {kname}")
+                result = nsys_profile_pytorch_kernel(entry)
+                if result is not None:
+                    results[kid] = result
+            return results
+
+        # ── parallel path (multi-GPU) ─────────────────────────────────────
+        gpu_queue = self._make_gpu_queue()
+        lock = threading.Lock()
+        dispatched = [0]  # mutable counter for progress display
+
+        def _replay(entry: Dict[str, Any]):
+            gpu_id = gpu_queue.get()   # blocks until a GPU token is free
+            kid   = entry["id"]
+            op    = entry["aten_op"].get("name", "?")
             kname = entry["kernel"]["name"]
-            print(f"[{i}/{len(kernels)}] {kid}: {op} -> {kname}")
+            with lock:
+                dispatched[0] += 1
+                n = dispatched[0]
+            print(f"[{n}/{total}] {kid}: {op} -> {kname}  [GPU {gpu_id}]")
+            try:
+                extra_env = dict(os.environ)
+                extra_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+                return kid, nsys_profile_pytorch_kernel(entry, extra_env=extra_env)
+            finally:
+                gpu_queue.put(gpu_id)  # always return the GPU token
 
-            result = nsys_profile_pytorch_kernel(entry)
-            if result is not None:
-                results[kid] = result
+        with ThreadPoolExecutor(max_workers=self.num_gpus) as pool:
+            futures = [pool.submit(_replay, entry) for entry in kernels]
+            for future in as_completed(futures):
+                try:
+                    kid, result = future.result()
+                    if result is not None:
+                        results[kid] = result
+                except Exception as exc:  # noqa: BLE001
+                    print(f"  nsys replay error: {exc}")
 
         return results
 
     def _run_ncu(
         self, kernels: List[Dict[str, Any]]
     ) -> Dict[str, Dict[str, Any]]:
-        """Run ncu on the top-N kernels by total duration."""
+        """Run ncu on the top-N kernels by total duration.
+
+        Applies the same single-GPU serial / multi-GPU parallel split as
+        ``_run_nsys_replay``.
+        """
         from soda.ncu import ncu_check_available, ncu_profile_kernel
 
         if not ncu_check_available():
@@ -123,15 +182,52 @@ class TaxBreakPipeline:
         ncu_dir.mkdir(parents=True, exist_ok=True)
 
         results: Dict[str, Dict[str, Any]] = {}
-        for i, entry in enumerate(ranked, 1):
-            kid = entry["id"]
-            op = entry["aten_op"].get("name", "?")
-            kname = entry["kernel"]["name"]
-            print(f"[{i}/{len(ranked)}] {kid}: {op} -> {kname}")
+        total = len(ranked)
 
-            result = ncu_profile_kernel(entry, output_dir=ncu_dir)
-            if result is not None:
-                results[kid] = result
+        if self.num_gpus <= 1:
+            # ── serial path ──────────────────────────────────────────────
+            for i, entry in enumerate(ranked, 1):
+                kid   = entry["id"]
+                op    = entry["aten_op"].get("name", "?")
+                kname = entry["kernel"]["name"]
+                print(f"[{i}/{total}] {kid}: {op} -> {kname}")
+                result = ncu_profile_kernel(entry, output_dir=ncu_dir)
+                if result is not None:
+                    results[kid] = result
+            return results
+
+        # ── parallel path (multi-GPU) ─────────────────────────────────────
+        gpu_queue = self._make_gpu_queue()
+        lock = threading.Lock()
+        dispatched = [0]
+
+        def _ncu(entry: Dict[str, Any]):
+            gpu_id = gpu_queue.get()
+            kid   = entry["id"]
+            op    = entry["aten_op"].get("name", "?")
+            kname = entry["kernel"]["name"]
+            with lock:
+                dispatched[0] += 1
+                n = dispatched[0]
+            print(f"[{n}/{total}] {kid}: {op} -> {kname}  [GPU {gpu_id}]")
+            try:
+                extra_env = dict(os.environ)
+                extra_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+                return kid, ncu_profile_kernel(
+                    entry, output_dir=ncu_dir, extra_env=extra_env
+                )
+            finally:
+                gpu_queue.put(gpu_id)
+
+        with ThreadPoolExecutor(max_workers=self.num_gpus) as pool:
+            futures = [pool.submit(_ncu, entry) for entry in ranked]
+            for future in as_completed(futures):
+                try:
+                    kid, result = future.result()
+                    if result is not None:
+                        results[kid] = result
+                except Exception as exc:  # noqa: BLE001
+                    print(f"  ncu error: {exc}")
 
         return results
 
