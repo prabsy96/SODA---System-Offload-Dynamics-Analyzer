@@ -129,8 +129,14 @@ def generate_kernel_database(
 
     # --- Step 6: build database entries ---
     gpu_name = ""
+    all_gpu_names = []
     if torch.cuda.is_available():
         gpu_name = torch.cuda.get_device_name(0)
+        num_gpus_used = getattr(args, "num_gpus", 1)
+        all_gpu_names = [
+            torch.cuda.get_device_name(i)
+            for i in range(num_gpus_used)
+        ]
 
     db_entries = []
     for rank, entry in enumerate(aggregated, start=1):
@@ -244,6 +250,8 @@ def generate_kernel_database(
             "seq_len": args.seq_len,
             "max_new_tokens": args.max_new_tokens,
             "gpu_name": gpu_name,
+            "num_gpus": getattr(args, "num_gpus", 1),
+            "all_gpu_names": all_gpu_names,
             "timestamp": datetime.now().isoformat(),
             "num_profiled_runs": num_runs,
             "last_run_sequences": len(last_run_seqs),

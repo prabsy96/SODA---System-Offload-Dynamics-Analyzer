@@ -6,6 +6,7 @@ Utilities for baremetal microbenchmarking: nsys profiling, trace extraction, and
 import shutil
 import subprocess
 import sqlite3
+import sys
 from typing import Optional, Tuple, List, Dict, Any
 
 from soda.common import utils
@@ -22,9 +23,15 @@ def nsys_profile(
     args: List[str],
     timeout: Optional[int] = None,
     cleanup: bool = False,
+    extra_env: Optional[dict] = None,
 ) -> Tuple[bool, Optional[str], str]:
     """
     Run `nsys profile` followed by `nsys export` to sqlite.
+
+    Args:
+        extra_env: Optional environment dict to pass to the subprocess.
+                   If provided, it replaces the full process environment for
+                   the nsys profile call (use ``dict(os.environ)`` + overrides).
 
     Returns: (success, trace_file_sql|None, message)
     """
@@ -38,11 +45,11 @@ def nsys_profile(
     traces_dir = utils.get_path("BAREMETAL_TRACES")
     utils.ensure_dir(traces_dir)
     trace_file = traces_dir / trace_file_name
-    
+
     trace_file_rep = trace_file.with_suffix(".nsys-rep")
     trace_file_sql = trace_file_rep.with_suffix(".sqlite")
 
-    # Build args for nsys profile and run 
+    # Build args for nsys profile and run
     args = [
         "nsys",
         "profile",
@@ -57,7 +64,8 @@ def nsys_profile(
         args,
         capture_output=True,
         text=True,
-        timeout=timeout
+        timeout=timeout,
+        env=extra_env,
     )
 
     # Check if nsys profile was successful
@@ -79,9 +87,10 @@ def nsys_profile(
     ]
 
     result = subprocess.run(
-        args, 
-        capture_output=True, 
-        text=True
+        args,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
 
     # Clean up trace file if requested

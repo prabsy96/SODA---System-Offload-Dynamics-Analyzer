@@ -577,7 +577,7 @@ def create_tensor(
     
     if dtype is None:
         try: dtype = utils.parse_dtype_to_torch(dtype_str)
-        except: pass
+        except Exception: pass
     
     if dtype is None:
         if "float" in clean_dtype: dtype = torch.float32
@@ -670,7 +670,7 @@ def create_input_tensors(aten_op: Dict[str, Any], device: str = "cuda") -> List[
                     import ast
                     inputs.append(ast.literal_eval(concrete_val))
                     continue
-                except:
+                except Exception:
                     pass
             if dims and isinstance(dims, list):
                 inputs.append(dims)

@@ -95,10 +95,9 @@ class SodaAnalyzer:
         trace_calculated_inference_time = utils.calculate_total_inference_time(self.trace)
         inference_time = self.tracer.torch_measured_inference_time_us
         
-        # GPU metrics
-        total_gpu_time_span = utils.calculate_total_gpu_time_span(self.events)
-        true_gpu_busy_time = utils.calculate_true_gpu_busy_time(self.events)
-        gpu_utilization = utils.calculate_gpu_utilization(self.events)
+        # GPU metrics — single pass, per-device correct (Phase B + Fix B)
+        total_gpu_time_span, true_gpu_busy_time, gpu_utilization, per_device_gpu = \
+            utils.calculate_gpu_metrics(self.events)
         
         # Kernel metrics
         kernel_exec_time = utils.calculate_kernel_exec_time(self.events)
@@ -108,8 +107,7 @@ class SodaAnalyzer:
         avg_xlat_tax = utils.calculate_avg_tax(sequences, "aten_xlat")
         total_py_tax = utils.calculate_total_tax(sequences, "py")
         avg_py_tax = utils.calculate_avg_tax(sequences, "py")
-        avg_kernel_dur = utils.get_average_kernel_duration(self.events)
-        top_k_kernels = utils.get_top_k_kernels(self.events, k=3)
+        avg_kernel_dur, top_k_kernels = utils.get_kernel_stats(self.events, k=3)  # Phase C: single pass
         
         # Fusion analysis
         fusion_results = None
@@ -175,12 +173,13 @@ class SodaAnalyzer:
             },
             "active_streams": len(stream_info),
 
-            # GPU metrics
+            # GPU metrics (avg per GPU for multi-GPU runs; Fix B)
             "total_gpu_time_span_ms": utils.us_to_ms(total_gpu_time_span),
             "gpu_busy_time_ms": utils.us_to_ms(true_gpu_busy_time),
-            "true_gpu_busy_time_us": true_gpu_busy_time,  # Keep µs version for summarizer
+            "true_gpu_busy_time_us": true_gpu_busy_time,  # µs version for summarizer
             "gpu_idle_time_ms": utils.us_to_ms(max(0.0, total_gpu_time_span - true_gpu_busy_time)),
             "gpu_utilization_percent": gpu_utilization,
+            "per_device_gpu_metrics": per_device_gpu,   # {dev_id: {span_us, busy_us, utilization_pct}}
 
             # Kernel metrics
             "total_kernel_exec_time_ms": utils.us_to_ms(kernel_exec_time["total"]),
@@ -351,9 +350,18 @@ class SodaAnalyzer:
         # Generate model_name and config from args
         model_name = self.args.model
         
-        # FIX: Add GPU name to config
-        gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
-        
+        # Add GPU name(s) to config
+        if torch.cuda.is_available():
+            n = getattr(self.tracer, "num_gpus", 1)
+            if n > 1:
+                gpu_name = " + ".join(
+                    torch.cuda.get_device_name(i) for i in range(n)
+                )
+            else:
+                gpu_name = torch.cuda.get_device_name(0)
+        else:
+            gpu_name = "cpu"
+
         config = {
             "batch_size": self.args.batch_size,
             "seq_len": self.args.seq_len,
@@ -361,7 +369,8 @@ class SodaAnalyzer:
             "precision": self.args.precision,
             "compile_type": self.args.compile_type,
             "device": self.args.device,
-            "gpu_name": gpu_name,  # ADD THIS
+            "gpu_name": gpu_name,
+            "num_gpus": getattr(self.tracer, "num_gpus", 1),
         }
         
         # Build output structure
@@ -524,6 +533,19 @@ class ModelTracer:
             requested_device = 'cpu'
         
         self.device = torch.device(requested_device)
+
+        requested_gpus = max(1, getattr(args, "num_gpus", 1))
+        available_gpus = torch.cuda.device_count() if self._has_cuda else 0
+        self.num_gpus = min(requested_gpus, max(1, available_gpus))
+        if self.num_gpus < requested_gpus:
+            print(
+                f"Warning: requested {requested_gpus} GPUs but only "
+                f"{available_gpus} available. Using {self.num_gpus}."
+            )
+        if self.num_gpus > 1:
+            print(f"Multi-GPU mode: distributing model across {self.num_gpus} GPUs "
+                  f"(device_map=\"balanced\").")
+
         self.compile_type = args.compile_type
         # DEBUG: Print precision settings
         print(f"DEBUG: args.precision='{args.precision}'")
@@ -564,6 +586,7 @@ class ModelTracer:
             self.batch_size,
             self.seq_len,
             self.max_new_tokens,
+            num_gpus=self.num_gpus,
         )
 
         # Output directory for trace: <output_dir>/<experiment_name>
@@ -613,27 +636,37 @@ class ModelTracer:
         return activities
     
     def _sync_device(self) -> None:
-        """Synchronize CUDA device if available, no-op otherwise."""
+        """Synchronize all active CUDA devices."""
         if self._has_cuda:
-            torch.cuda.synchronize()
+            for i in range(self.num_gpus):
+                torch.cuda.synchronize(i)
 
     def _reset_memory_stats(self) -> None:
-        """Reset peak memory stats before profiling."""
+        """Reset peak memory stats on all active GPUs."""
         if self._has_cuda:
-            torch.cuda.reset_peak_memory_stats()
+            for i in range(self.num_gpus):
+                torch.cuda.reset_peak_memory_stats(i)
 
     def _capture_pre_inference_memory(self) -> None:
         """Capture memory baseline after warmup, before profiled inference."""
         if self._has_cuda:
-            torch.cuda.synchronize()
-            self._pre_inference_bytes = torch.cuda.memory_allocated()
+            for i in range(self.num_gpus):
+                torch.cuda.synchronize(i)
+            self._pre_inference_bytes = sum(
+                torch.cuda.memory_allocated(i) for i in range(self.num_gpus)
+            )
 
     def _capture_peak_memory(self) -> None:
         """Capture peak memory after profiled inference completes."""
         if self._has_cuda:
-            torch.cuda.synchronize()
-            self._peak_allocated_bytes = torch.cuda.max_memory_allocated()
-            self._peak_reserved_bytes = torch.cuda.max_memory_reserved()
+            for i in range(self.num_gpus):
+                torch.cuda.synchronize(i)
+            self._peak_allocated_bytes = sum(
+                torch.cuda.max_memory_allocated(i) for i in range(self.num_gpus)
+            )
+            self._peak_reserved_bytes = sum(
+                torch.cuda.max_memory_reserved(i) for i in range(self.num_gpus)
+            )
 
     def setup(self) -> None:
         """
@@ -661,19 +694,28 @@ class ModelTracer:
 
         # Capture model memory footprint after loading model + inputs
         if self._has_cuda:
-            torch.cuda.synchronize()
-            self._model_memory_bytes = torch.cuda.memory_allocated()
-            self._model_memory_reserved_bytes = torch.cuda.memory_reserved()
+            for i in range(self.num_gpus):
+                torch.cuda.synchronize(i)
+            self._model_memory_bytes = sum(
+                torch.cuda.memory_allocated(i) for i in range(self.num_gpus)
+            )
+            self._model_memory_reserved_bytes = sum(
+                torch.cuda.memory_reserved(i) for i in range(self.num_gpus)
+            )
 
     def get_kwargs(self) -> Dict[str, Any]:
         """Returns common kwargs for model loading."""
-        kwargs = {
+        if self.num_gpus > 1:
+            device_map = "balanced"
+        elif self._has_cuda:
+            device_map = self.device
+        else:
+            device_map = "cpu"
+        return {
             "dtype": self.load_precision,
-            "device_map": self.device if self._has_cuda else 'cpu',
+            "device_map": device_map,
             "trust_remote_code": True,
         }
-        
-        return kwargs
 
     def _convert_to_fp8(self, model: transformers.PreTrainedModel) -> transformers.PreTrainedModel:
         """
@@ -1058,11 +1100,12 @@ class ModelTracer:
                 profile_memory=True,
                 record_shapes=True,
             ) as prof:
-                if self._has_cuda:
+                if self._has_cuda and self.num_gpus == 1:
                     start_event = torch.cuda.Event(enable_timing=True)
                     end_event = torch.cuda.Event(enable_timing=True)
                     start_event.record()
                 else:
+                    self._sync_device()
                     wall_start = time.perf_counter()
 
                 for _ in range(num_runs):
@@ -1073,11 +1116,12 @@ class ModelTracer:
                     )
                     self._sync_device()
 
-                if self._has_cuda:
+                if self._has_cuda and self.num_gpus == 1:
                     end_event.record()
                     torch.cuda.synchronize()
                     total_time_us = utils.ms_to_us(start_event.elapsed_time(end_event))
                 else:
+                    self._sync_device()
                     wall_end = time.perf_counter()
                     total_time_us = (wall_end - wall_start) * 1e6  # seconds -> µs
 
@@ -1135,11 +1179,12 @@ class ModelTracer:
                 profile_memory=True,
                 record_shapes=True,
             ) as prof:
-                if self._has_cuda:
+                if self._has_cuda and self.num_gpus == 1:
                     start_event = torch.cuda.Event(enable_timing=True)
                     end_event = torch.cuda.Event(enable_timing=True)
                     start_event.record()
                 else:
+                    self._sync_device()
                     wall_start = time.perf_counter()
 
                 _last_kv_output = None
@@ -1171,11 +1216,12 @@ class ModelTracer:
                     # Sync between runs to ensure clean measurements
                     self._sync_device()
 
-                if self._has_cuda:
+                if self._has_cuda and self.num_gpus == 1:
                     end_event.record()
                     torch.cuda.synchronize()
                     total_time_us = utils.ms_to_us(start_event.elapsed_time(end_event))
                 else:
+                    self._sync_device()
                     wall_end = time.perf_counter()
                     total_time_us = (wall_end - wall_start) * 1e6  # seconds -> µs
 
@@ -1239,22 +1285,24 @@ class ModelTracer:
                 profile_memory=True,
                 record_shapes=True,
             ) as prof:
-                if self._has_cuda:
+                if self._has_cuda and self.num_gpus == 1:
                     start_event = torch.cuda.Event(enable_timing=True)
                     end_event = torch.cuda.Event(enable_timing=True)
                     start_event.record()
                 else:
+                    self._sync_device()
                     wall_start = time.perf_counter()
 
                 for _ in range(num_runs):
                     self.model(**self.model_inputs)
                     self._sync_device()
 
-                if self._has_cuda:
+                if self._has_cuda and self.num_gpus == 1:
                     end_event.record()
                     torch.cuda.synchronize()
                     total_time_us = utils.ms_to_us(start_event.elapsed_time(end_event))
                 else:
+                    self._sync_device()
                     wall_end = time.perf_counter()
                     total_time_us = (wall_end - wall_start) * 1e6  # seconds -> µs
 

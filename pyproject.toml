@@ -38,3 +38,10 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+# Run with: PYTHONPATH=src python3.13 -m pytest tests/
+# (Python 3.11+ required; login node has Python 3.9 which lacks str|Path unions)
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q --tb=short"

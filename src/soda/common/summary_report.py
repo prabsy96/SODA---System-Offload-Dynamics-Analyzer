@@ -58,10 +58,17 @@ def _fmt_mb(mb: float) -> str:
     return f"{mb:.0f} MB"
 
 
-def _gpu_name() -> str:
+def _gpu_name(num_gpus: int = 1) -> str:
+    """Return a display name for the GPU(s) used in this run."""
     try:
         import torch
-        return torch.cuda.get_device_name(0)
+        if num_gpus <= 1:
+            return torch.cuda.get_device_name(0)
+        names = [torch.cuda.get_device_name(i) for i in range(num_gpus)]
+        # If all GPUs are the same model, show "N× <name>"
+        if len(set(names)) == 1:
+            return f"{num_gpus}× {names[0]}"
+        return " + ".join(names)
     except Exception:
         return "N/A"
 
@@ -150,7 +157,7 @@ def _build_speed_table(metrics: Dict[str, Any]) -> Table:
     return tbl
 
 
-def _build_gpu_table(metrics: Dict[str, Any]) -> Table:
+def _build_gpu_table(metrics: Dict[str, Any], args=None) -> Table:
     tbl = Table(
         title="GPU", box=box.SIMPLE_HEAVY, show_edge=False, pad_edge=False,
         title_style="bold", expand=False, show_header=False,
@@ -158,13 +165,29 @@ def _build_gpu_table(metrics: Dict[str, Any]) -> Table:
     tbl.add_column("Metric", style="cyan", no_wrap=True, min_width=22)
     tbl.add_column("Value", justify="right", min_width=16)
     tbl.add_column("", no_wrap=True, min_width=6)
+    num_gpus = getattr(args, "num_gpus", 1) if args is not None else 1
+    multi = num_gpus > 1
+    if multi:
+        tbl.add_row("GPUs", str(num_gpus), "model parallel (device_map=balanced)")
+    # Utilization and busy/idle time are per-GPU averages for multi-GPU runs
+    avg_suffix = " (avg/GPU)" if multi else ""
     gpu_util = metrics.get("gpu_utilization_percent")
     if gpu_util is not None:
-        tbl.add_row("Utilization", f"{gpu_util:.1f}%", "")
+        tbl.add_row("Utilization" + avg_suffix, f"{gpu_util:.1f}%", "")
     for key, label in [("gpu_busy_time_ms", "Busy Time"), ("gpu_idle_time_ms", "Idle Time")]:
         v = metrics.get(key)
         if v is not None:
-            tbl.add_row(label, _fmt_ms(v), "")
+            tbl.add_row(label + avg_suffix, _fmt_ms(v), "")
+    # Per-device breakdown (verbose mode or always for multi-GPU?)
+    per_device = metrics.get("per_device_gpu_metrics", {})
+    if multi and per_device:
+        for dev_id in sorted(per_device):
+            d = per_device[dev_id]
+            tbl.add_row(
+                f"  GPU {dev_id} util",
+                f"{d.get('utilization_pct', 0.0):.1f}%",
+                f"busy {_fmt_ms(d.get('busy_us', 0.0) / 1000.0)}",
+            )
     n_kernels = metrics.get("num_total_kernels")
     if n_kernels is not None:
         tbl.add_row("Kernels", f"{n_kernels:,}", "")
@@ -591,7 +614,7 @@ def render_main_analysis(results: dict, args, output_dir: Path) -> str:
     precision = getattr(args, "precision", "fp16")
     batch = getattr(args, "batch_size", 1)
     seq_len = getattr(args, "seq_len", 512)
-    gpu = _gpu_name()
+    gpu = _gpu_name(getattr(args, "num_gpus", 1))
     date = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     # ── Console output ──
@@ -602,7 +625,7 @@ def render_main_analysis(results: dict, args, output_dir: Path) -> str:
     if tbl_speed.row_count > 0:
         _console.print(tbl_speed)
 
-    tbl_gpu = _build_gpu_table(metrics)
+    tbl_gpu = _build_gpu_table(metrics, args=args)
     if tbl_gpu.row_count > 0:
         _console.print(tbl_gpu)
 
@@ -668,7 +691,7 @@ def render_taxbreak_analysis(report: dict, args, output_dir: Path) -> str:
     """Render console summary for TaxBreak pipeline results. Returns HTML string."""
     model = getattr(args, "model", "unknown")
     precision = getattr(args, "precision", "fp16")
-    gpu = _gpu_name()
+    gpu = _gpu_name(getattr(args, "num_gpus", 1))
     date = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     # ── Console output ──
