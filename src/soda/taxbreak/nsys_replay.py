@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from soda.microbench.baremetal.utils import (
+    detect_vendor_library_events,
+    extract_culib_markers_sql,
     extract_kernels_sql,
     extract_launches_sql,
     nsys_profile,
@@ -83,6 +85,7 @@ inputs = _resized
 import json
 import sys
 import torch
+import torch.cuda.nvtx as nvtx
 from soda.microbench.framework.pytorch.profile import (
     create_input_tensors,
     execute_operation,
@@ -98,22 +101,26 @@ except Exception as exc:
     print(f"Failed to create inputs for {{op_name}}: {{exc}}", file=sys.stderr)
     sys.exit(1)
 {size_hint_block}
-# Warmup (not measured)
+# Warmup (not measured — NVTX markers included for consistent count)
 with torch.no_grad():
     for _ in range({warmup}):
+        nvtx.range_push("aten_dispatch")
         try:
             execute_operation(op_name, inputs)
         except Exception:
             pass
+        nvtx.range_pop()
         torch.cuda.synchronize()
 
 # Measured runs
 with torch.no_grad():
     for _ in range({runs}):
+        nvtx.range_push("aten_dispatch")
         try:
             execute_operation(op_name, inputs)
         except Exception:
             pass
+        nvtx.range_pop()
         torch.cuda.synchronize()
 '''
 
@@ -159,8 +166,10 @@ def nsys_profile_pytorch_kernel(
         runs: Measured iterations.
 
     Returns:
-        Dict with ``launch_tax``, ``kernel_duration``, ``samples``, and
-        ``replay_method`` keys, or ``None`` if profiling fails.
+        Dict with ``launch_tax``, ``kernel_duration``, ``samples``,
+        ``replay_method``, and optionally ``t_dispatch`` (T_dispatch
+        measured via NVTX→cudaLaunch gap) keys, or ``None`` if
+        profiling fails.
     """
     kernel_id = kernel_entry["id"]
     aten_op = kernel_entry["aten_op"]
@@ -198,6 +207,7 @@ def nsys_profile_pytorch_kernel(
         args=["python", str(script_path)],
         timeout=300,
         extra_env=extra_env,
+        trace_apis="cuda,osrt,nvtx,cublas,cudnn",
     )
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -252,6 +262,14 @@ def nsys_profile_pytorch_kernel(
     # 5. Match kernels to launches and compute per-invocation metrics
     launch_taxes: List[float] = []
     durations: List[float] = []
+    dispatch_taxes: List[float] = []
+
+    # Extract NVTX "aten_dispatch" ranges for T_dispatch measurement (NVTX start → cudaLaunchKernel)
+    nvtx_ranges = extract_culib_markers_sql(trace_sql)
+    aten_dispatch_ranges = sorted(
+        [r for r in nvtx_ranges if r["name"] == "aten_dispatch"],
+        key=lambda r: r["ts"],
+    )
 
     for kernel in matched:
         corr_id = kernel.correlation
@@ -261,6 +279,13 @@ def nsys_profile_pytorch_kernel(
             launch_taxes.append(tax)
             durations.append(kernel.dur)
 
+            # CT: find the NVTX "aten_dispatch" range containing this launch
+            launch_ts = launch["ts"]
+            for nvtx_r in aten_dispatch_ranges:
+                if nvtx_r["ts"] <= launch_ts <= nvtx_r["ts"] + nvtx_r["dur"]:
+                    dispatch_taxes.append(launch_ts - nvtx_r["ts"])
+                    break
+
     if not launch_taxes:
         print(f"No launch-kernel matches for {kernel_id} ({op_name})")
         return None
@@ -269,8 +294,15 @@ def nsys_profile_pytorch_kernel(
     if len(launch_taxes) > runs:
         launch_taxes = launch_taxes[-runs:]
         durations = durations[-runs:]
+    if len(dispatch_taxes) > runs:
+        dispatch_taxes = dispatch_taxes[-runs:]
 
     actual_kernel_name = matched[0].name if matched else target_kernel_name
+
+    # Runtime vendor-library detection: check if the isolation replay produced
+    # cuBLAS/cuDNN API events (requires --trace=cublas,cudnn in nsys).
+    i_lib_detected = detect_vendor_library_events(trace_sql) if trace_sql else False
+
     result = {
         "kernel_id": kernel_id,
         "kernel_name": actual_kernel_name,
@@ -280,13 +312,21 @@ def nsys_profile_pytorch_kernel(
         "samples": len(launch_taxes),
         "replay_method": "pytorch",
         "kernel_variant_match": kernel_variant_match,
+        "i_lib_detected": i_lib_detected,
     }
 
+    # Add t_dispatch (T_dispatch = NVTX→cudaLaunchKernel gap) if NVTX matching succeeded
+    if dispatch_taxes:
+        result["t_dispatch"] = _compute_stats(dispatch_taxes)
+
     variant_tag = "" if kernel_variant_match else " [variant fallback]"
+    ct_info = ""
+    if "t_dispatch" in result:
+        ct_info = f", T_dispatch avg={result['t_dispatch']['avg_us']:.2f} us"
     print(
         f"  {kernel_id} ({op_name} -> {actual_kernel_name}){variant_tag}: "
         f"launch_tax avg={result['launch_tax']['avg_us']:.2f} us, "
-        f"dur avg={result['kernel_duration']['avg_us']:.2f} us "
+        f"dur avg={result['kernel_duration']['avg_us']:.2f} us{ct_info} "
         f"({result['samples']} samples)"
     )
 

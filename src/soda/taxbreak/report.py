@@ -2,8 +2,13 @@
 Enhanced TaxBreak report generation.
 
 Merges kernel-database metadata, dynamic system-floor measurements,
-per-kernel isolation-replay launch taxes (nsys), and optional ncu
-cache/memory metrics into a single ``enhanced_taxbreak.json`` report.
+per-kernel isolation-replay launch taxes and ATen dispatch taxes (nsys),
+and optional ncu cache/memory metrics into a single
+``enhanced_taxbreak.json`` report.
+
+CT (ATen dispatch tax) and KT (launch tax) are preferentially sourced
+from isolation replay when available, falling back to full-trace
+subtraction-based values.
 """
 
 import json
@@ -36,10 +41,10 @@ def _remap_ncu_metrics(raw: Dict[str, Any]) -> Dict[str, Any]:
     return friendly
 
 
-def _derive_aten_base(
+def _derive_dispatch_base(
     kernels: List[Dict[str, Any]],
 ) -> float:
-    """Derive baseline ATen dispatch cost from non-GEMM kernels.
+    """Derive baseline dispatch cost (T_dispatch_base) from non-GEMM kernels.
 
     Returns the median ``avg_aten_xlat_tax_us`` across non-GEMM kernels
     (same methodology as ``baremetal/report.py:get_derived_aten_baseline``).
@@ -51,6 +56,33 @@ def _derive_aten_base(
         and entry["taxes"].get("avg_aten_xlat_tax_us", 0) > 0.1
     ]
     return statistics.median(vals) if vals else 2.0
+
+
+def _derive_dispatch_base_replay(
+    nsys_results: Dict[str, Dict[str, Any]],
+    kernels: List[Dict[str, Any]],
+) -> Optional[float]:
+    """Derive dispatch baseline (T_dispatch_base) from replay ``t_dispatch`` for non-GEMM kernels.
+
+    Uses the median replay-measured ATen dispatch time (NVTX → cudaLaunch gap)
+    across non-GEMM, ``i_lib=0`` kernels.  This is the replay-based analogue
+    of ``_derive_dispatch_base()`` and is preferred when isolation replay data with
+    NVTX instrumentation is available.
+
+    Returns:
+        Median T_dispatch_base in microseconds, or ``None`` if no replay data exists.
+    """
+    vals = []
+    for entry in kernels:
+        kid = entry["id"]
+        if entry["classification"]["is_gemm"]:
+            continue
+        nsys = nsys_results.get(kid)
+        if nsys and "t_dispatch" in nsys:
+            avg = nsys["t_dispatch"]["avg_us"]
+            if avg > 0.1:
+                vals.append(avg)
+    return statistics.median(vals) if vals else None
 
 
 def _make_verbose_args(verbose: bool):
@@ -86,8 +118,12 @@ def generate_enhanced_report(
     metadata = kernel_db.get("metadata", {})
     kernels = kernel_db.get("kernels", [])
 
-    # Derive baseline ATen dispatch cost for CudaT calculation
-    t_aten_base = _derive_aten_base(kernels)
+    # Derive baseline dispatch cost (T_dispatch_base) for delta_CT calculation.
+    # Prefer replay-based baseline when NVTX data is available.
+    t_dispatch_base_replay = _derive_dispatch_base_replay(nsys_results, kernels)
+    t_dispatch_base_trace = _derive_dispatch_base(kernels)
+    t_dispatch_base = t_dispatch_base_replay if t_dispatch_base_replay is not None else t_dispatch_base_trace
+    t_dispatch_base_source = "replay" if t_dispatch_base_replay is not None else "trace"
 
     # System floor: the irreducible hardware launch latency (null-kernel baseline).
     # KT_framework = max(0, KT_measured - T_sys) isolates the framework's contribution.
@@ -97,8 +133,8 @@ def generate_enhanced_report(
     per_kernel: List[Dict[str, Any]] = []
     total_structural_us = 0.0
     total_FT_us = 0.0
-    total_CT_us = 0.0
-    total_CudaT_us = 0.0
+    total_FT_dispatch_us = 0.0   # baseline dispatch cost (T_dispatch_base × freq) — FT component
+    total_delta_ct_us = 0.0      # vendor library overhead (delta_CT × freq) — i_lib=1 only
     total_KT_us = 0.0         # raw (includes T_sys hardware floor)
     total_KT_adj_us = 0.0     # framework-only: max(0, KT - T_sys) per kernel
     total_T_sys_us = 0.0      # hardware floor contribution: T_sys × freq
@@ -111,10 +147,17 @@ def generate_enhanced_report(
         kid = entry["id"]
         freq = entry["statistics"]["frequency"]
         is_gemm = entry["classification"]["is_gemm"]
-        # i_lib=1: vendor-library-mediated kernel (cuBLAS/cuBLASLt/cutlass) → CudaT applies.
-        # i_lib=0: framework-native (nvjet, wgmma, s884gemm, elementwise) → no CudaT.
+        # i_lib resolution: prefer runtime detection from isolation replay (ground truth)
+        # over the Phase 1 heuristic (kernel name matching).
         # Backward compat: old DBs without "i_lib" fall back to is_gemm (conservative).
-        i_lib = entry["classification"].get("i_lib", int(is_gemm))
+        nsys = nsys_results.get(kid)
+        i_lib_db = entry["classification"].get("i_lib", int(is_gemm))
+        if nsys and "i_lib_detected" in nsys:
+            i_lib = int(nsys["i_lib_detected"])
+            i_lib_source = "runtime"
+        else:
+            i_lib = i_lib_db
+            i_lib_source = "heuristic"
         total_invocations += freq
 
         # Taxes from kernel DB (full-trace measurements)
@@ -123,7 +166,6 @@ def generate_enhanced_report(
         aten_xlat = taxes.get("avg_aten_xlat_tax_us", 0.0)
 
         # Launch tax: prefer isolation replay if available
-        nsys = nsys_results.get(kid)
         if nsys:
             launch_tax_avg = nsys["launch_tax"]["avg_us"]
             launch_tax_entry = nsys["launch_tax"]
@@ -138,30 +180,41 @@ def generate_enhanced_report(
             }
             replay_method = "trace"
 
-        # CudaT: CUDA library translation overhead — only for vendor-library kernels (i_lib=1).
+        # T_dispatch: prefer replay-based t_dispatch (NVTX → cudaLaunchKernel gap) if available
+        if nsys and "t_dispatch" in nsys:
+            dispatch_time = nsys["t_dispatch"]["avg_us"]
+            dispatch_entry = nsys["t_dispatch"]
+            dispatch_source = "replay"
+        else:
+            dispatch_time = aten_xlat
+            dispatch_entry = {"avg_us": aten_xlat}
+            dispatch_source = "trace"
+
+        # delta_CT: CUDA library translation overhead — only for vendor-library kernels (i_lib=1).
         # nvjet/wgmma/s884gemm have i_lib=0; they have no CUDA library front-end phase.
+        # Uses replay-based dispatch_time when available, trace-based aten_xlat otherwise.
         if i_lib == 1:
-            cuda_t = max(0.0, aten_xlat - t_aten_base)
-            ct = t_aten_base
+            delta_ct = max(0.0, dispatch_time - t_dispatch_base)
+            ft_dispatch = t_dispatch_base
             gemm_invocations += freq          # cuBLAS/cutlass path
         elif is_gemm:
-            cuda_t = 0.0
-            ct = aten_xlat
+            delta_ct = 0.0
+            ft_dispatch = dispatch_time
             framework_gemm_invocations += freq  # nvjet/wgmma path
         else:
-            cuda_t = 0.0
-            ct = aten_xlat
+            delta_ct = 0.0
+            ft_dispatch = dispatch_time
             non_gemm_invocations += freq      # elementwise, norm, etc.
 
         # KT decomposition: T_sys (hardware floor) + KT_framework (software overhead)
         kt_framework = max(0.0, launch_tax_avg - floor_avg)
 
         # Aggregate
-        t_fo = py_tax + aten_xlat + launch_tax_avg
+        t_fo = py_tax + dispatch_time + launch_tax_avg
         total_structural_us += t_fo * freq
         total_FT_us += py_tax * freq
-        total_CT_us += ct * freq
-        total_CudaT_us += cuda_t * freq
+        total_FT_dispatch_us += ft_dispatch * freq
+        total_delta_ct_us += delta_ct * freq
         total_KT_us += launch_tax_avg * freq
         total_KT_adj_us += kt_framework * freq
         total_T_sys_us += floor_avg * freq
@@ -182,10 +235,14 @@ def generate_enhanced_report(
                 "launch_tax_us": launch_tax_entry,
                 "kt_framework_us": {"avg_us": round(kt_framework, 4)},
                 "aten_xlat_tax_us": {"avg_us": aten_xlat},
+                "t_dispatch_us": dispatch_entry,
                 "py_tax_us": {"avg_us": py_tax},
-                "cuda_t_us": {"avg_us": round(cuda_t, 4)},
+                "delta_ct_us": {"avg_us": round(delta_ct, 4)},
+                "dispatch_source": dispatch_source,
             },
             "kernel_duration_us": entry["statistics"]["avg_duration_us"],
+            "i_lib_runtime": i_lib,
+            "i_lib_source": i_lib_source,
             "ncu": ncu_data,
             # Temp field for roofline FLOPs derivation (stripped before JSON)
             "_aten_op_full": entry.get("aten_op", {}),
@@ -244,8 +301,8 @@ def generate_enhanced_report(
     # --- aggregate ---
     total_structural_ms = total_structural_us / 1000.0
     total_FT_ms = total_FT_us / 1000.0
-    total_CT_ms = total_CT_us / 1000.0
-    total_CudaT_ms = total_CudaT_us / 1000.0
+    total_FT_dispatch_ms = total_FT_dispatch_us / 1000.0
+    total_delta_ct_ms = total_delta_ct_us / 1000.0
     total_KT_ms = total_KT_us / 1000.0
     total_KT_adj_ms = total_KT_adj_us / 1000.0
     total_T_sys_ms = total_T_sys_us / 1000.0
@@ -258,12 +315,12 @@ def generate_enhanced_report(
         e["statistics"]["avg_duration_us"] * e["statistics"]["frequency"]
         for e in kernels
     )
-    # T_Orchestrate = FT + CT + CudaT + ΔKT(T_sys).
-    # CT and CudaT together equal total aten_xlat for each kernel:
-    #   i_lib=1: CT = t_aten_base, CudaT = aten_xlat - t_aten_base → CT + CudaT = aten_xlat
-    #   i_lib=0: CT = aten_xlat, CudaT = 0 → CT + CudaT = aten_xlat
-    # So total_xlat_tax_ms = FT + all aten_xlat = total_FT_us + total_CT_us + total_CudaT_us
-    total_xlat_for_hdbi_ms = (total_FT_us + total_CT_us + total_CudaT_us) / 1000.0
+    # T_Orchestrate = FT_python + FT_dispatch + delta_CT + delta_KT(T_sys).
+    # FT_dispatch and delta_CT come from replay-based dispatch_time when available,
+    # falling back to trace-based aten_xlat.  In both cases:
+    #   i_lib=1: FT_dispatch = t_dispatch_base, delta_CT = dispatch - t_dispatch_base
+    #   i_lib=0: FT_dispatch = dispatch, delta_CT = 0
+    total_xlat_for_hdbi_ms = (total_FT_us + total_FT_dispatch_us + total_delta_ct_us) / 1000.0
     try:
         from soda.common import utils as _utils
         hdbi_metrics = _utils.calculate_hdbi(
@@ -293,7 +350,8 @@ def generate_enhanced_report(
             "non_gemm_invocations": non_gemm_invocations,
         },
         "derived_baselines": {
-            "t_aten_base_us": round(t_aten_base, 4),
+            "t_dispatch_base_us": round(t_dispatch_base, 4),
+            "t_dispatch_base_source": t_dispatch_base_source,
             "system_floor_avg_us": floor["avg_us"],
         },
         "aggregate": {
@@ -305,8 +363,8 @@ def generate_enhanced_report(
             "T_sys_floor_ms": round(total_T_sys_ms, 4),
             "breakdown_mean": {
                 "FT_python_ms": round(total_FT_ms, 4),
-                "CT_aten_ms": round(total_CT_ms, 4),
-                "CudaT_ms": round(total_CudaT_ms, 4),
+                "FT_dispatch_ms": round(total_FT_dispatch_ms, 4),
+                "delta_CT_ms": round(total_delta_ct_ms, 4),
                 # KT_launch_ms: raw measured (= KT_framework + T_sys floor per kernel)
                 "KT_launch_ms": round(total_KT_ms, 4),
                 # KT_framework_ms: framework-attributable launch overhead only
@@ -367,18 +425,18 @@ def _print_summary(
     print(f"=== Enhanced TaxBreak Report: {model} on {gpu} ===")
     print(f"  System floor (dynamic) : {floor['avg_us']:.2f} us "
           f"(min={floor['min_us']:.2f}, max={floor['max_us']:.2f})")
-    print(f"  T_aten_base (derived)  : {baselines.get('t_aten_base_us', 0):.2f} us")
+    print(f"  T_dispatch_base ({baselines.get('t_dispatch_base_source', 'trace')})  : {baselines.get('t_dispatch_base_us', 0):.2f} us")
     print()
     print(f"  T_structural (total/inference)     : {agg['T_structural_mean_ms']:.3f} ms  [raw, KT includes T_sys]")
     print(f"  T_structural (framework overhead)  : {agg.get('T_structural_framework_ms', 0):.3f} ms  [KT_framework only]")
     print(f"  T_sys floor  (hardware latency)    : {agg.get('T_sys_floor_ms', 0):.3f} ms  [unavoidable]")
     print()
     print(f"  Breakdown (raw, per inference):")
-    print(f"    FT    (Python xlat)              : {bk['FT_python_ms']:.3f} ms")
-    print(f"    CT    (ATen dispatch)            : {bk['CT_aten_ms']:.3f} ms")
-    print(f"    CudaT (CUDA xlat, I_lib=1 only)  : {bk['CudaT_ms']:.3f} ms")
-    print(f"    KT    (kernel launch, raw)       : {bk['KT_launch_ms']:.3f} ms")
-    print(f"    KT_fw (kernel launch, framework) : {bk.get('KT_framework_ms', 0):.3f} ms")
+    print(f"    FT_py    (Python layer)            : {bk['FT_python_ms']:.3f} ms")
+    print(f"    FT_disp  (ATen dispatch baseline) : {bk['FT_dispatch_ms']:.3f} ms")
+    print(f"    delta_CT (CUDA lib, I_lib=1 only) : {bk['delta_CT_ms']:.3f} ms")
+    print(f"    KT       (kernel launch, raw)     : {bk['KT_launch_ms']:.3f} ms")
+    print(f"    KT_fw    (kernel launch, fwk)     : {bk.get('KT_framework_ms', 0):.3f} ms")
 
     # HDBI (requires dynamic T_sys — computed only in TaxBreak pipeline)
     hdbi = report.get("hdbi")
@@ -428,7 +486,7 @@ def _print_per_kernel_table(
     """Print a per-kernel summary table."""
     headers = [
         "ID", "ATen Op", "Kernel", "Type", "Freq",
-        "T_py", "T_aten", "T_cuda", "T_launch",
+        "T_py", "T_disp", "delta_CT", "T_launch", "src",
     ]
 
     has_ncu = any(entry.get("ncu") for entry in per_kernel)
@@ -445,7 +503,8 @@ def _print_per_kernel_table(
     rows = []
     for entry in per_kernel:
         is_gemm = entry["classification"]["is_gemm"]
-        i_lib = entry["classification"].get("i_lib", int(is_gemm))
+        # Prefer runtime-detected i_lib (matches tax computation) over DB heuristic
+        i_lib = entry.get("i_lib_runtime", entry["classification"].get("i_lib", int(is_gemm)))
         kernel_class = entry["classification"].get("kernel_class", "gemm" if is_gemm else "non_gemm")
         if i_lib == 1:
             ktype = "GEMM/lib"
@@ -465,9 +524,10 @@ def _print_per_kernel_table(
             ktype,
             entry["frequency"],
             _fmt(entry["taxes"]["py_tax_us"]["avg_us"]),
-            _fmt(entry["taxes"]["aten_xlat_tax_us"]["avg_us"]),
-            _fmt(entry["taxes"]["cuda_t_us"]["avg_us"]),
+            _fmt(entry["taxes"]["t_dispatch_us"]["avg_us"]),
+            _fmt(entry["taxes"]["delta_ct_us"]["avg_us"]),
             _fmt(entry["taxes"]["launch_tax_us"]["avg_us"]),
+            entry["taxes"].get("dispatch_source", "trace")[:1],  # "r" or "t"
         ]
 
         if has_ncu:

@@ -24,6 +24,7 @@ def nsys_profile(
     timeout: Optional[int] = None,
     cleanup: bool = False,
     extra_env: Optional[dict] = None,
+    trace_apis: str = "cuda,osrt,nvtx",
 ) -> Tuple[bool, Optional[str], str]:
     """
     Run `nsys profile` followed by `nsys export` to sqlite.
@@ -53,7 +54,7 @@ def nsys_profile(
     args = [
         "nsys",
         "profile",
-        "--trace=cuda,osrt,nvtx",
+        f"--trace={trace_apis}",
         "--output",
         str(trace_file),
         "--force-overwrite=true",
@@ -269,6 +270,34 @@ def extract_culib_markers_sql(trace_file_sql):
         return []
 
     return ranges
+
+
+def detect_vendor_library_events(trace_file_sql: str) -> bool:
+    """Return True if the nsys trace contains cuBLAS or cuDNN API calls.
+
+    Queries the ``CUBLAS_EVENTS`` and ``CUDNN_EVENTS`` tables that nsys
+    populates when ``--trace=cublas,cudnn`` is enabled.  If at least one
+    row exists in either table, the replayed kernel was dispatched through
+    a vendor library front-end (``i_lib=1``).
+
+    Handles missing tables gracefully (older nsys versions or traces
+    recorded without ``--trace=cublas,cudnn``).
+    """
+    try:
+        conn = sqlite3.connect(trace_file_sql)
+        cursor = conn.cursor()
+        for table in ("CUBLAS_EVENTS", "CUDNN_EVENTS"):
+            try:
+                cursor.execute(f"SELECT 1 FROM {table} LIMIT 1")
+                if cursor.fetchone() is not None:
+                    conn.close()
+                    return True
+            except sqlite3.OperationalError:
+                continue  # table doesn't exist in this trace
+        conn.close()
+    except Exception:
+        pass
+    return False
 
 
 def build_base_args(job):
