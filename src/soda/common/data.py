@@ -383,10 +383,10 @@ class Kernel:
 class ATenOp:
     """ATen operation class."""
     def __init__(self, name: str = "unknown",
-                 input_dims: Optional[List[List[int]]] = [],
-                 input_strides: Optional[List[List[int]]] = [],
-                 input_type: Optional[List[str]] = [],
-                 concrete_inputs: Optional[List[Any]] = [],
+                 input_dims: Optional[List[List[int]]] = None,
+                 input_strides: Optional[List[List[int]]] = None,
+                 input_type: Optional[List[str]] = None,
+                 concrete_inputs: Optional[List[Any]] = None,
                  external_id: Optional[int] = -1,
                  ts: Optional[float] = 0.0,
                  dur: Optional[float] = 0.0,
@@ -394,12 +394,18 @@ class ATenOp:
                  min_dur: Optional[float] = None,
                  max_dur: Optional[float] = None,
                  all_dur: Optional[List[float]] = None):
-        """Initialize ATen operation."""
+        """Initialize ATen operation.
+
+        Note: ``input_dims``, ``input_strides``, ``input_type``, and
+        ``concrete_inputs`` default to ``None`` (not ``[]``) to avoid the
+        classic Python mutable-default-argument pitfall where all instances
+        that use the default share the *same* list object.
+        """
         self.name = name
-        self.input_dims = input_dims
-        self.input_strides = input_strides
-        self.input_type = input_type
-        self.concrete_inputs = concrete_inputs
+        self.input_dims = input_dims if input_dims is not None else []
+        self.input_strides = input_strides if input_strides is not None else []
+        self.input_type = input_type if input_type is not None else []
+        self.concrete_inputs = concrete_inputs if concrete_inputs is not None else []
         self.ts = ts
         self.dur = dur
         self.external_id = external_id
@@ -410,31 +416,19 @@ class ATenOp:
     
     def get_alpha_beta(self, default_alpha: float = 1.0, default_beta: float = 1.0) -> Tuple[float, float]:
         """Extract alpha and beta scalars from concrete_inputs for addmm operations.
-        
+
+        Delegates to ``utils.extract_alpha_beta`` (lazy import to avoid a
+        circular-import error, since ``data`` is imported by ``utils``).
+
         Args:
             default_alpha: Default alpha value if not found (default: 1.0)
             default_beta: Default beta value if not found (default: 1.0)
-        
+
         Returns:
             Tuple of (alpha, beta) floats
         """
-        def _parse_scalar(value, default):
-            if value is None or value == '':
-                return default
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                return default
-        
-        # Alpha is at index 3, beta is at index 4
-        if len(self.concrete_inputs) >= 5:
-            alpha = _parse_scalar(self.concrete_inputs[3], default_alpha)
-            beta = _parse_scalar(self.concrete_inputs[4], default_beta)
-        else:
-            alpha = default_alpha
-            beta = default_beta
-        
-        return alpha, beta
+        from soda.common.utils import extract_alpha_beta  # lazy import — data is imported by utils
+        return extract_alpha_beta(self.concrete_inputs, default_alpha, default_beta)
     
     def get_signature(self, full: bool = False) -> dict:
         """

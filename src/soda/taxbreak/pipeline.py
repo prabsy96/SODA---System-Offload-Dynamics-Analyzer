@@ -127,16 +127,17 @@ class TaxBreakPipeline:
         # ── parallel path (multi-GPU) ─────────────────────────────────────
         gpu_queue = self._make_gpu_queue()
         lock = threading.Lock()
-        dispatched = [0]  # mutable counter for progress display
+        dispatched_count = 0  # protected by lock; nonlocal in _replay
 
         def _replay(entry: Dict[str, Any]):
+            nonlocal dispatched_count
             gpu_id = gpu_queue.get()   # blocks until a GPU token is free
             kid   = entry["id"]
             op    = entry["aten_op"].get("name", "?")
             kname = entry["kernel"]["name"]
             with lock:
-                dispatched[0] += 1
-                n = dispatched[0]
+                dispatched_count += 1
+                n = dispatched_count
             print(f"[{n}/{total}] {kid}: {op} -> {kname}  [GPU {gpu_id}]")
             try:
                 extra_env = dict(os.environ)
@@ -199,16 +200,17 @@ class TaxBreakPipeline:
         # ── parallel path (multi-GPU) ─────────────────────────────────────
         gpu_queue = self._make_gpu_queue()
         lock = threading.Lock()
-        dispatched = [0]
+        dispatched_count = 0  # protected by lock; nonlocal in _ncu
 
         def _ncu(entry: Dict[str, Any]):
+            nonlocal dispatched_count
             gpu_id = gpu_queue.get()
             kid   = entry["id"]
             op    = entry["aten_op"].get("name", "?")
             kname = entry["kernel"]["name"]
             with lock:
-                dispatched[0] += 1
-                n = dispatched[0]
+                dispatched_count += 1
+                n = dispatched_count
             print(f"[{n}/{total}] {kid}: {op} -> {kname}  [GPU {gpu_id}]")
             try:
                 extra_env = dict(os.environ)

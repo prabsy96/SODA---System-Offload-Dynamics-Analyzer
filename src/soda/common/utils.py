@@ -3,6 +3,7 @@ SODA utility functions
 """
 
 import argparse
+import bisect
 import json
 import os
 import sys
@@ -545,75 +546,6 @@ def filter_gemm_sequences(sequences: List[Dict[str, Any]]) -> List[Dict[str, Any
                 
     validate_sequences(gemm_sequences)
     return gemm_sequences
-
-def calculate_hsb_metrics(
-    inference_time_us: float,
-    gpu_busy_time_us: float,
-    sequences: List[Dict[str, Any]],
-    taxbreak_lut: Dict[str, float],
-) -> Dict[str, float]:
-    """
-    Calculate HSB (Hardware-Software Inversion) metrics.
-    
-    HSB = 1 - (T_Exposed / T_Structural)
-    
-    Args:
-        inference_time_us: Total inference time in microseconds
-        gpu_busy_time_us: GPU busy time in microseconds
-        sequences: List of kernel sequences
-        taxbreak_lut: Lookup table mapping kernel_name -> T_fo
-    
-    Returns:
-        Dictionary with HSB metrics:
-        - t_exposed_us: Exposed framework overhead (GPU idle time)
-        - t_structural_us: Structural framework overhead (sum of T_fo)
-        - hsb: Hardware-Software Inversion metric
-        - hsb_classification: Human-readable classification
-    """
-    # Calculate T_Exposed (GPU idle time)
-    t_exposed = max(0.0, inference_time_us - gpu_busy_time_us)
-    
-    # Calculate T_Structural (sum of per-kernel framework overheads)
-    t_structural = 0.0
-    
-    if taxbreak_lut:
-        avg_t_fo = sum(taxbreak_lut.values()) / len(taxbreak_lut)
-    else:
-        avg_t_fo = 0.0
-    
-    for seq in sequences:
-        kernel = seq.get("kernel", {})
-        kernel_name = kernel.get("name", "") if isinstance(kernel, dict) else ""
-        
-        if kernel_name in taxbreak_lut:
-            t_fo = taxbreak_lut[kernel_name]
-        else:
-            t_fo = avg_t_fo
-        
-        freq = seq.get("freq", 1) or 1
-        t_structural += t_fo * freq
-    
-     # Calculate HSB
-    epsilon = 1e-6
-    if t_structural < epsilon:
-        hsb = 1.0 if t_exposed < epsilon else -10.0
-    else:
-        hsb = 1.0 - (t_exposed / t_structural)
-    
-    # Classify HSB
-    if hsb >= 0.5:
-        classification = "hardware-bound"
-    elif hsb >= 0:
-        classification = "balanced"
-    else:
-        classification = "framework-bound"
-    
-    return {
-        "t_exposed_us": t_exposed,
-        "t_structural_us": t_structural,
-        "hsb": hsb,
-        "hsb_classification": classification,
-    }
 
 def to_hashable(obj: Any) -> Any:
     """
@@ -1202,6 +1134,12 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
     sequences = []
     orphan_kernels = []
 
+    # Pre-build a time-sorted list of torch_ops for O(log n) fallback lookup.
+    # When a kernel has no direct external_id match we binary-search for the
+    # most-recent torch_op whose interval [ts, ts+dur) encloses the ATen ts.
+    _sorted_tops = sorted(torch_ops.values(), key=lambda o: o["ts"])
+    _sorted_starts = [o["ts"] for o in _sorted_tops]
+
     for kernel in kernel_events:
         corr = kernel.get("correlation")
         ext_id = kernel.get("external_id")
@@ -1212,16 +1150,19 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
         # Try to find torch_op by external_id
         torch_op = torch_ops.get(ext_id)
         
-        # If no direct match, try to find enclosing torch_op by timestamp
+        # If no direct match, binary-search for the enclosing torch_op by timestamp.
+        # O(log n + k) vs the previous O(n) linear scan, where k is the number of
+        # candidate ops that started before aten_ts but ended before it (typically 0).
         if torch_op is None and aten_op is not None:
             aten_ts = aten_op["ts"]
-            # Find torch_op that started before aten_op and is still active
-            for tid, t_op in torch_ops.items():
-                t_start = t_op["ts"]
-                t_end = t_start + t_op.get("dur", 0)
-                if t_start <= aten_ts <= t_end:
-                    torch_op = t_op
+            idx = bisect.bisect_right(_sorted_starts, aten_ts) - 1
+            while idx >= 0:
+                candidate = _sorted_tops[idx]
+                t_end = candidate["ts"] + candidate.get("dur", 0)
+                if t_end >= aten_ts:
+                    torch_op = candidate
                     break
+                idx -= 1  # candidate ended before aten_ts; try earlier (longer-duration) ops
         
         if cuda_launch and aten_op:
             sequences.append({
@@ -1253,7 +1194,8 @@ def calculate_tklqt(sequences: List[Dict[str, Any]]) -> Dict[str, float]:
         Dictionary with total, avg, min, max TKLQT in microseconds.
     """
     tklqt_values = []
-    
+    _dropped_count = 0
+
     for seq in sequences:
         kernel = seq.get("kernel")
         cuda_launch = seq.get("cuda_launch")
@@ -1279,7 +1221,18 @@ def calculate_tklqt(sequences: List[Dict[str, Any]]) -> Dict[str, float]:
                 tklqt_values.append(lqt)
             elif lqt > -10:  # Small negative values are measurement noise, clamp to 0
                 tklqt_values.append(0.0)
+            # else: lqt <= -10 µs — deep-queue GPU artifact; sample discarded
+            else:
+                _dropped_count += 1
     
+    if _dropped_count > 0:
+        print(
+            f"Warning: calculate_tklqt dropped {_dropped_count} sample(s) with "
+            f"lqt ≤ -10 µs (deep-queue GPU artifact, common on H100 bs=1). "
+            f"Use --taxbreak isolation replay for accurate per-kernel KT measurement.",
+            file=sys.stderr,
+        )
+
     if not tklqt_values:
         return {"total": 0.0, "avg": 0.0, "min": 0.0, "max": 0.0, "count": 0}
     
@@ -1291,67 +1244,16 @@ def calculate_tklqt(sequences: List[Dict[str, Any]]) -> Dict[str, float]:
         "count": len(tklqt_values),
     }
 
-def calculate_t_orchestrator(sequences: List[Dict[str, Any]]) -> Dict[str, float]:
-    """
-    Calculate T_orchestrator (total CPU-side dispatch overhead).
-    
-    Per TaxBreak paper:
-        T_orchestrator = Σ (T_py + T_aten + T_lib + T_sys) for all kernels
-    
-    Where for each kernel invocation:
-        - T_py: Python dispatch overhead
-        - T_aten: ATen translation overhead  
-        - T_lib: Library (cuBLAS etc) overhead
-        - T_sys: System/launch overhead (includes TKLQT)
-    
-    For kernels without microbench breakdown, we use:
-        T_orchestrator ≈ launch_tax + aten_xlat_tax
-    
-    Args:
-        sequences: List of event sequences with timing metrics.
-    
-    Returns:
-        Dictionary with total, avg T_orchestrator in microseconds.
-    """
-    t_orch_values = []
-    
-    for seq in sequences:
-        # Try to get detailed breakdown first
-        launch_tax = seq.get("launch_tax", 0)
-        aten_xlat_tax = seq.get("aten_xlat_tax", 0)
-        
-        # Handle dict format (from aggregated sequences)
-        if isinstance(launch_tax, dict):
-            launch_tax = launch_tax.get("avg", 0)
-        if isinstance(aten_xlat_tax, dict):
-            aten_xlat_tax = aten_xlat_tax.get("avg", 0)
-        
-        # Ensure non-negative (clamp measurement noise)
-        launch_tax = max(0.0, float(launch_tax or 0))
-        aten_xlat_tax = max(0.0, float(aten_xlat_tax or 0))
-        
-        # T_orchestrator for this kernel = launch_tax + aten_xlat_tax
-        t_orch = launch_tax + aten_xlat_tax
-        
-        if t_orch > 0:
-            t_orch_values.append(t_orch)
-    
-    if not t_orch_values:
-        return {"total": 0.0, "avg": 0.0, "count": 0}
-    
-    return {
-        "total": sum(t_orch_values),
-        "avg": sum(t_orch_values) / len(t_orch_values),
-        "count": len(t_orch_values),
-    }
-
 def calculate_sequence_metrics(sequences: List[Dict], metrics: List[str]) -> List[Dict]:
     """
-    Calculates per-sequence metrics (e.g., launch_tax, aten_xlat_tax) and adds them to the sequence dict.
+    Calculates per-sequence tax metrics using paper notation and adds them to the sequence dict.
 
     Args:
         sequences: List of event sequence dictionaries.
-        metrics: Metrics to compute (e.g., ["launch_tax", "aten_xlat_tax", "py_tax"])
+        metrics: Metrics to compute using paper notation:
+            - ``"T_launch"``  — T_launch: time from cuda_launch start to kernel start
+            - ``"T_dispatch"`` — T_dispatch: time from aten_op start to cuda_launch start
+            - ``"T_Py"``      — T_Py: time from torch_op start to aten_op start
 
     Returns:
         Modified event sequences with requested metric keys added to each.
@@ -1366,24 +1268,21 @@ def calculate_sequence_metrics(sequences: List[Dict], metrics: List[str]) -> Lis
         if not kernel or not cuda_launch or not aten_op:
             continue
         
-        # launch_tax: time from cuda_launch start to kernel start
-        if "launch_tax" in metrics:
-            launch_tax = kernel["ts"] - cuda_launch["ts"]
-            seq["launch_tax"] = launch_tax
+        # T_launch: time from cuda_launch start to kernel start (paper notation)
+        if "T_launch" in metrics:
+            seq["T_launch"] = kernel["ts"] - cuda_launch["ts"]
         
-        # aten_xlat_tax: time from aten_op start to cuda_launch start
-        if "aten_xlat_tax" in metrics:
-            aten_xlat_tax = cuda_launch["ts"] - aten_op["ts"]
-            seq["aten_xlat_tax"] = aten_xlat_tax
+        # T_dispatch: time from aten_op start to cuda_launch start (paper notation)
+        if "T_dispatch" in metrics:
+            seq["T_dispatch"] = cuda_launch["ts"] - aten_op["ts"]
         
-        # py_tax: time from torch_op start to aten_op start (requires torch_op)
-        if "py_tax" in metrics:
+        # T_Py: time from torch_op start to aten_op start (paper notation, requires torch_op)
+        if "T_Py" in metrics:
             if torch_op is not None and "ts" in torch_op:
-                py_tax = aten_op["ts"] - torch_op["ts"]
-                seq["py_tax"] = py_tax
+                seq["T_Py"] = aten_op["ts"] - torch_op["ts"]
             else:
-                # Fallback: set py_tax to 0 if torch_op not available
-                seq["py_tax"] = 0.0
+                # Fallback: set T_Py to 0 if torch_op not available
+                seq["T_Py"] = 0.0
 
     return sequences
 
@@ -1441,33 +1340,34 @@ def aggregate_sequences(grouped_sequences, metrics: List[str], event_types: List
     validate_sequences(unique_sequences)
     return unique_sequences
 
-def calculate_total_tax(sequences: List[Dict], tax_type: str) -> float:
+def calculate_total_tax(sequences: List[Dict], metric_key: str) -> float:
     """
-    Calculates total for a given sequence-level tax metric (e.g., launch or xlat).
+    Calculates total for a given sequence-level tax metric using the exact key name.
 
     Args:
         sequences: List of event sequence dictionaries with the metric key.
-        tax_type: Metric type without or with the "_tax" suffix (e.g., "launch", "launch_tax").
+        metric_key: Exact key name using paper notation (e.g., ``"T_launch"``,
+            ``"T_dispatch"``, ``"T_Py"``).
 
     Returns:
         Total tax in microseconds.
     """
-    metric_key = tax_type if tax_type.endswith("_tax") else f"{tax_type}_tax"
     total_tax = 0.0
     for seq in sequences:
-        tax_value = seq[metric_key]
+        tax_value = seq.get(metric_key)  # .get() avoids KeyError when a sequence lacks this metric
         if tax_value is not None:
             total_tax += tax_value
     return total_tax
 
 
-def calculate_avg_tax(sequences: List[Dict], tax_type: str) -> float:
+def calculate_avg_tax(sequences: List[Dict], metric_key: str) -> float:
     """
     Calculates average for a given sequence-level tax metric across all sequences.
 
     Args:
         sequences: List of event sequence dictionaries with the metric key.
-        tax_type: Metric type without or with the "_tax" suffix (e.g., "launch", "launch_tax").
+        metric_key: Exact key name using paper notation (e.g., ``"T_launch"``,
+            ``"T_dispatch"``, ``"T_Py"``).
 
     Returns:
         Average tax in microseconds.
@@ -1475,7 +1375,7 @@ def calculate_avg_tax(sequences: List[Dict], tax_type: str) -> float:
     if not sequences:
         return 0.0
     
-    total_tax = calculate_total_tax(sequences, tax_type)
+    total_tax = calculate_total_tax(sequences, metric_key)
     num_kernels = len(sequences)
     return total_tax / num_kernels if num_kernels > 0 else 0.0
 
@@ -1677,7 +1577,13 @@ def calculate_total_gpu_time_span(events: Dict[str, Any]) -> float:
     """
     Calculates the end-to-end GPU time span by finding min start and max end
     across GPU execution events (kernel, gpu_memcpy, gpu_memset).
-    
+
+    .. deprecated::
+        Single-GPU only.  For multi-GPU traces this function merges events across
+        all devices and produces incorrect utilization ratios.  Use
+        ``calculate_gpu_metrics()`` instead — it groups events by device and
+        returns per-device breakdowns as well as a correct aggregate.
+
     Measures the extreme time window of GPU execution (from first to last GPU event).
     Excludes cu(da)LaunchKernel (CPU-side calls).
         
@@ -1730,7 +1636,12 @@ def calculate_kernel_exec_time(events: Dict[str, Any]) -> Dict[str, float]:
 def calculate_true_gpu_busy_time(events: Dict[str, Any]) -> float:
     """
     Calculates GPU busy time by merging overlapping GPU event intervals.
-    
+
+    .. deprecated::
+        Single-GPU only.  On multi-GPU traces this merges events across ALL
+        devices, so simultaneous work on different GPUs is undercounted.
+        Use ``calculate_gpu_metrics()`` instead.
+
     Accounts for concurrent GPU execution across all streams by merging
     overlapping time intervals. Includes kernel, gpu_memcpy, and gpu_memset
     events. If events run concurrently on different streams, their overlapping 
@@ -1780,7 +1691,11 @@ def calculate_true_gpu_busy_time(events: Dict[str, Any]) -> float:
 def calculate_gpu_utilization(events: Dict[str, Any]) -> float:
     """
     Calculates GPU utilization percentage.
-        
+
+    .. deprecated::
+        Single-GPU only.  On multi-GPU traces the flat interval merge gives
+        incorrect results.  Use ``calculate_gpu_metrics()`` instead.
+
     Args:
         events: Dictionary with hierarchical structure from collect_events.
         
@@ -1908,7 +1823,6 @@ def calculate_framework_tax(
         - T_exposed_ms: Exposed framework tax in milliseconds
         - T_exposed_percent: T_exposed as a percentage of T_total
         - T_gpu_busy_percent: T_gpu_busy as a percentage of T_total
-        - is_framework_bound: Boolean flag (True if T_exposed > 50%)
     """
     # T_exposed = T_total - T_gpu_busy
     # Clamp to 0 to handle potential measurement noise where GPU time > CPU time slightly
@@ -1921,84 +1835,73 @@ def calculate_framework_tax(
     else:
         t_exposed_percent = 0.0
         t_gpu_busy_percent = 0.0
-        
-    # Heuristic: If exposed tax > 50%, we are framework bound
-    is_framework_bound = t_exposed_percent > 50.0
 
     return {
         "T_exposed": t_exposed_us,
         "T_exposed_ms": us_to_ms(t_exposed_us),
         "T_exposed_percent": t_exposed_percent,
         "T_gpu_busy_percent": t_gpu_busy_percent,
-    #    "is_framework_bound": is_framework_bound
     }
 
 
 def calculate_hdbi(
     total_kernel_exec_time_ms: float,
-    total_xlat_tax_ms: float,
+    t_orchestrate_excl_kt_ms: float,
     num_total_kernels: int,
     t_sys_us: float = T_FLOOR_SYS_MS * 1000.0,
 ) -> Dict[str, Any]:
     """
-    Calculate HDBI (Host-Device Balance Index) per TaxBreak paper Eq. 6.
+    Calculate HDBI (Host-Device Balance Index) per TaxBreak paper Eq. 3.
 
     HDBI = T_DeviceActive / (T_DeviceActive + T_Orchestrate)
 
     Where:
         T_DeviceActive = Σ(t_k) = sum of kernel execution times
-        T_Orchestrate = Σ(ΔFT + I_lib·ΔCT + ΔKT)
-                      = total_xlat_tax + (num_kernels × t_sys)
+        T_Orchestrate  = t_orchestrate_excl_kt_ms + ΔKT(T_sys)
+                       = (ΔFT + I_lib·ΔCT) + (num_kernels × T_sys)
 
-    Classification:
-        HDBI ≥ 0.5: device-bound (GPU compute dominates)
-        0.2 ≤ HDBI < 0.5: balanced
-        HDBI < 0.2: host-bound (CPU overhead dominates)
+    HDBI → 0: host-bound (orchestration overhead dominates)
+    HDBI → 1: device-bound (GPU compute dominates)
+    No numeric classification thresholds are defined in the paper.
 
     Args:
         total_kernel_exec_time_ms: Sum of kernel durations (T_DeviceActive)
-        total_xlat_tax_ms: Sum of translation overhead (ΔFT + ΔCT)
+        t_orchestrate_excl_kt_ms: Total non-ΔKT structural overhead in ms:
+            ΔFT + I_lib·ΔCT (all components except the hardware launch floor
+            ΔKT).  In TaxBreak mode this comes from the isolation replay
+            decomposition; in standard mode it equals total_T_dispatch.
         num_total_kernels: Number of kernel invocations (for ΔKT calculation)
         t_sys_us: System floor in microseconds from dynamic null-kernel measurement.
                   Defaults to the H100 hardcoded value (T_FLOOR_SYS_MS × 1000).
                   Always pass the dynamically-measured value from TaxBreak pipeline.
 
     Returns:
-        Dictionary containing HDBI metrics and classification.
+        Dictionary containing HDBI metrics (paper notation keys).
     """
     # T_DeviceActive = sum of kernel execution times
-    t_device_active = total_kernel_exec_time_ms
+    T_DeviceActive = total_kernel_exec_time_ms
 
     # ΔKT = num_kernels × T_sys (using dynamically-measured floor)
-    delta_kt = num_total_kernels * (t_sys_us / 1000.0)
+    delta_KT = num_total_kernels * (t_sys_us / 1000.0)
 
-    # T_Orchestrate = xlat_tax (ΔFT + ΔCT) + ΔKT
-    t_orchestrate = total_xlat_tax_ms + delta_kt
+    # T_Orchestrate = (ΔFT + I_lib·ΔCT) + ΔKT
+    T_Orchestrate = t_orchestrate_excl_kt_ms + delta_KT
 
     # HDBI = T_DeviceActive / (T_DeviceActive + T_Orchestrate)
-    denominator = t_device_active + t_orchestrate
+    denominator = T_DeviceActive + T_Orchestrate
     if denominator > 0:
-        hdbi_value = t_device_active / denominator
+        hdbi_value = T_DeviceActive / denominator
     else:
         hdbi_value = 0.0
 
     # Clamp to valid range [0, 1]
     hdbi_value = max(0.0, min(1.0, hdbi_value))
 
-    # Classification per TaxBreak paper
-    if hdbi_value >= 0.5:
-        classification = "device-bound"
-    elif hdbi_value >= 0.2:
-        classification = "balanced"
-    else:
-        classification = "host-bound"
-
     return {
         "hdbi_value": hdbi_value,
-        "hdbi_classification": classification,
-        "t_device_active_ms": t_device_active,
-        "t_orchestrate_ms": t_orchestrate,
-        "delta_kt_ms": delta_kt,
+        "T_DeviceActive_ms": T_DeviceActive,
+        "T_Orchestrate_ms": T_Orchestrate,
+        "delta_KT_ms": delta_KT,
     }
 
 
