@@ -99,7 +99,16 @@ class SodaAnalyzer:
         total_gpu_time_span, true_gpu_busy_time, gpu_utilization, per_device_gpu = \
             utils.calculate_gpu_metrics(self.events)
         
-        # Kernel metrics
+        # Normalize GPU metrics by num_runs so they match per-inference time
+        num_runs = getattr(self.tracer, "num_profiled_runs", 1) or 1
+        total_gpu_time_span /= num_runs
+        true_gpu_busy_time /= num_runs
+        # gpu_utilization is a ratio, so it stays the same
+        for dev_id in per_device_gpu:
+            per_device_gpu[dev_id]["span_us"] /= num_runs
+            per_device_gpu[dev_id]["busy_us"] /= num_runs
+        
+        # Kernel metrics (raw values span all num_runs in the trace)
         kernel_exec_time = utils.calculate_kernel_exec_time(self.events)
         total_launch_tax = utils.calculate_total_tax(sequences, "launch")
         avg_launch_tax = utils.calculate_avg_tax(sequences, "launch")
@@ -108,7 +117,24 @@ class SodaAnalyzer:
         total_py_tax = utils.calculate_total_tax(sequences, "py")
         avg_py_tax = utils.calculate_avg_tax(sequences, "py")
         avg_kernel_dur, top_k_kernels = utils.get_kernel_stats(self.events, k=3)  # Phase C: single pass
-        
+
+        # Normalize aggregate kernel metrics to per-inference values.
+        # The trace contains all num_runs iterations; totals must be divided
+        # so they represent a single inference pass (matching inference_time).
+        # Per-kernel averages (avg_*_tax, avg_kernel_exec_time, TKLQT avg/min/max)
+        # are already correct because both numerator and denominator scale equally.
+        kernel_exec_time["total"] /= num_runs
+        total_launch_tax /= num_runs
+        total_xlat_tax /= num_runs
+        total_py_tax /= num_runs
+        num_total_kernels = len(self.events["gpu"]["kernels"]) // num_runs
+
+        # Normalize top-k frequency and total duration to per-inference
+        for _bucket in ("by_frequency", "by_duration"):
+            for _name, _data in top_k_kernels.get(_bucket, []):
+                _data["frequency"] = int(round(_data["frequency"] / num_runs))
+                _data["duration"] /= num_runs
+
         # Fusion analysis
         fusion_results = None
         if self.args.fusion:
@@ -122,8 +148,11 @@ class SodaAnalyzer:
                     logger=None
                 )
 
-        # TKLQT
+        # TKLQT — normalize total and count to per-inference
         tklqt_metrics = utils.calculate_tklqt(sequences)
+        if tklqt_metrics.get("count", 0) > 0:
+            tklqt_metrics["total"] /= num_runs
+            tklqt_metrics["count"] = int(round(tklqt_metrics["count"] / num_runs))
 
         # Inference throughput: TPOT vs TTFT labeling
         output_tokens = getattr(self.args, "max_new_tokens", 1) or 1
@@ -133,14 +162,29 @@ class SodaAnalyzer:
         throughput_tok_s = (self.args.batch_size * output_tokens) / inference_s if inference_s > 0 else None
         interactivity_tok_s = output_tokens / inference_s if inference_s > 0 else None
 
-        # Kernel fragmentation (MoE diagnostic)
+        # Kernel fragmentation (MoE diagnostic) — normalize to per-inference
         fragmentation_metrics = utils.compute_kernel_fragmentation(self.events, output_tokens)
+        fragmentation_metrics["total_kernel_launches"] = int(round(
+            fragmentation_metrics["total_kernel_launches"] / num_runs
+        ))
+        if output_tokens > 0:
+            fragmentation_metrics["kernels_per_output_token"] = round(
+                fragmentation_metrics["total_kernel_launches"] / output_tokens, 2
+            )
+        # kernel_diversity_ratio uses unique count (unchanged) and normalized total
+        n_frag = fragmentation_metrics["total_kernel_launches"]
+        fragmentation_metrics["kernel_diversity_ratio"] = round(
+            fragmentation_metrics["unique_kernel_count"] / n_frag, 4
+        ) if n_frag > 0 else 0.0
 
         # Memory metrics from tracer + GPU memory transfer events
+        # Normalize memcpy/memset counts and time to per-inference
         memory_metrics = dict(self.tracer.memory_metrics) if self.tracer.memory_metrics else {}
         gpu_mem_events = self.events["gpu"]["memory"]
-        memory_metrics["num_memcpy_memset_ops"] = len(gpu_mem_events)
-        memory_metrics["total_memcpy_memset_time_ms"] = round(sum(e["dur"] for e in gpu_mem_events) / 1000.0, 4)
+        memory_metrics["num_memcpy_memset_ops"] = len(gpu_mem_events) // num_runs
+        memory_metrics["total_memcpy_memset_time_ms"] = round(
+            sum(e["dur"] for e in gpu_mem_events) / 1000.0 / num_runs, 4
+        )
 
         # Carbon footprint estimation
         carbon_metrics = None
@@ -183,7 +227,7 @@ class SodaAnalyzer:
 
             # Kernel metrics
             "total_kernel_exec_time_ms": utils.us_to_ms(kernel_exec_time["total"]),
-            "num_total_kernels": len(self.events["gpu"]["kernels"]),
+            "num_total_kernels": num_total_kernels,
             "avg_kernel_exec_time_ms": utils.us_to_ms(kernel_exec_time["avg"]),
             "total_xlat_tax_ms": utils.us_to_ms(total_xlat_tax),
             "avg_xlat_tax_ms": utils.us_to_ms(avg_xlat_tax),
