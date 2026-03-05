@@ -715,11 +715,11 @@ def render_taxbreak_analysis(report: dict, args, output_dir: Path) -> str:
 
     agg = report.get("aggregate", {})
     breakdown = agg.get("breakdown_mean", {})
-    t_structural_ms = agg.get("T_structural_mean_ms", 0.0)
-    py_ms = breakdown.get("FT_python_ms", 0.0)
-    ft_disp_ms = breakdown.get("FT_dispatch_ms", 0.0)
+    t_structural_ms = agg.get("T_host_observed_ms", 0.0)
+    py_ms = breakdown.get("delta_FT_py_ms", 0.0)
+    ft_disp_ms = breakdown.get("delta_FT_dispatch_ms", 0.0)
     delta_ct_ms = breakdown.get("delta_CT_ms", 0.0)
-    launch_ms = breakdown.get("KT_launch_ms", 0.0)
+    launch_ms = breakdown.get("T_launch_raw_ms", 0.0)
     components = [
         {"name": "Python layer (\u0394FT_py)", "ms": py_ms},
         {"name": "ATen dispatch (\u0394FT_disp)", "ms": ft_disp_ms},

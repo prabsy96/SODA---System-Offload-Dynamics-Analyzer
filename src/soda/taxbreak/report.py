@@ -44,30 +44,47 @@ def _remap_ncu_metrics(raw: Dict[str, Any]) -> Dict[str, Any]:
 def _derive_dispatch_base(
     kernels: List[Dict[str, Any]],
 ) -> float:
-    """Derive baseline dispatch cost (T_dispatch_base) from non-GEMM kernels.
+    """Derive baseline dispatch cost (T_dispatch_base) from I_lib=0 kernels.
 
-    Returns the median ``avg_aten_xlat_tax_us`` across non-GEMM kernels
-    (same methodology as ``baremetal/report.py:get_derived_aten_baseline``).
+    Returns the median ``avg_T_dispatch_us`` across framework-native (I_lib=0)
+    kernels per paper Eq.5:
+
+        T_dispatch_base = median({T_dispatch : k ∈ I_lib=0})
+
+    This correctly includes framework-native GEMM kernels (nvjet/wgmma,
+    is_gemm=True but i_lib=0) that the old ``not is_gemm`` filter excluded.
     """
     vals = [
-        entry["taxes"]["avg_aten_xlat_tax_us"]
+        entry["taxes"]["avg_T_dispatch_us"]
         for entry in kernels
-        if not entry["classification"]["is_gemm"]
-        and entry["taxes"].get("avg_aten_xlat_tax_us", 0) > 0.1
+        if entry["classification"].get("i_lib", 0) == 0
+        and entry["taxes"].get("avg_T_dispatch_us", 0) > 0.1
     ]
-    return statistics.median(vals) if vals else 2.0
+    if not vals:
+        print(
+            "Warning: _derive_dispatch_base found no suitable I_lib=0 (framework-native) "
+            "kernels to estimate T_dispatch_base. Falling back to 0.0 µs (no δCT split "
+            "will be applied). Re-run with a model that has I_lib=0 kernels, or check "
+            "that the kernel DB was captured with sufficient coverage.",
+            file=__import__('sys').stderr,
+        )
+        return 0.0
+    return statistics.median(vals)
 
 
 def _derive_dispatch_base_replay(
     nsys_results: Dict[str, Dict[str, Any]],
     kernels: List[Dict[str, Any]],
 ) -> Optional[float]:
-    """Derive dispatch baseline (T_dispatch_base) from replay ``t_dispatch`` for non-GEMM kernels.
+    """Derive dispatch baseline (T_dispatch_base) from replay ``t_dispatch`` for I_lib=0 kernels.
 
     Uses the median replay-measured ATen dispatch time (NVTX → cudaLaunch gap)
-    across non-GEMM, ``i_lib=0`` kernels.  This is the replay-based analogue
-    of ``_derive_dispatch_base()`` and is preferred when isolation replay data with
-    NVTX instrumentation is available.
+    across framework-native (I_lib=0) kernels per paper Eq.5.  This is the
+    replay-based analogue of ``_derive_dispatch_base()`` and is preferred when
+    isolation replay data with NVTX instrumentation is available.
+
+    Correctly includes framework-native GEMM kernels (nvjet/wgmma: is_gemm=True
+    but i_lib=0) that the old ``is_gemm`` gate excluded.
 
     Returns:
         Median T_dispatch_base in microseconds, or ``None`` if no replay data exists.
@@ -75,7 +92,7 @@ def _derive_dispatch_base_replay(
     vals = []
     for entry in kernels:
         kid = entry["id"]
-        if entry["classification"]["is_gemm"]:
+        if entry["classification"].get("i_lib", 0) != 0:
             continue
         nsys = nsys_results.get(kid)
         if nsys and "t_dispatch" in nsys:
@@ -160,10 +177,10 @@ def generate_enhanced_report(
             i_lib_source = "heuristic"
         total_invocations += freq
 
-        # Taxes from kernel DB (full-trace measurements)
+        # Taxes from kernel DB (full-trace measurements, paper notation)
         taxes = entry.get("taxes", {})
-        py_tax = taxes.get("avg_py_tax_us", 0.0)
-        aten_xlat = taxes.get("avg_aten_xlat_tax_us", 0.0)
+        py_tax = taxes.get("avg_T_Py_us", 0.0)
+        aten_xlat = taxes.get("avg_T_dispatch_us", 0.0)
 
         # Launch tax: prefer isolation replay if available
         if nsys:
@@ -171,7 +188,7 @@ def generate_enhanced_report(
             launch_tax_entry = nsys["launch_tax"]
             replay_method = nsys["replay_method"]
         else:
-            launch_tax_avg = taxes.get("avg_launch_tax_us", 0.0)
+            launch_tax_avg = taxes.get("avg_T_launch_us", 0.0)
             launch_tax_entry = {
                 "avg_us": launch_tax_avg,
                 "min_us": launch_tax_avg,
@@ -325,12 +342,17 @@ def generate_enhanced_report(
         from soda.common import utils as _utils
         hdbi_metrics = _utils.calculate_hdbi(
             total_kernel_exec_time_ms=total_kernel_exec_us / 1000.0,
-            total_xlat_tax_ms=total_xlat_for_hdbi_ms,
+            t_orchestrate_excl_kt_ms=total_xlat_for_hdbi_ms,
             num_total_kernels=total_invocations,
             t_sys_us=floor_avg,
         )
     except Exception:
         hdbi_metrics = None
+
+    # T_Orchestrate (paper Eq.2): ΔFT + I_lib·ΔCT + ΔKT(T_sys)
+    # ΔKT = total_invocations × T_sys
+    _delta_KT_ms = total_invocations * (floor_avg / 1000.0)
+    _T_Orchestrate_ms = total_xlat_for_hdbi_ms + _delta_KT_ms
 
     report = {
         "version": "2.0",
@@ -355,21 +377,23 @@ def generate_enhanced_report(
             "system_floor_avg_us": floor["avg_us"],
         },
         "aggregate": {
-            # Total structural overhead per inference pass (raw — KT includes T_sys floor)
-            "T_structural_mean_ms": round(total_structural_ms, 4),
-            # Adjusted total: KT_framework replaces raw KT (hardware floor removed)
-            "T_structural_framework_ms": round(total_structural_adj_ms, 4),
+            # T_host_observed_ms: total raw host overhead per inference pass (T_launch includes T_sys floor)
+            "T_host_observed_ms": round(total_structural_ms, 4),
+            # T_host_framework_ms: framework-attributable overhead only (delta_KT_framework replaces raw T_launch)
+            "T_host_framework_ms": round(total_structural_adj_ms, 4),
+            # T_Orchestrate_ms: paper Eq.2 — Σ(ΔFT + I_lib·ΔCT + ΔKT(T_sys))
+            "T_Orchestrate_ms": round(_T_Orchestrate_ms, 4),
             # T_sys floor contribution across all invocations in this run
             "T_sys_floor_ms": round(total_T_sys_ms, 4),
             "breakdown_mean": {
-                "FT_python_ms": round(total_FT_ms, 4),
-                "FT_dispatch_ms": round(total_FT_dispatch_ms, 4),
+                "delta_FT_py_ms": round(total_FT_ms, 4),
+                "delta_FT_dispatch_ms": round(total_FT_dispatch_ms, 4),
                 "delta_CT_ms": round(total_delta_ct_ms, 4),
-                # KT_launch_ms: raw measured (= KT_framework + T_sys floor per kernel)
-                "KT_launch_ms": round(total_KT_ms, 4),
-                # KT_framework_ms: framework-attributable launch overhead only
-                # = max(0, KT_measured - T_sys) per kernel × frequency
-                "KT_framework_ms": round(total_KT_adj_ms, 4),
+                # T_launch_raw_ms: raw measured (= delta_KT_framework + T_sys floor per kernel)
+                "T_launch_raw_ms": round(total_KT_ms, 4),
+                # delta_KT_framework_ms: framework-attributable launch overhead only
+                # = max(0, T_launch_measured - T_sys) per kernel × frequency
+                "delta_KT_framework_ms": round(total_KT_adj_ms, 4),
             },
         },
         "per_kernel": per_kernel,
@@ -427,26 +451,27 @@ def _print_summary(
           f"(min={floor['min_us']:.2f}, max={floor['max_us']:.2f})")
     print(f"  T_dispatch_base ({baselines.get('t_dispatch_base_source', 'trace')})  : {baselines.get('t_dispatch_base_us', 0):.2f} us")
     print()
-    print(f"  T_structural (total/inference)     : {agg['T_structural_mean_ms']:.3f} ms  [raw, KT includes T_sys]")
-    print(f"  T_structural (framework overhead)  : {agg.get('T_structural_framework_ms', 0):.3f} ms  [KT_framework only]")
+    print(f"  T_host_observed (total/inference)     : {agg['T_host_observed_ms']:.3f} ms  [raw, T_launch includes T_sys]")
+    print(f"  T_host_framework (framework overhead)  : {agg.get('T_host_framework_ms', 0):.3f} ms  [delta_KT_framework only]")
+    print(f"  T_Orchestrate    (paper Eq.2)          : {agg.get('T_Orchestrate_ms', 0):.3f} ms  [ΔFT+I_lib·ΔCT+ΔKT(T_sys)]")
     print(f"  T_sys floor  (hardware latency)    : {agg.get('T_sys_floor_ms', 0):.3f} ms  [unavoidable]")
     print()
     print(f"  Breakdown (raw, per inference):")
-    print(f"    FT_py    (Python layer)            : {bk['FT_python_ms']:.3f} ms")
-    print(f"    FT_disp  (ATen dispatch baseline) : {bk['FT_dispatch_ms']:.3f} ms")
-    print(f"    delta_CT (CUDA lib, I_lib=1 only) : {bk['delta_CT_ms']:.3f} ms")
-    print(f"    KT       (kernel launch, raw)     : {bk['KT_launch_ms']:.3f} ms")
-    print(f"    KT_fw    (kernel launch, fwk)     : {bk.get('KT_framework_ms', 0):.3f} ms")
+    print(f"    ΔFT_py   (T_Py, Python layer)         : {bk['delta_FT_py_ms']:.3f} ms")
+    print(f"    ΔFT_disp (ATen dispatch baseline)     : {bk['delta_FT_dispatch_ms']:.3f} ms")
+    print(f"    ΔCT      (CUDA lib, I_lib=1 only)     : {bk['delta_CT_ms']:.3f} ms")
+    print(f"    T_launch (kernel launch, raw)         : {bk['T_launch_raw_ms']:.3f} ms")
+    print(f"    ΔKT_fw   (kernel launch, fwk only)    : {bk.get('delta_KT_framework_ms', 0):.3f} ms")
 
     # HDBI (requires dynamic T_sys — computed only in TaxBreak pipeline)
     hdbi = report.get("hdbi")
     if hdbi:
         print()
         print(f"  HDBI (dynamic T_sys={floor['avg_us']:.2f} µs):")
-        print(f"    HDBI value       : {hdbi['hdbi_value']:.3f} ({hdbi['hdbi_classification']})")
-        print(f"    T_DeviceActive   : {hdbi['t_device_active_ms']:.3f} ms")
-        print(f"    T_Orchestrate    : {hdbi['t_orchestrate_ms']:.3f} ms")
-        print(f"      ΔKT (T_sys×N)  : {hdbi['delta_kt_ms']:.3f} ms")
+        print(f"    HDBI value           : {hdbi['hdbi_value']:.3f}")
+        print(f"    T_DeviceActive       : {hdbi['T_DeviceActive_ms']:.3f} ms")
+        print(f"    T_Orchestrate        : {hdbi['T_Orchestrate_ms']:.3f} ms")
+        print(f"      ΔKT (T_sys×N)      : {hdbi['delta_KT_ms']:.3f} ms")
     print()
     print(f"  Kernels: {summary.get('total_unique_kernels', 0)} unique, "
           f"{summary.get('total_invocations', 0)} invocations "
@@ -507,13 +532,13 @@ def _print_per_kernel_table(
         i_lib = entry.get("i_lib_runtime", entry["classification"].get("i_lib", int(is_gemm)))
         kernel_class = entry["classification"].get("kernel_class", "gemm" if is_gemm else "non_gemm")
         if i_lib == 1:
-            ktype = "GEMM/lib"
+            ktype = "Library-mediated (I_lib=1)"
         elif kernel_class == "gemm":
-            ktype = "GEMM/fw"
+            ktype = "FW-native (I_lib=0)"
         elif kernel_class == "unknown":
             ktype = "unknown"
         else:
-            ktype = "other"
+            ktype = "FW-native (I_lib=0)"
         kname = entry["kernel_name"]
         kname_display = kname[:35] + "..." if len(kname) > 35 else kname
 

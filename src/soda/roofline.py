@@ -26,6 +26,7 @@ GPU_SPECS: Dict[str, Dict[str, float]] = {
     "H100 SXM": {"peak_tflops_fp16": 989.5, "peak_bw_tb_s": 3.35},
     "H100 PCIe": {"peak_tflops_fp16": 756.5, "peak_bw_tb_s": 2.0},
     "H200 SXM": {"peak_tflops_fp16": 989.5, "peak_bw_tb_s": 4.8},
+    "H200 NVL": {"peak_tflops_fp16": 989.5, "peak_bw_tb_s": 3.35},  # PCIe form-factor, 96 GB HBM3e
     "A100 SXM": {"peak_tflops_fp16": 312.0, "peak_bw_tb_s": 2.0},
     "A100 PCIe": {"peak_tflops_fp16": 312.0, "peak_bw_tb_s": 1.555},
     "V100 SXM2": {"peak_tflops_fp16": 125.0, "peak_bw_tb_s": 0.9},
@@ -35,7 +36,10 @@ GPU_SPECS: Dict[str, Dict[str, float]] = {
 
 # Patterns for fuzzy-matching torch.cuda.get_device_name() strings
 _GPU_PATTERNS: List[Tuple[re.Pattern, str]] = [
-    (re.compile(r"H200.*SXM|H200", re.IGNORECASE), "H200 SXM"),
+    (re.compile(r"H200.*NVL", re.IGNORECASE), "H200 NVL"),
+    (re.compile(r"H200.*SXM", re.IGNORECASE), "H200 SXM"),
+    # H200 without variant qualifier — default to SXM (most common data-centre config)
+    (re.compile(r"H200", re.IGNORECASE), "H200 SXM"),
     (re.compile(r"H100.*SXM", re.IGNORECASE), "H100 SXM"),
     (re.compile(r"H100.*PCIe|H100.*PCI", re.IGNORECASE), "H100 PCIe"),
     (re.compile(r"A100.*SXM", re.IGNORECASE), "A100 SXM"),
@@ -43,7 +47,7 @@ _GPU_PATTERNS: List[Tuple[re.Pattern, str]] = [
     (re.compile(r"V100.*SXM", re.IGNORECASE), "V100 SXM2"),
     (re.compile(r"A6000", re.IGNORECASE), "A6000"),
     (re.compile(r"L40S", re.IGNORECASE), "L40S"),
-    # Fallback: H100 without variant → assume SXM
+    # Fallback: H100/A100 without variant → assume SXM
     (re.compile(r"H100", re.IGNORECASE), "H100 SXM"),
     (re.compile(r"A100", re.IGNORECASE), "A100 SXM"),
 ]

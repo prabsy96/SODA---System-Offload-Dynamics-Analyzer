@@ -49,38 +49,34 @@ def _extract_last_run_sequences(
     """
     Extract sequences belonging to the last profiled run only.
 
-    The profiler captures all runs contiguously. We partition kernel
-    timestamps into ``num_profiled_runs`` equal buckets and keep only
-    the final bucket.
+    The profiler captures all runs contiguously.  Each run contributes
+    approximately ``len(sequences) // num_profiled_runs`` sequences.
+
+    Uses a **count-based** split: take the last ``expected_per_run``
+    sequences.  This is more robust than a time-based split, which
+    assumed equal run durations and failed when early runs were slower
+    (JIT compilation, cold caches).
+
+    A warning is emitted when the last bucket has fewer than 80% of the
+    expected size, which indicates an unbalanced trace.
     """
     if num_profiled_runs <= 1:
         return sequences
 
-    # Collect kernel timestamps from all valid sequences
-    kernel_timestamps = []
-    for seq in sequences:
-        kernel = seq.get("kernel")
-        if kernel and "ts" in kernel:
-            kernel_timestamps.append(kernel["ts"])
-
-    if not kernel_timestamps:
+    n = len(sequences)
+    if n == 0:
         return sequences
 
-    ts_min = min(kernel_timestamps)
-    ts_max = max(kernel_timestamps)
-    total_span = ts_max - ts_min
+    expected_per_run = max(1, n // num_profiled_runs)
+    last_run = sequences[-expected_per_run:]
 
-    if total_span <= 0:
-        return sequences
-
-    # Boundary for the last run (last 1/N of the time span)
-    last_run_boundary = ts_min + total_span * (num_profiled_runs - 1) / num_profiled_runs
-
-    last_run = []
-    for seq in sequences:
-        kernel = seq.get("kernel")
-        if kernel and kernel.get("ts", 0) >= last_run_boundary:
-            last_run.append(seq)
+    if len(last_run) < expected_per_run * 0.8:
+        print(
+            f"Warning: _extract_last_run_sequences: expected ~{expected_per_run} "
+            f"sequences for last run but found {len(last_run)}. "
+            f"Trace may be unbalanced "
+            f"(total={n}, num_runs={num_profiled_runs})."
+        )
 
     return last_run
 
@@ -111,7 +107,7 @@ def generate_kernel_database(
     last_run_seqs = _extract_last_run_sequences(kernel_sequences, num_runs)
 
     # --- Step 3: compute per-sequence tax metrics ---
-    metrics_to_compute = ["launch_tax", "aten_xlat_tax", "py_tax"]
+    metrics_to_compute = ["T_launch", "T_dispatch", "T_Py"]
     utils.calculate_sequence_metrics(last_run_seqs, metrics_to_compute)
 
     # --- Step 4: group by identity and aggregate ---
@@ -230,9 +226,9 @@ def generate_kernel_database(
                 "std_duration_us": round(dur_std, 4),
             },
             "taxes": {
-                "avg_launch_tax_us": _tax_avg("launch_tax"),
-                "avg_aten_xlat_tax_us": _tax_avg("aten_xlat_tax"),
-                "avg_py_tax_us": _tax_avg("py_tax"),
+                "avg_T_launch_us": _tax_avg("T_launch"),
+                "avg_T_dispatch_us": _tax_avg("T_dispatch"),
+                "avg_T_Py_us": _tax_avg("T_Py"),
             },
         })
 

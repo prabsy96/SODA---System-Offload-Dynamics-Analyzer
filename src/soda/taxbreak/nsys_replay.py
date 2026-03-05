@@ -260,9 +260,9 @@ def nsys_profile_pytorch_kernel(
         return None
 
     # 5. Match kernels to launches and compute per-invocation metrics
-    launch_taxes: List[float] = []
-    durations: List[float] = []
-    dispatch_taxes: List[float] = []
+    # Collect triples so all three metrics are trimmed together (same index boundary).
+    # dispatch_tax is None when no NVTX "aten_dispatch" range contains this launch.
+    tax_triples: List[tuple] = []  # (launch_tax, duration, dispatch_tax_or_None)
 
     # Extract NVTX "aten_dispatch" ranges for T_dispatch measurement (NVTX start → cudaLaunchKernel)
     nvtx_ranges = extract_culib_markers_sql(trace_sql)
@@ -276,26 +276,29 @@ def nsys_profile_pytorch_kernel(
         if corr_id in launches:
             launch = launches[corr_id]
             tax = kernel.ts - launch["ts"]
-            launch_taxes.append(tax)
-            durations.append(kernel.dur)
 
             # CT: find the NVTX "aten_dispatch" range containing this launch
             launch_ts = launch["ts"]
+            dispatch_tax = None
             for nvtx_r in aten_dispatch_ranges:
                 if nvtx_r["ts"] <= launch_ts <= nvtx_r["ts"] + nvtx_r["dur"]:
-                    dispatch_taxes.append(launch_ts - nvtx_r["ts"])
+                    dispatch_tax = launch_ts - nvtx_r["ts"]
                     break
 
-    if not launch_taxes:
+            tax_triples.append((tax, kernel.dur, dispatch_tax))
+
+    if not tax_triples:
         print(f"No launch-kernel matches for {kernel_id} ({op_name})")
         return None
 
-    # 6. Keep only the last ``runs`` samples (skip warmup)
-    if len(launch_taxes) > runs:
-        launch_taxes = launch_taxes[-runs:]
-        durations = durations[-runs:]
-    if len(dispatch_taxes) > runs:
-        dispatch_taxes = dispatch_taxes[-runs:]
+    # 6. Keep only the last ``runs`` samples (skip warmup) — trim the triple list once
+    #    so all three metrics share the same index boundary.
+    if len(tax_triples) > runs:
+        tax_triples = tax_triples[-runs:]
+
+    launch_taxes = [t[0] for t in tax_triples]
+    durations = [t[1] for t in tax_triples]
+    dispatch_taxes = [t[2] for t in tax_triples if t[2] is not None]
 
     actual_kernel_name = matched[0].name if matched else target_kernel_name
 

@@ -86,7 +86,7 @@ class SodaAnalyzer:
         """
         print("=== Analyzing Trace Data ===")
         print(f"Analyzing {len(self.sequences)} event sequences")
-        sequences = utils.calculate_sequence_metrics(list(self.sequences), metrics=["launch_tax", "aten_xlat_tax", "py_tax"])
+        sequences = utils.calculate_sequence_metrics(list(self.sequences), metrics=["T_launch", "T_dispatch", "T_Py"])
         
         # Analyze per-stream metrics
         stream_info = utils.analyze_per_stream(self.events)
@@ -110,12 +110,12 @@ class SodaAnalyzer:
         
         # Kernel metrics (raw values span all num_runs in the trace)
         kernel_exec_time = utils.calculate_kernel_exec_time(self.events)
-        total_launch_tax = utils.calculate_total_tax(sequences, "launch")
-        avg_launch_tax = utils.calculate_avg_tax(sequences, "launch")
-        total_xlat_tax = utils.calculate_total_tax(sequences, "aten_xlat")
-        avg_xlat_tax = utils.calculate_avg_tax(sequences, "aten_xlat")
-        total_py_tax = utils.calculate_total_tax(sequences, "py")
-        avg_py_tax = utils.calculate_avg_tax(sequences, "py")
+        total_T_launch = utils.calculate_total_tax(sequences, "T_launch")
+        avg_T_launch = utils.calculate_avg_tax(sequences, "T_launch")
+        total_T_dispatch = utils.calculate_total_tax(sequences, "T_dispatch")
+        avg_T_dispatch = utils.calculate_avg_tax(sequences, "T_dispatch")
+        total_T_Py = utils.calculate_total_tax(sequences, "T_Py")
+        avg_T_Py = utils.calculate_avg_tax(sequences, "T_Py")
         avg_kernel_dur, top_k_kernels = utils.get_kernel_stats(self.events, k=3)  # Phase C: single pass
 
         # Normalize aggregate kernel metrics to per-inference values.
@@ -124,10 +124,26 @@ class SodaAnalyzer:
         # Per-kernel averages (avg_*_tax, avg_kernel_exec_time, TKLQT avg/min/max)
         # are already correct because both numerator and denominator scale equally.
         kernel_exec_time["total"] /= num_runs
-        total_launch_tax /= num_runs
-        total_xlat_tax /= num_runs
-        total_py_tax /= num_runs
+        total_T_launch /= num_runs
+        total_T_dispatch /= num_runs
+        total_T_Py /= num_runs
         num_total_kernels = len(self.events["gpu"]["kernels"]) // num_runs
+
+        # Warn about negative aggregate taxes (deep-queue GPU artifact, e.g. H100 bs=1).
+        # Raw values are preserved as-is; use --taxbreak isolation replay for accurate KT.
+        if total_T_launch < 0:
+            print(
+                f"Warning: total_T_launch={total_T_launch:.2f} µs is negative "
+                f"(deep-queue GPU artifact). Values in report.json reflect raw "
+                f"measurements; use --taxbreak for artifact-free per-kernel KT.",
+                file=__import__('sys').stderr,
+            )
+        if total_T_dispatch < 0:
+            print(
+                f"Warning: total_T_dispatch={total_T_dispatch:.2f} µs is negative "
+                f"(profiler ordering artifact). Use --taxbreak for accurate ΔCT.",
+                file=__import__('sys').stderr,
+            )
 
         # Normalize top-k frequency and total duration to per-inference
         for _bucket in ("by_frequency", "by_duration"):
@@ -229,12 +245,12 @@ class SodaAnalyzer:
             "total_kernel_exec_time_ms": utils.us_to_ms(kernel_exec_time["total"]),
             "num_total_kernels": num_total_kernels,
             "avg_kernel_exec_time_ms": utils.us_to_ms(kernel_exec_time["avg"]),
-            "total_xlat_tax_ms": utils.us_to_ms(total_xlat_tax),
-            "avg_xlat_tax_ms": utils.us_to_ms(avg_xlat_tax),
-            "total_launch_tax_ms": utils.us_to_ms(total_launch_tax),
-            "avg_launch_tax_ms": utils.us_to_ms(avg_launch_tax),
-            "total_py_tax_ms": utils.us_to_ms(total_py_tax),
-            "avg_py_tax_ms": utils.us_to_ms(avg_py_tax),
+            "total_T_dispatch_ms": utils.us_to_ms(total_T_dispatch),
+            "avg_T_dispatch_ms": utils.us_to_ms(avg_T_dispatch),
+            "total_T_launch_ms": utils.us_to_ms(total_T_launch),
+            "avg_T_launch_ms": utils.us_to_ms(avg_T_launch),
+            "total_T_Py_ms": utils.us_to_ms(total_T_Py),
+            "avg_T_Py_ms": utils.us_to_ms(avg_T_Py),
 
             # TKLQT (HDBI requires accurate i_lib decomposition from --taxbreak)
             "tklqt": tklqt_metrics,
@@ -321,13 +337,14 @@ class SodaAnalyzer:
         
         print("")
         print("=== Taxes ===")
-        print(f"\t* ΔFT  (py_tax, Python layer) (ms): {metrics['total_py_tax_ms']:.4f}")
-        print(f"\t* ΔCT  (xlat tax, ATen dispatch) (ms): {metrics['total_xlat_tax_ms']:.4f}")
-        print(f"\t* ΔKT  (launch tax + queue latency) (ms): {metrics['total_launch_tax_ms']:.4f}")
+        print(f"\t* ΔFT_py  (T_Py, Python layer) (ms): {metrics['total_T_Py_ms']:.4f}")
+        print(f"\t* ΔFT_disp + δCT  (T_dispatch, undifferentiated in standard mode) (ms): {metrics['total_T_dispatch_ms']:.4f}")
+        print(f"\t*   (use --taxbreak for per-kernel FT_dispatch / δCT decomposition)")
+        print(f"\t* ΔKT  (T_launch + queue latency) (ms): {metrics['total_T_launch_ms']:.4f}")
         if metrics['num_total_kernels'] > 0:
-            print(f"\t* Avg. py_tax per kernel (ms): {metrics['avg_py_tax_ms']:.4f}")
-            print(f"\t* Avg. xlat tax per kernel (ms): {metrics['avg_xlat_tax_ms']:.4f}")
-            print(f"\t* Avg. launch tax (+ queue latency) per kernel (ms): {metrics['avg_launch_tax_ms']:.4f}")
+            print(f"\t* Avg. T_Py per kernel (ms): {metrics['avg_T_Py_ms']:.4f}")
+            print(f"\t* Avg. T_dispatch per kernel (ms): {metrics['avg_T_dispatch_ms']:.4f}")
+            print(f"\t* Avg. T_launch (+ queue latency) per kernel (ms): {metrics['avg_T_launch_ms']:.4f}")
             print(f"\t* Avg. execution time per kernel (ms): {metrics['avg_kernel_exec_time_ms']:.4f}")
         
         # Memory profiling
@@ -591,10 +608,7 @@ class ModelTracer:
                   f"(device_map=\"balanced\").")
 
         self.compile_type = args.compile_type
-        # DEBUG: Print precision settings
-        print(f"DEBUG: args.precision='{args.precision}'")
         self.is_fp8 = args.precision == "float8_e4m3fn"
-        print(f"DEBUG: self.is_fp8={self.is_fp8}")
         
         self.precision = utils.parse_dtype_to_torch(args.precision)
         self.load_precision = torch.bfloat16 if self.is_fp8 else self.precision
@@ -783,8 +797,6 @@ class ModelTracer:
         """
         Recursively replace nn.Linear with transformer_engine.pytorch.Linear.
         """
-        import transformer_engine.pytorch as te
-        
         import transformer_engine.pytorch as te
         import gc
         
