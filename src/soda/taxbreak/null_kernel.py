@@ -100,8 +100,8 @@ def _measure_floor_on_device(
 
 
 def measure_system_floor(
-    warmup: int = 50,
-    runs: int = 200,
+    warmup: int = 20,
+    runs: int = 50,
     num_gpus: int = 1,
 ) -> Dict[str, float]:
     """

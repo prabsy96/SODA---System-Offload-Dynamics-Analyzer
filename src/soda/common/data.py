@@ -44,7 +44,10 @@ def clean_kernel_name(kernel_name: str) -> str:
     lower_raw = raw_name.lower()
     lower_clean = clean_name.lower()
 
-    # List of substrings that indicate a GEMM-like kernel on NVIDIA GPUs
+    # List of substrings that indicate a vendor-library or GEMM-like kernel on NVIDIA GPUs.
+    # NOTE: This is used for kernel name *enrichment* (adding _gemm suffix for readability),
+    # NOT for the primary library-mediated vs framework-native classification, which lives
+    # in utils.is_library_mediated_kernel() / is_library_mediated_op().
     gemm_indicators = [
         "gemm",       # Standard
         "wgmma",      # Hopper/Blackwell Tensor Cores

@@ -10,8 +10,12 @@ Usage (Stage 2 — no model loading required):
     soda-cli --taxbreak --kernel-db-path <path> [--ncu] [--ncu-top-n 10]
 """
 
+import copy
+import json
 import os
 import queue
+import re
+import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -20,6 +24,11 @@ from typing import Any, Dict, List
 from soda.common import utils, print_utils
 from soda.taxbreak.null_kernel import measure_system_floor
 from soda.taxbreak.nsys_replay import nsys_profile_pytorch_kernel
+from soda.taxbreak.replay_cache_tools import (
+    load_replay_cache_payload,
+    save_replay_cache_payload,
+)
+from soda.taxbreak.global_cache import GlobalKernelCache, NullGlobalCache
 from soda.taxbreak.report import generate_enhanced_report
 
 
@@ -32,6 +41,19 @@ class TaxBreakPipeline:
         self.args = args
         self.output_dir = self.kernel_db_path.parent / "taxbreak"
         self.num_gpus = self.db.get("metadata", {}).get("num_gpus", 1)
+        self.global_cache_dir = self._resolve_global_cache_dir()
+
+        # Instantiate directory-based global cache (or null cache if disabled)
+        gpu_name = self.db.get("metadata", {}).get("gpu_name", "") or "unknown"
+        if getattr(args, "no_global_cache", False):
+            self.global_cache = NullGlobalCache()
+        else:
+            custom_dir = getattr(args, "global_cache_dir", None)
+            if custom_dir:
+                cache_dir = Path(custom_dir) / self._gpu_cache_slug()
+            else:
+                cache_dir = self.global_cache_dir
+            self.global_cache = GlobalKernelCache(cache_dir, gpu_name)
 
     def run(self) -> Path:
         """Execute the full pipeline and return the report path.
@@ -55,17 +77,56 @@ class TaxBreakPipeline:
         print(f"  Output    : {self.output_dir}")
         print()
 
+        warmup = max(0, getattr(self.args, "warmup", 20))
+        runs = max(1, getattr(self.args, "runs", 50))
+
         # --- Step 1: Dynamic system floor ---
         section = "Dynamic System Floor"
         print_utils.section_start(section)
-        floor = measure_system_floor(num_gpus=self.num_gpus)
+
+        cached_floor = self.global_cache.load_t_sys(
+            warmup=warmup, runs=runs, num_gpus=self.num_gpus,
+        )
+        if cached_floor is not None:
+            floor = cached_floor
+            floor["method"] = "cached"
+            print(
+                f"  System floor (cached): avg={floor['avg_us']:.2f} us, "
+                f"std={floor.get('std_us', 0):.2f} us"
+            )
+        else:
+            floor = measure_system_floor(
+                warmup=warmup,
+                runs=runs,
+                num_gpus=self.num_gpus,
+            )
+            self.global_cache.store_t_sys(
+                floor, warmup=warmup, runs=runs, num_gpus=self.num_gpus,
+            )
+
         print_utils.section_end(section)
 
         # --- Step 2: Isolation replay (nsys) for each kernel ---
         section = "Isolation Replay (nsys)"
         print_utils.section_start(section)
         nsys_results = self._run_nsys_replay(kernels)
-        print(f"\nCompleted nsys replay: {len(nsys_results)}/{len(kernels)} kernels")
+        cache_hits = getattr(self, "_cache_hits", 0)
+        global_cache_hits = getattr(self, "_global_cache_hits", 0)
+        if cache_hits:
+            profiled = len(kernels) - cache_hits
+            local_hits = cache_hits - global_cache_hits
+            parts = []
+            if local_hits:
+                parts.append(f"{local_hits} local-cached")
+            if global_cache_hits:
+                parts.append(f"{global_cache_hits} global-cached")
+            parts.append(f"{profiled} profiled")
+            print(
+                f"\nCompleted nsys replay: {len(nsys_results)}/{len(kernels)} kernels "
+                f"({', '.join(parts)})"
+            )
+        else:
+            print(f"\nCompleted nsys replay: {len(nsys_results)}/{len(kernels)} kernels")
         print_utils.section_end(section)
 
         # --- Step 3: Optional ncu profiling ---
@@ -96,10 +157,144 @@ class TaxBreakPipeline:
             q.put(gpu_id)
         return q
 
+    def _infer_output_root(self) -> Path:
+        """Infer the shared output root that should own the global cache.
+
+        Preference order:
+        1. Explicit ``SODA_OUTPUT`` override
+        2. Repository root output dir from ``SODA_ROOT``
+        3. Nearest ancestor named ``output`` in ``kernel_db_path``
+        4. Fallback to the kernel DB's great-grandparent directory
+        """
+        configured_output = os.environ.get("SODA_OUTPUT")
+        if configured_output:
+            return Path(configured_output).expanduser().resolve()
+
+        soda_root = os.environ.get("SODA_ROOT")
+        if soda_root:
+            return (Path(soda_root).expanduser().resolve() / "output")
+
+        for parent in self.kernel_db_path.parents:
+            if parent.name == "output":
+                return parent.resolve()
+
+        try:
+            return self.kernel_db_path.parents[3].resolve()
+        except IndexError:
+            return self.kernel_db_path.parent.parent.resolve()
+
+    def _gpu_cache_slug(self) -> str:
+        """Return a filesystem-safe GPU slug for shared cache partitioning."""
+        gpu_name = self.db.get("metadata", {}).get("gpu_name", "") or "unknown"
+        slug = re.sub(r"[^A-Za-z0-9]+", "_", gpu_name).strip("_")
+        return slug or "unknown"
+
+    def _resolve_global_cache_dir(self) -> Path:
+        """Return the cross-job global cache directory for this GPU family."""
+        return self._infer_output_root() / ".global_kernel_cache" / self._gpu_cache_slug()
+
+    # ------------------------------------------------------------------
+    # Replay cache helpers
+    # ------------------------------------------------------------------
+
+    def _make_replay_cache_key(self, entry: Dict[str, Any]) -> str:
+        """Build a deterministic cache key for replay deduplication.
+
+        The key captures the ATen-op configuration (which determines the
+        replay script) and the target kernel name (which determines kernel
+        matching in the nsys trace).  Grid/block are included because when
+        all input_dims are empty, ``nsys_profile_pytorch_kernel`` infers
+        tensor size from ``grid[0] * block[0]``.
+
+        Two entries with the same cache key will produce identical replay
+        results.
+        """
+        aten_op = entry.get("aten_op", {})
+        kernel = entry.get("kernel", {})
+        key_tuple = (
+            aten_op.get("name", ""),
+            utils.to_hashable(aten_op.get("input_dims", [])),
+            utils.to_hashable(aten_op.get("input_type", [])),
+            utils.to_hashable(aten_op.get("concrete_inputs", [])),
+            kernel.get("name", ""),
+            utils.to_hashable(kernel.get("grid", [0, 0, 0])),
+            utils.to_hashable(kernel.get("block", [0, 0, 0])),
+        )
+        return str(key_tuple)
+
+    def _load_replay_cache(self) -> Dict[str, Dict[str, Any]]:
+        """Load persistent replay cache from a prior run.
+
+        Validates that the GPU name matches the current kernel DB.  Returns
+        an empty dict if the cache is missing, corrupt, or stale.
+        """
+        cache_path = self.output_dir / "replay_cache.json"
+        try:
+            current_gpu = self.db.get("metadata", {}).get("gpu_name", "")
+            data, recovered, quarantine_path = load_replay_cache_payload(
+                cache_path,
+                expected_gpu_name=current_gpu,
+            )
+            if data is None:
+                if quarantine_path is not None:
+                    print(
+                        f"  Replay cache corrupt; moved aside to {quarantine_path}"
+                    )
+                return {}
+            if recovered:
+                print(f"  Recovered replay cache from torn write at {cache_path}")
+            meta = data.get("_meta", {})
+            cached_gpu = meta.get("gpu_name", "")
+            if cached_gpu and current_gpu and cached_gpu != current_gpu:
+                print(
+                    f"  Replay cache invalidated: GPU changed "
+                    f"({cached_gpu} -> {current_gpu})"
+                )
+                return {}
+            entries = data.get("entries", {})
+            if entries:
+                print(f"  Loaded {len(entries)} cached replay results from prior run")
+            return entries
+        except Exception:
+            return {}
+
+    def _save_replay_cache(
+        self, cache: Dict[str, Dict[str, Any]]
+    ) -> None:
+        """Persist the replay cache to disk for future runs."""
+        try:
+            save_replay_cache_payload(
+                self.output_dir / "replay_cache.json",
+                {
+                    "_meta": {
+                        "gpu_name": self.db.get("metadata", {}).get("gpu_name", ""),
+                        "version": "1.0",
+                    },
+                    "entries": cache,
+                },
+            )
+        except Exception as exc:
+            print(f"  Warning: failed to save replay cache: {exc}")
+
+    # ------------------------------------------------------------------
+    # nsys replay
+    # ------------------------------------------------------------------
+
     def _run_nsys_replay(
         self, kernels: List[Dict[str, Any]]
     ) -> Dict[str, Dict[str, Any]]:
         """Replay each kernel in isolation under nsys.
+
+        Uses a three-level cache to skip redundant replays:
+
+        1. **Local persistent cache** (``replay_cache.json``): results from
+           prior pipeline runs in the same experiment directory.
+        2. **Global directory cache**: per-entry files shared across all
+           experiments on the same GPU.  Entries are written immediately
+           after each successful replay, giving other concurrent SLURM jobs
+           instant visibility.
+        3. **In-memory cache**: entries profiled earlier in this run whose
+           ATen-op configuration and kernel name match a later entry.
 
         Single GPU: runs serially — the GPU is the serialisation point and
         there is nothing to overlap.
@@ -111,6 +306,13 @@ class TaxBreakPipeline:
         """
         results: Dict[str, Dict[str, Any]] = {}
         total = len(kernels)
+        warmup = max(0, getattr(self.args, "warmup", 20))
+        runs = max(1, getattr(self.args, "runs", 50))
+
+        # ── load local persistent cache ──────────────────────────────────
+        cache: Dict[str, Dict[str, Any]] = self._load_replay_cache()
+        cache_hits = 0
+        global_cache_hits = 0
 
         if self.num_gpus <= 1:
             # ── serial path ──────────────────────────────────────────────
@@ -118,10 +320,46 @@ class TaxBreakPipeline:
                 kid   = entry["id"]
                 op    = entry["aten_op"].get("name", "?")
                 kname = entry["kernel"]["name"]
+                cache_key = self._make_replay_cache_key(entry)
+
+                # Level 1: in-memory / local persistent cache
+                if cache_key in cache:
+                    cached = copy.deepcopy(cache[cache_key])
+                    cached["kernel_id"] = kid
+                    cached["cached"] = True
+                    results[kid] = cached
+                    cache_hits += 1
+                    print(f"[{i}/{total}] {kid}: {op} -> {kname}  [CACHED]")
+                    continue
+
+                # Level 2: global directory cache
+                global_result = self.global_cache.lookup(cache_key)
+                if global_result is not None:
+                    global_result["kernel_id"] = kid
+                    global_result["cached"] = True
+                    results[kid] = global_result
+                    cache[cache_key] = copy.deepcopy(global_result)
+                    cache_hits += 1
+                    global_cache_hits += 1
+                    print(f"[{i}/{total}] {kid}: {op} -> {kname}  [GLOBAL CACHE]")
+                    continue
+
+                # Level 3: profile via nsys
                 print(f"[{i}/{total}] {kid}: {op} -> {kname}")
-                result = nsys_profile_pytorch_kernel(entry)
+                result = nsys_profile_pytorch_kernel(
+                    entry,
+                    warmup=warmup,
+                    runs=runs,
+                )
                 if result is not None:
                     results[kid] = result
+                    cache[cache_key] = copy.deepcopy(result)
+                    self.global_cache.store(cache_key, result)
+
+            self._save_replay_cache(cache)
+            self._cache_hits = cache_hits
+            self._cache_misses = total - cache_hits
+            self._global_cache_hits = global_cache_hits
             return results
 
         # ── parallel path (multi-GPU) ─────────────────────────────────────
@@ -130,19 +368,53 @@ class TaxBreakPipeline:
         dispatched_count = 0  # protected by lock; nonlocal in _replay
 
         def _replay(entry: Dict[str, Any]):
-            nonlocal dispatched_count
-            gpu_id = gpu_queue.get()   # blocks until a GPU token is free
+            nonlocal dispatched_count, cache_hits, global_cache_hits
             kid   = entry["id"]
             op    = entry["aten_op"].get("name", "?")
             kname = entry["kernel"]["name"]
+            cache_key = self._make_replay_cache_key(entry)
+
             with lock:
                 dispatched_count += 1
                 n = dispatched_count
+
+                # Level 1: in-memory / local persistent cache
+                if cache_key in cache:
+                    cached = copy.deepcopy(cache[cache_key])
+                    cached["kernel_id"] = kid
+                    cached["cached"] = True
+                    cache_hits += 1
+                    print(f"[{n}/{total}] {kid}: {op} -> {kname}  [CACHED]")
+                    return kid, cached
+
+                # Level 2: global directory cache
+                global_result = self.global_cache.lookup(cache_key)
+                if global_result is not None:
+                    global_result["kernel_id"] = kid
+                    global_result["cached"] = True
+                    cache[cache_key] = copy.deepcopy(global_result)
+                    cache_hits += 1
+                    global_cache_hits += 1
+                    print(f"[{n}/{total}] {kid}: {op} -> {kname}  [GLOBAL CACHE]")
+                    return kid, global_result
+
+            # Level 3: profile via nsys
+            gpu_id = gpu_queue.get()   # blocks until a GPU token is free
             print(f"[{n}/{total}] {kid}: {op} -> {kname}  [GPU {gpu_id}]")
             try:
                 extra_env = dict(os.environ)
                 extra_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-                return kid, nsys_profile_pytorch_kernel(entry, extra_env=extra_env)
+                result = nsys_profile_pytorch_kernel(
+                    entry,
+                    warmup=warmup,
+                    runs=runs,
+                    extra_env=extra_env,
+                )
+                if result is not None:
+                    with lock:
+                        cache[cache_key] = copy.deepcopy(result)
+                    self.global_cache.store(cache_key, result)
+                return kid, result
             finally:
                 gpu_queue.put(gpu_id)  # always return the GPU token
 
@@ -156,6 +428,10 @@ class TaxBreakPipeline:
                 except Exception as exc:  # noqa: BLE001
                     print(f"  nsys replay error: {exc}")
 
+        self._save_replay_cache(cache)
+        self._cache_hits = cache_hits
+        self._cache_misses = total - cache_hits
+        self._global_cache_hits = global_cache_hits
         return results
 
     def _run_ncu(

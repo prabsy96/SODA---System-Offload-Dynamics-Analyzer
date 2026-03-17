@@ -24,22 +24,25 @@ VENDOR_REPLAY_PATTERNS = [
     "cutlass",
 ]
 
-# PyTorch-internal GEMM patterns: classified as GEMM but NOT vendor-replay
-# eligible (no baremetal equivalent).
-INTERNAL_GEMM_PATTERNS = [
+# PyTorch-internal patterns: these kernels are framework-native (I_lib=0)
+# — dispatched directly by ATen/Inductor without a vendor library front-end.
+FRAMEWORK_NATIVE_PATTERNS = [
     "nvjet",
     "wgmma",
     "s884gemm",
 ]
 
+# Backward compat alias
+INTERNAL_GEMM_PATTERNS = FRAMEWORK_NATIVE_PATTERNS
+
 
 def _is_vendor_replayable(kernel_name: str) -> bool:
     """Check if a kernel can be replayed via the baremetal cuBLAS binary."""
     lower = kernel_name.lower()
-    # Must match a vendor pattern AND not be an internal pattern
+    # Must match a vendor pattern AND not be a framework-native pattern
     has_vendor = any(p in lower for p in VENDOR_REPLAY_PATTERNS)
-    is_internal = any(p in lower for p in INTERNAL_GEMM_PATTERNS)
-    return has_vendor and not is_internal
+    is_fw_native = any(p in lower for p in FRAMEWORK_NATIVE_PATTERNS)
+    return has_vendor and not is_fw_native
 
 
 def _extract_last_run_sequences(
@@ -143,22 +146,22 @@ def generate_kernel_database(
         cleaned = clean_kernel_name(raw_name)
 
         aten_op_name = aten_op.get("name", "")
-        is_gemm_op_flag = utils.is_gemm_op(aten_op_name)
-        is_gemm_kernel_flag = utils.is_gemm_kernel(raw_name)
-        is_gemm = is_gemm_op_flag or is_gemm_kernel_flag
+        is_lib_mediated_op = utils.is_library_mediated_op(aten_op_name)
+        is_lib_mediated_kernel = utils.is_library_mediated_kernel(raw_name)
+        is_library_mediated = is_lib_mediated_op or is_lib_mediated_kernel
         is_vendor = _is_vendor_replayable(raw_name)
 
-        # Three-way classification:
-        #   gemm     — at least one definitive GEMM signal (kernel name OR op name matches)
-        #   unknown  — op name matches a GEMM op but kernel name is unrecognized
-        #              (e.g. a new vendor kernel or Triton-backed mm)
-        #   non_gemm — neither op nor kernel name matches any GEMM pattern
-        if is_gemm_kernel_flag:
-            kernel_class = "gemm"
-        elif is_gemm_op_flag:
+        # Three-way kernel_class (paper terminology):
+        #   library_mediated — kernel or op routes through a vendor library (I_lib=1)
+        #   unknown          — ATen op suggests a library path but kernel name
+        #                      is unrecognized (e.g. new vendor kernel or Triton-backed mm)
+        #   framework_native — neither op nor kernel name indicates a vendor library (I_lib=0)
+        if is_lib_mediated_kernel:
+            kernel_class = "library_mediated"
+        elif is_lib_mediated_op:
             kernel_class = "unknown"
         else:
-            kernel_class = "non_gemm"
+            kernel_class = "framework_native"
 
         freq = entry.get("freq", 1)
 
@@ -205,16 +208,18 @@ def generate_kernel_database(
                 "concrete_inputs": aten_op.get("concrete_inputs", []),
             },
             "classification": {
-                "is_gemm": is_gemm,
+                "is_library_mediated": is_library_mediated,
+                # Backward-compatible alias (deprecated — use is_library_mediated)
+                "is_gemm": is_library_mediated,
                 "is_vendor_replay": is_vendor,
                 # i_lib=1: kernel goes through a vendor CUDA library (cuBLAS/cuBLASLt/cutlass).
                 # i_lib=0: kernel is dispatched through PyTorch ATen without a library front-end
                 #          (includes nvjet, wgmma, s884gemm, all elementwise ops).
                 "i_lib": 1 if is_vendor else 0,
-                # kernel_class: three-way label.
-                #   "gemm"     — kernel name matches a known GEMM pattern (definitive)
-                #   "unknown"  — aten op is GEMM-type but kernel name is unrecognized
-                #   "non_gemm" — neither op nor kernel name matches any GEMM pattern
+                # kernel_class: three-way label (paper terminology).
+                #   "library_mediated" — kernel routes through a vendor library
+                #   "unknown"          — ATen op suggests library path but kernel is unrecognized
+                #   "framework_native" — no vendor library involvement
                 "kernel_class": kernel_class,
             },
             "statistics": {
@@ -234,7 +239,7 @@ def generate_kernel_database(
 
     # --- Step 7: build top-level database ---
     total_unique = len(db_entries)
-    gemm_count = sum(1 for e in db_entries if e["classification"]["is_gemm"])
+    lib_mediated_count = sum(1 for e in db_entries if e["classification"]["is_library_mediated"])
 
     database = {
         "version": "1.0",
@@ -254,8 +259,11 @@ def generate_kernel_database(
         },
         "summary": {
             "total_unique_kernels": total_unique,
-            "gemm_kernels": gemm_count,
-            "non_gemm_kernels": total_unique - gemm_count,
+            "library_mediated_kernels": lib_mediated_count,
+            "framework_native_kernels": total_unique - lib_mediated_count,
+            # Backward-compatible aliases (deprecated)
+            "gemm_kernels": lib_mediated_count,
+            "non_gemm_kernels": total_unique - lib_mediated_count,
             "vendor_replay_kernels": sum(
                 1 for e in db_entries if e["classification"]["is_vendor_replay"]
             ),
@@ -277,7 +285,7 @@ def generate_kernel_database(
     print(f"Kernel database written to: {output_path}")
     print(
         f"  {total_unique} unique kernels "
-        f"({gemm_count} GEMM, {total_unique - gemm_count} non-GEMM)"
+        f"({lib_mediated_count} library-mediated, {total_unique - lib_mediated_count} framework-native)"
     )
 
     return output_path

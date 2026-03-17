@@ -78,71 +78,105 @@ def report_gpu_clocks(device_id: int = 0, context: str = "") -> None:
               f"memory={info['memory_clock_mhz']}/{info['max_memory_clock_mhz']} MHz")
 
 
-def is_gemm_op(aten_op_name: str) -> bool:
-    """Check if an ATen op is a GEMM operation."""
-    gemm_ops = [
+def is_library_mediated_op(aten_op_name: str) -> bool:
+    """Check if an ATen op typically routes through a vendor library (cuBLAS/cuDNN).
+
+    Paper terminology: library-mediated (I_lib=1) vs framework-native (I_lib=0).
+    These ATen ops *typically* dispatch to vendor libraries, though specific
+    backends (nvjet, wgmma) may bypass them.
+    """
+    library_ops = [
         "aten::mm",
-        "aten::bmm", 
+        "aten::bmm",
         "aten::addmm",
         "aten::matmul",
         "aten::linear",
         "aten::_scaled_mm",
         "aten::_scaled_dot_product",
     ]
-    return any(op in aten_op_name for op in gemm_ops)
+    return any(op in aten_op_name for op in library_ops)
 
 
-def is_gemm_kernel(kernel_name: str) -> bool:
-    """Check if a kernel name indicates a GEMM kernel (cuBLAS, Cutlass, internal)."""
-    gemm_patterns = [
-        # cuBLAS patterns
+# Backward-compatible alias (deprecated — use is_library_mediated_op).
+is_gemm_op = is_library_mediated_op
+
+
+def is_library_mediated_kernel(kernel_name: str) -> bool:
+    """Check if a kernel name indicates a vendor-library-mediated kernel.
+
+    Paper terminology: library-mediated (I_lib=1) kernels are dispatched
+    through cuBLAS, cuBLASLt, cuDNN, Cutlass, or similar vendor libraries.
+    Framework-native (I_lib=0) kernels (e.g. nvjet, wgmma, elementwise)
+    are dispatched directly by ATen/Inductor without a library front-end.
+    """
+    library_patterns = [
+        # cuBLAS / cuBLASLt
         "cublas",
         "cublasLt",
-        # Cutlass patterns
+        # Cutlass (vendor library)
         "cutlass",
-        # PyTorch internal GEMM patterns (H100/Hopper)
-        "nvjet",
-        "wgmma",
-        "s884gemm",
+        # cuDNN
+        "cudnn",
+        # Generic GEMM indicators (often library-dispatched)
         "gemm",
         "Gemm",
         "GEMM",
-        # Flash attention (also GEMM-like)
+        # Flash attention libraries
         "flash",
         "fmha",
     ]
-    return any(pattern in kernel_name for pattern in gemm_patterns)
+    # Framework-native patterns: dispatched directly by ATen/Inductor,
+    # NOT through a vendor library, even if their names contain "gemm".
+    framework_native_patterns = [
+        "nvjet",
+        "wgmma",
+        "s884gemm",
+    ]
+    lower = kernel_name.lower()
+    is_fw_native = any(p in lower for p in framework_native_patterns)
+    if is_fw_native:
+        return False
+    return any(pattern in kernel_name for pattern in library_patterns)
+
+
+# Backward-compatible alias (deprecated — use is_library_mediated_kernel).
+is_gemm_kernel = is_library_mediated_kernel
 
 
 def filter_kernel_sequences(sequences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Filter for sequences that have both a kernel and aten_op.
-    Marks each sequence with is_gemm classification using both op name AND kernel name.
-    
+    Marks each sequence with ``is_library_mediated`` classification
+    (paper terminology: library-mediated I_lib=1 vs framework-native I_lib=0).
+
     Args:
         sequences: List of event sequences
-    
+
     Returns:
-        Filtered sequences with is_gemm field added
+        Filtered sequences with ``is_library_mediated`` field added.
+        The legacy ``is_gemm`` alias is also set for backward compatibility.
     """
     kernel_sequences = []
     for seq in sequences:
         kernel = seq.get("kernel")
         aten_op = seq.get("aten_op")
         cuda_launch = seq.get("cuda_launch")
-        
+
         # Must have kernel, aten_op, and cuda_launch
         if not kernel or not aten_op or not cuda_launch:
             continue
-        
+
         # Get names safely
         aten_name = aten_op.get("name", "") if isinstance(aten_op, dict) else ""
         kernel_name = kernel.get("name", "") if isinstance(kernel, dict) else ""
-        
-        # Check BOTH ATen op name AND kernel name for GEMM classification
-        # This catches PyTorch internal GEMM kernels (nvjet, cutlass, wgmma) on H100
-        seq["is_gemm"] = is_gemm_op(aten_name) or is_gemm_kernel(kernel_name)
-        
+
+        # Library-mediated: either the ATen op or the GPU kernel name
+        # indicates routing through a vendor library (cuBLAS, cuDNN, Cutlass).
+        lib_mediated = is_library_mediated_op(aten_name) or is_library_mediated_kernel(kernel_name)
+        seq["is_library_mediated"] = lib_mediated
+        # Backward-compatible alias (deprecated)
+        seq["is_gemm"] = lib_mediated
+
         kernel_sequences.append(seq)
 
     return kernel_sequences
@@ -813,6 +847,22 @@ def get_args_parser() -> argparse.ArgumentParser:
              "(device_map=\"balanced\"). Default: 1 (single GPU). "
              "Values > available GPUs are clamped to available count.",
     )
+    parser.add_argument(
+        "--no-global-cache",
+        dest="no_global_cache",
+        action="store_true",
+        default=False,
+        help="Disable the cross-experiment global kernel replay cache. "
+             "Each TaxBreak run will profile all kernels independently.",
+    )
+    parser.add_argument(
+        "--global-cache-dir",
+        dest="global_cache_dir",
+        type=str,
+        default=None,
+        help="Override the auto-resolved global kernel cache directory. "
+             "Default: <output_root>/.global_kernel_cache/<gpu_slug>/",
+    )
 
     return parser
 
@@ -1043,6 +1093,7 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
                 "grid": args.get("grid", [0, 0, 0]),
                 "block": args.get("block", [0, 0, 0]),
                 "shared_memory": args.get("shared memory", 0),
+                "registers_per_thread": args.get("registers per thread", None),
                 "stream": args.get("stream"),   # CUDA stream ID (Fix A)
                 "device": args.get("device"),   # GPU device index (Fix A)
             })
@@ -1060,8 +1111,13 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
                 "device": args.get("device"),   # Fix A
             })
         
-        # CUDA launch events (CPU side)
-        elif cat == "cuda_runtime" and "LaunchKernel" in name:
+        # CUDA launch events (CPU side).
+        # cuBLAS/Cutlass kernels are dispatched via the CUDA Driver API
+        # (cat="cuda_driver", name="cuLaunchKernel") rather than the runtime API
+        # (cat="cuda_runtime", name="cudaLaunchKernel").  Both must be collected
+        # or GEMM kernels will never find a matching launch event and will be
+        # silently dropped from all sequence-linked analysis.
+        elif (cat in ("cuda_runtime", "cuda_driver")) and "LaunchKernel" in name:
             corr = event.get("args", {}).get("correlation")
             if corr:
                 cuda_launch_events_by_corr[corr] = {
@@ -1330,7 +1386,10 @@ def aggregate_sequences(grouped_sequences, metrics: List[str], event_types: List
             else:
                 aggregated[metric] = {"avg": 0.0, "min": 0.0, "max": 0.0, "count": 0, "all": []}
         
-        # Preserve is_gemm if present
+        # Preserve classification flags if present
+        if "is_library_mediated" in first_seq:
+            aggregated["is_library_mediated"] = first_seq["is_library_mediated"]
+        # Backward-compatible alias
         if "is_gemm" in first_seq:
             aggregated["is_gemm"] = first_seq["is_gemm"]
         

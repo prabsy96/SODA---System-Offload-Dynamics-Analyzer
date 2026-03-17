@@ -125,12 +125,12 @@ class SodaMicrobench:
         # Filter for kernel sequences
         kernel_sequences = utils.filter_kernel_sequences(sequences_with_metrics)
 
-        gemm_count = sum(1 for s in kernel_sequences if s.get("is_gemm", False))
-        non_gemm_count = len(kernel_sequences) - gemm_count
+        lib_med_count = sum(1 for s in kernel_sequences if s.get("is_library_mediated", s.get("is_gemm", False)))
+        fw_native_count = len(kernel_sequences) - lib_med_count
 
         print(f"Found {len(kernel_sequences)} kernel sequences in trace:")
-        print(f"  - {gemm_count} GEMM sequences")
-        print(f"  - {non_gemm_count} non-GEMM sequences")
+        print(f"  - {lib_med_count} library-mediated sequences")
+        print(f"  - {fw_native_count} framework-native sequences")
 
         # Group by identity and aggregate (deduplicate)
         grouped_seqs = utils.group_sequences_by_identity(kernel_sequences)
@@ -140,20 +140,21 @@ class SodaMicrobench:
             event_types=["kernel", "aten_op", "cuda_launch"],
         )
 
-        # Preserve is_gemm classification and add freq (count) after aggregation
+        # Preserve classification and add freq (count) after aggregation
         for seq in unique_sequences:
             aten_name = seq.get("aten_op", {}).get("name", "")
-            seq["is_gemm"] = utils.is_gemm_op(aten_name)
+            seq["is_library_mediated"] = utils.is_library_mediated_op(aten_name)
+            seq["is_gemm"] = seq["is_library_mediated"]  # backward compat
             # freq is used by replay profiling for matching
             seq["freq"] = seq.get("count", 1)
 
-        # Separate GEMM and non-GEMM
-        gemm_sequences = [s for s in unique_sequences if s.get("is_gemm", False)]
-        non_gemm_sequences = [s for s in unique_sequences if not s.get("is_gemm", False)]
+        # Separate library-mediated and framework-native
+        lib_mediated_sequences = [s for s in unique_sequences if s.get("is_library_mediated", s.get("is_gemm", False))]
+        fw_native_sequences = [s for s in unique_sequences if not s.get("is_library_mediated", s.get("is_gemm", False))]
 
         print(f"Deduplicated to {len(unique_sequences)} unique sequences:")
-        print(f"  - {len(gemm_sequences)} unique GEMM")
-        print(f"  - {len(non_gemm_sequences)} unique non-GEMM")
+        print(f"  - {len(lib_mediated_sequences)} unique library-mediated")
+        print(f"  - {len(fw_native_sequences)} unique framework-native")
 
         # Save unique sequences for reference
         unique_all_sequences_file = utils.get_path("UNIQUE_ALL_SEQUENCES")
@@ -161,24 +162,28 @@ class SodaMicrobench:
             "summary": {
                 "unique_count": len(unique_sequences),
                 "total_count": len(kernel_sequences),
-                "unique_gemm": len(gemm_sequences),
-                "unique_non_gemm": len(non_gemm_sequences),
+                "unique_library_mediated": len(lib_mediated_sequences),
+                "unique_framework_native": len(fw_native_sequences),
+                # backward compat
+                "unique_gemm": len(lib_mediated_sequences),
+                "unique_non_gemm": len(fw_native_sequences),
             },
             "sequences": unique_sequences
         }
         utils.save_json(unique_all_sequences_file, unique_all_data)
 
-        unique_gemm_data = {
+        unique_lib_mediated_data = {
             "summary": {
-                "count": len(gemm_sequences),
+                "count": len(lib_mediated_sequences),
             },
-            "sequences": gemm_sequences
+            "sequences": lib_mediated_sequences
         }
 
         print_utils.section_end(section)
 
         return {
-            "unique_gemm_sequences": unique_gemm_data,
+            "unique_gemm_sequences": unique_lib_mediated_data,  # backward compat key
+            "unique_lib_mediated_sequences": unique_lib_mediated_data,
             "unique_all_sequences": unique_all_data,
         }
 
@@ -204,12 +209,12 @@ class SodaMicrobench:
         # Filter for kernel sequences (those with both kernel and aten_op)
         kernel_sequences = utils.filter_kernel_sequences(sequences_with_metrics)
         
-        gemm_count = sum(1 for s in kernel_sequences if s.get("is_gemm", False))
-        non_gemm_count = len(kernel_sequences) - gemm_count
+        lib_med_count = sum(1 for s in kernel_sequences if s.get("is_library_mediated", s.get("is_gemm", False)))
+        fw_native_count = len(kernel_sequences) - lib_med_count
         
         print(f"Found {len(kernel_sequences)} kernel sequences in trace:")
-        print(f"  - {gemm_count} GEMM sequences")
-        print(f"  - {non_gemm_count} non-GEMM sequences")
+        print(f"  - {lib_med_count} library-mediated sequences")
+        print(f"  - {fw_native_count} framework-native sequences")
         
         # Group by identity and aggregate (deduplicate)
         grouped_seqs = utils.group_sequences_by_identity(kernel_sequences)
@@ -219,17 +224,18 @@ class SodaMicrobench:
             event_types=["kernel", "aten_op", "cuda_launch"],
         )
         
-        # Preserve is_gemm classification after aggregation
+        # Preserve classification after aggregation
         for seq in unique_sequences:
             aten_name = seq.get("aten_op", {}).get("name", "")
-            seq["is_gemm"] = utils.is_gemm_op(aten_name)
+            seq["is_library_mediated"] = utils.is_library_mediated_op(aten_name)
+            seq["is_gemm"] = seq["is_library_mediated"]  # backward compat
         
-        unique_gemm = sum(1 for s in unique_sequences if s.get("is_gemm", False))
-        unique_non_gemm = len(unique_sequences) - unique_gemm
+        unique_lib_med = sum(1 for s in unique_sequences if s.get("is_library_mediated", s.get("is_gemm", False)))
+        unique_fw_native = len(unique_sequences) - unique_lib_med
         
         print(f"Deduplicated to {len(unique_sequences)} unique sequences:")
-        print(f"  - {unique_gemm} unique GEMM")
-        print(f"  - {unique_non_gemm} unique non-GEMM")
+        print(f"  - {unique_lib_med} unique library-mediated")
+        print(f"  - {unique_fw_native} unique framework-native")
         
         # Save unique sequences
         unique_all_sequences_file = utils.get_path("UNIQUE_ALL_SEQUENCES")
@@ -237,8 +243,11 @@ class SodaMicrobench:
             "summary": {
                 "unique_count": len(unique_sequences),
                 "total_count": len(kernel_sequences),
-                "unique_gemm": unique_gemm,
-                "unique_non_gemm": unique_non_gemm,
+                "unique_library_mediated": unique_lib_med,
+                "unique_framework_native": unique_fw_native,
+                # backward compat
+                "unique_gemm": unique_lib_med,
+                "unique_non_gemm": unique_fw_native,
             },
             "sequences": unique_sequences
         }
@@ -277,7 +286,7 @@ class SodaMicrobench:
             return
         
         # --- Original replay-based pipeline below ---
-        # Extract target GEMM sequences
+        # Extract target library-mediated (vendor-library) sequences
         extraction_results = self.extract_unique_gemm_sequences()  
         target_gemm_sequences = extraction_results["unique_gemm_sequences"]
         target_all_sequences = extraction_results["unique_all_sequences"]
@@ -286,7 +295,7 @@ class SodaMicrobench:
         # (Keep existing code for replay-based pipeline)
         
         # ============================================================
-        # Profile ALL PyTorch kernels (GEMM + non-GEMM)
+        # Profile ALL PyTorch kernels (library-mediated + framework-native)
         # ============================================================
         if not self.args.skip_pytorch_profile:
             section = "Profile PyTorch Kernels (All Types)"
@@ -342,8 +351,8 @@ class SodaMicrobench:
                 else:
                     print("No matched sequences to verify.")
                     
-                # Plot GEMM sequences if available
-                gemm_pytorch_seqs = [s for s in pytorch_all_sequences["sequences"] if s.get("is_gemm", False)]
+                # Plot library-mediated sequences if available
+                gemm_pytorch_seqs = [s for s in pytorch_all_sequences["sequences"] if s.get("is_library_mediated", s.get("is_gemm", False))]
                 if gemm_pytorch_seqs:
                     plot_pytorch_gemm_sequences({
                         "summary": {"count": len(gemm_pytorch_seqs)},
@@ -359,18 +368,18 @@ class SodaMicrobench:
             print_utils.section_end(section)
 
         # ============================================================
-        # Generate baremetal jobs (GEMM only)
+        # Generate baremetal jobs (library-mediated only)
         # ============================================================
         section = "Generate Baremetal Jobs"
         print_utils.section_start(section)
         if target_gemm_sequences["sequences"]:
             generate_jobs(target_gemm_sequences)
         else:
-            print("No GEMM sequences found. Skipping baremetal job generation.")
-            print("Note: Non-GEMM kernels cannot be compared with baremetal (cuBLAS only).")
+            print("No library-mediated sequences found. Skipping baremetal job generation.")
+            print("Note: Framework-native kernels cannot be compared with baremetal (cuBLAS only).")
         print_utils.section_end(section)
 
-        # Search for cuBLASLt algorithms (GEMM only)
+        # Search for cuBLASLt algorithms (library-mediated only)
         if not self.args.skip_offline_cublas_algo_search and target_gemm_sequences["sequences"]:
             section = "Offline Search for cuBLASLt Algorithms"
             print_utils.section_start(section)
@@ -380,14 +389,14 @@ class SodaMicrobench:
             section = "Offline Search for cuBLASLt Algorithms (skipped)"
             print_utils.section_start(section)
             if not target_gemm_sequences["sequences"]:
-                print("No GEMM sequences. Skipping cuBLASLt algorithm search.")
+                print("No library-mediated sequences. Skipping cuBLASLt algorithm search.")
             else:
                 print("Skipping offline cuBLASLt algorithm search (--skip-offline-cublas-algo-search).")
             print_utils.section_end(section)
         
-        # Profile baremetal performance (GEMM only)
+        # Profile baremetal performance (library-mediated only)
         if not self.args.skip_baremetal_profile and target_gemm_sequences["sequences"]:
-            section = "Profile Baremetal GEMM Kernels"
+            section = "Profile Baremetal Library-mediated Kernels"
             print_utils.section_start(section)
             print("This will run nsys profiling for multiple jobs, may take several minutes")
             baremetal_gemm_sequences = profile_baremetal_gemm_kernels(
@@ -400,7 +409,7 @@ class SodaMicrobench:
                                          if s is not None and s.get("job_id") != "0000"]
 
             if not baremetal_valid_sequences:
-                print("Warning: No baremetal GEMM sequences were profiled.")
+                print("Warning: No baremetal library-mediated sequences were profiled.")
                 print("         This can happen when PyTorch uses internal kernels instead of cuBLAS.")
                 print("         This is common on H100/H200/GB200 where PyTorch uses optimized internal kernels.")
                 print_utils.section_end(section)
@@ -419,7 +428,7 @@ class SodaMicrobench:
             print_utils.section_end(section)
             
             # Verify baremetal sequences
-            section = "Verify Baremetal GEMM Sequences"
+            section = "Verify Baremetal Library-mediated Sequences"
             print_utils.section_start(section)
 
             baremetal_by_job_id = {s["job_id"]: s for s in baremetal_valid_sequences}
@@ -437,16 +446,16 @@ class SodaMicrobench:
                 compare_sequences(matched_targets, matched_baremetals, title="Baremetal vs Target", full=False)
             else:
                 print("No matched sequences to compare.")
-                print("All target kernels appear to be PyTorch internal kernels (not cuBLAS).")
+                print("All target kernels appear to be PyTorch internal kernels (not vendor-library-mediated).")
             
             print_utils.section_end(section)
         else:
-            section = "Profile Baremetal GEMM Kernels (skipped)"
+            section = "Profile Baremetal Library-mediated Kernels (skipped)"
             print_utils.section_start(section)
             if not target_gemm_sequences["sequences"]:
-                print("No GEMM sequences. Skipping baremetal profiling.")
+                print("No library-mediated sequences. Skipping baremetal profiling.")
             else:
-                print("Skipping baremetal GEMM kernel profiling (--skip-baremetal-profile).")
+                print("Skipping baremetal library-mediated kernel profiling (--skip-baremetal-profile).")
             print_utils.section_end(section)
         
         # TaxBreak Report (now includes all kernels)

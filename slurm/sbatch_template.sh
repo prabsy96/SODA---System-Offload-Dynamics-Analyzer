@@ -22,8 +22,8 @@
 #SBATCH --nodes=1   # Number of nodes (adjust if your job requires multiple nodes)
 #SBATCH --ntasks=1  # Number of tasks (usually 1 for single-process jobs)
 #SBATCH --gres=gpu:1               # Number of GPUs (e.g., gpu:2 for multi-GPU)
-#SBATCH --cpus-per-gpu=6     # CPU cores per GPU (adjust based on your workload)
-#SBATCH --mem-per-gpu=64G          # Memory per GPU (adjust based on your model size and batch size)
+#SBATCH --cpus-per-gpu=6     # REQUIRED: 6 CPU cores per GPU (paper Table II §4.1)
+#SBATCH --mem-per-gpu=32G          # REQUIRED: 32 GB per GPU (paper Table II §4.1)
 
 # =============================================================================
 # USER CONFIGURATION — Edit these values for your setup
@@ -94,6 +94,12 @@ else
 fi
 
 cd "$SODA_ROOT"
+source "$SODA_ROOT/slurm/output_paths.sh"
+
+# Default to a per-submission output root so repeated submissions never share
+# caches or overwrite one another. Override SODA_OUTPUT before submission if needed.
+export SODA_OUTPUT="$(soda_make_output_root "slurm-template")"
+mkdir -p "$SODA_OUTPUT"
 
 # Set HuggingFace config
 export HF_HOME="$HF_HOME"
@@ -105,7 +111,7 @@ else
 fi
 
 # Install SODA package
-pip install -e "$SODA_PROJECT_ROOT" --quiet 2>/dev/null
+pip install -e "$SODA_PROJECT_ROOT" --quiet 2>/dev/null || true
 
 # Install extra packages (flash-attn, transformer-engine, etc.)
 if [ -n "$EXTRA_PIP_PACKAGES" ]; then

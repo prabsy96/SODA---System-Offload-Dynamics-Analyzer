@@ -31,6 +31,15 @@ _NCU_FRIENDLY = {
     "sm__throughput.avg.pct_of_peak_sustained_elapsed": "compute_throughput_pct",
 }
 
+# Ops with embedded CPU-GPU synchronization between kernel steps.
+# Their isolation-replay launch_tax captures algorithmic sync wait, not framework
+# overhead. Substitute floor_avg and flag as "sync_floor" to exclude from KT_fw.
+_SYNC_OPS = frozenset({
+    "aten::nonzero",
+    "aten::unique",
+    "aten::unique_consecutive",
+})
+
 
 def _remap_ncu_metrics(raw: Dict[str, Any]) -> Dict[str, Any]:
     """Translate raw ncu metric names to friendly report names."""
@@ -51,8 +60,9 @@ def _derive_dispatch_base(
 
         T_dispatch_base = median({T_dispatch : k ∈ I_lib=0})
 
-    This correctly includes framework-native GEMM kernels (nvjet/wgmma,
-    is_gemm=True but i_lib=0) that the old ``not is_gemm`` filter excluded.
+    This correctly includes framework-native kernels (nvjet/wgmma,
+    is_library_mediated=True at op level but i_lib=0) that need to be
+    in the baseline pool.
     """
     vals = [
         entry["taxes"]["avg_T_dispatch_us"]
@@ -83,8 +93,8 @@ def _derive_dispatch_base_replay(
     replay-based analogue of ``_derive_dispatch_base()`` and is preferred when
     isolation replay data with NVTX instrumentation is available.
 
-    Correctly includes framework-native GEMM kernels (nvjet/wgmma: is_gemm=True
-    but i_lib=0) that the old ``is_gemm`` gate excluded.
+    Correctly includes framework-native kernels (nvjet/wgmma: is_library_mediated=True
+    at op level but i_lib=0) that the old ``is_gemm`` gate excluded.
 
     Returns:
         Median T_dispatch_base in microseconds, or ``None`` if no replay data exists.
@@ -108,6 +118,44 @@ def _make_verbose_args(verbose: bool):
     ns = types.SimpleNamespace()
     ns.verbose = verbose
     return ns
+
+
+def _should_sanitize_replay(
+    nsys_result: Dict[str, Any],
+    floor_avg: float,
+    is_framework_native: bool,
+) -> List[str]:
+    """Return replay contamination reasons for obviously anomalous measurements."""
+    if not nsys_result or not is_framework_native:
+        return []
+
+    launch = nsys_result.get("launch_tax", {}).get("avg_us", 0.0)
+    launch_std = nsys_result.get("launch_tax", {}).get("std_us", 0.0)
+    kernel_dur = nsys_result.get("kernel_duration", {}).get("avg_us", 0.0)
+    multi_candidate_iterations = nsys_result.get("multi_candidate_iterations", 0)
+    measured_iterations = max(1, nsys_result.get("measured_iterations", nsys_result.get("samples", 0)))
+    matched_iterations = nsys_result.get("matched_iterations", nsys_result.get("samples", 0))
+    match_ratio = matched_iterations / measured_iterations
+    variant_match = nsys_result.get("kernel_variant_match", True)
+
+    reasons = []
+    if launch > floor_avg * 20 and multi_candidate_iterations > 0:
+        reasons.append("ambiguous_multi_kernel_replay")
+    if launch > floor_avg * 20 and not variant_match:
+        reasons.append("variant_mismatch_replay")
+    if launch > floor_avg * 50 and launch_std > floor_avg * 10:
+        reasons.append("unstable_launch_distribution")
+    if kernel_dur > 0 and launch > max(floor_avg * 100, kernel_dur * 0.75):
+        reasons.append("launch_exceeds_kernel_scale")
+    if match_ratio < 0.8 and launch > floor_avg * 10:
+        reasons.append("incomplete_iteration_match")
+    return reasons
+
+
+def _clamp_dispatch_time(dispatch_time: float, t_dispatch_base: float, floor_avg: float) -> float:
+    """Clamp contaminated replay dispatch to a conservative but nonzero bound."""
+    max_dispatch = max(t_dispatch_base * 4.0, floor_avg * 10.0)
+    return min(dispatch_time, max_dispatch)
 
 
 def generate_enhanced_report(
@@ -156,20 +204,25 @@ def generate_enhanced_report(
     total_KT_adj_us = 0.0     # framework-only: max(0, KT - T_sys) per kernel
     total_T_sys_us = 0.0      # hardware floor contribution: T_sys × freq
     total_invocations = 0
-    gemm_invocations = 0          # i_lib=1: vendor-library GEMM (cuBLAS/cutlass)
-    framework_gemm_invocations = 0 # is_gemm but i_lib=0: framework-native (nvjet/wgmma)
-    non_gemm_invocations = 0      # neither GEMM class
+    library_mediated_invocations = 0     # i_lib=1: vendor-library kernels (cuBLAS/cutlass)
+    fw_native_lib_op_invocations = 0     # ATen op suggests library but i_lib=0 (nvjet/wgmma)
+    framework_native_invocations = 0     # framework-native: no vendor library involvement
 
     for entry in kernels:
         kid = entry["id"]
         freq = entry["statistics"]["frequency"]
-        is_gemm = entry["classification"]["is_gemm"]
+        is_lib_mediated = entry["classification"].get(
+            "is_library_mediated", entry["classification"].get("is_gemm", False)
+        )
         # i_lib resolution: prefer runtime detection from isolation replay (ground truth)
         # over the Phase 1 heuristic (kernel name matching).
-        # Backward compat: old DBs without "i_lib" fall back to is_gemm (conservative).
+        # Backward compat: old DBs without "i_lib" fall back to is_library_mediated.
         nsys = nsys_results.get(kid)
-        i_lib_db = entry["classification"].get("i_lib", int(is_gemm))
-        if nsys and "i_lib_detected" in nsys:
+        i_lib_db = entry["classification"].get("i_lib", int(is_lib_mediated))
+        # Only override the Phase-1 DB heuristic when vendor tracing was active
+        # (vendor_tracing_available=True).  If the flag is absent (old cache entries)
+        # or False, the detection was inconclusive and we fall back to the DB value.
+        if nsys and "i_lib_detected" in nsys and nsys.get("vendor_tracing_available", False):
             i_lib = int(nsys["i_lib_detected"])
             i_lib_source = "runtime"
         else:
@@ -183,19 +236,57 @@ def generate_enhanced_report(
         aten_xlat = taxes.get("avg_T_dispatch_us", 0.0)
 
         # Launch tax: prefer isolation replay if available
+        replay_anomaly_reasons: List[str] = []
         if nsys:
             launch_tax_avg = nsys["launch_tax"]["avg_us"]
             launch_tax_entry = nsys["launch_tax"]
             replay_method = nsys["replay_method"]
+            kt_source = "replay"
         else:
-            launch_tax_avg = taxes.get("avg_T_launch_us", 0.0)
+            # Replay failed (CPU-only op or no kernel match): use T_sys floor as the
+            # only hardware-verified lower bound. Trace-based avg_T_launch_us carries
+            # GPU-queue artifacts and must not be used for KT decomposition.
+            launch_tax_avg = floor_avg
             launch_tax_entry = {
-                "avg_us": launch_tax_avg,
-                "min_us": launch_tax_avg,
-                "max_us": launch_tax_avg,
+                "avg_us": floor_avg,
+                "min_us": floor_avg,
+                "max_us": floor_avg,
                 "std_us": 0.0,
             }
-            replay_method = "trace"
+            replay_method = "floor_only"
+            kt_source = "floor_only"
+
+        replay_anomaly_reasons = _should_sanitize_replay(
+            nsys_result=nsys or {},
+            floor_avg=floor_avg,
+            is_framework_native=(i_lib == 0),
+        )
+        if replay_anomaly_reasons:
+            launch_tax_avg = floor_avg
+            launch_tax_entry = {
+                "avg_us": floor_avg,
+                "min_us": floor_avg,
+                "max_us": floor_avg,
+                "std_us": 0.0,
+                "raw_avg_us": nsys["launch_tax"]["avg_us"],
+            }
+            replay_method = "anomaly_floor"
+            kt_source = "anomaly_floor"
+
+        # Sync-op override: if the op embeds a CPU-GPU sync barrier, the replay
+        # launch_tax captures algorithmic wait time, not framework overhead.
+        # Only override when replay produced a suspiciously large value (>10x floor).
+        op_name_str = entry["aten_op"].get("name", "")
+        if kt_source == "replay" and op_name_str in _SYNC_OPS and launch_tax_avg > floor_avg * 10:
+            launch_tax_avg = floor_avg
+            launch_tax_entry = {
+                "avg_us": floor_avg,
+                "min_us": floor_avg,
+                "max_us": floor_avg,
+                "std_us": 0.0,
+            }
+            replay_method = "sync_floor"
+            kt_source = "sync_floor"
 
         # T_dispatch: prefer replay-based t_dispatch (NVTX → cudaLaunchKernel gap) if available
         if nsys and "t_dispatch" in nsys:
@@ -207,21 +298,28 @@ def generate_enhanced_report(
             dispatch_entry = {"avg_us": aten_xlat}
             dispatch_source = "trace"
 
+        if replay_anomaly_reasons:
+            dispatch_time = _clamp_dispatch_time(dispatch_time, t_dispatch_base, floor_avg)
+            dispatch_entry = dict(dispatch_entry)
+            dispatch_entry["avg_us"] = round(dispatch_time, 4)
+            dispatch_entry["raw_avg_us"] = round(nsys.get("t_dispatch", {}).get("avg_us", aten_xlat), 4) if nsys else round(aten_xlat, 4)
+            dispatch_source = "anomaly_clamped"
+
         # delta_CT: CUDA library translation overhead — only for vendor-library kernels (i_lib=1).
         # nvjet/wgmma/s884gemm have i_lib=0; they have no CUDA library front-end phase.
         # Uses replay-based dispatch_time when available, trace-based aten_xlat otherwise.
         if i_lib == 1:
             delta_ct = max(0.0, dispatch_time - t_dispatch_base)
             ft_dispatch = t_dispatch_base
-            gemm_invocations += freq          # cuBLAS/cutlass path
-        elif is_gemm:
+            library_mediated_invocations += freq     # cuBLAS/cutlass path
+        elif is_lib_mediated:
             delta_ct = 0.0
             ft_dispatch = dispatch_time
-            framework_gemm_invocations += freq  # nvjet/wgmma path
+            fw_native_lib_op_invocations += freq     # nvjet/wgmma path
         else:
             delta_ct = 0.0
             ft_dispatch = dispatch_time
-            non_gemm_invocations += freq      # elementwise, norm, etc.
+            framework_native_invocations += freq     # elementwise, norm, etc.
 
         # KT decomposition: T_sys (hardware floor) + KT_framework (software overhead)
         kt_framework = max(0.0, launch_tax_avg - floor_avg)
@@ -248,6 +346,7 @@ def generate_enhanced_report(
             "classification": entry["classification"],
             "frequency": freq,
             "replay_method": replay_method,
+            "kt_source": kt_source,
             "taxes": {
                 "launch_tax_us": launch_tax_entry,
                 "kt_framework_us": {"avg_us": round(kt_framework, 4)},
@@ -261,6 +360,7 @@ def generate_enhanced_report(
             "i_lib_runtime": i_lib,
             "i_lib_source": i_lib_source,
             "ncu": ncu_data,
+            "replay_anomaly_reasons": replay_anomaly_reasons,
             # Temp field for roofline FLOPs derivation (stripped before JSON)
             "_aten_op_full": entry.get("aten_op", {}),
         })
@@ -364,12 +464,16 @@ def generate_enhanced_report(
             "kernels_with_nsys": len(nsys_results),
             "kernels_with_ncu": len(ncu_results),
             "total_invocations": total_invocations,
-            # Vendor-library GEMM (i_lib=1): cuBLAS/cuBLASLt/cutlass kernels
-            "library_gemm_invocations": gemm_invocations,
-            # Framework-native GEMM (is_gemm but i_lib=0): nvjet/wgmma/s884gemm
-            "framework_gemm_invocations": framework_gemm_invocations,
-            # Non-GEMM: elementwise, normalization, copy, etc.
-            "non_gemm_invocations": non_gemm_invocations,
+            # Library-mediated (I_lib=1): cuBLAS/cuBLASLt/cutlass kernels
+            "library_mediated_invocations": library_mediated_invocations,
+            # Framework-native but ATen op suggests library (I_lib=0): nvjet/wgmma/s884gemm
+            "fw_native_lib_op_invocations": fw_native_lib_op_invocations,
+            # Framework-native: elementwise, normalization, copy, etc.
+            "framework_native_invocations": framework_native_invocations,
+            # Backward-compatible aliases (deprecated)
+            "library_gemm_invocations": library_mediated_invocations,
+            "framework_gemm_invocations": fw_native_lib_op_invocations,
+            "non_gemm_invocations": framework_native_invocations,
         },
         "derived_baselines": {
             "t_dispatch_base_us": round(t_dispatch_base, 4),
@@ -475,9 +579,9 @@ def _print_summary(
     print()
     print(f"  Kernels: {summary.get('total_unique_kernels', 0)} unique, "
           f"{summary.get('total_invocations', 0)} invocations "
-          f"({summary.get('library_gemm_invocations', 0)} lib-GEMM, "
-          f"{summary.get('framework_gemm_invocations', 0)} fw-GEMM, "
-          f"{summary.get('non_gemm_invocations', 0)} non-GEMM)")
+          f"({summary.get('library_mediated_invocations', summary.get('library_gemm_invocations', 0))} library-mediated, "
+          f"{summary.get('fw_native_lib_op_invocations', summary.get('framework_gemm_invocations', 0))} fw-native-lib-op, "
+          f"{summary.get('framework_native_invocations', summary.get('non_gemm_invocations', 0))} framework-native)")
     print(f"  Profiled: {len(nsys_results)} nsys, {len(ncu_results)} ncu")
 
     # Roofline summary
@@ -527,13 +631,15 @@ def _print_per_kernel_table(
 
     rows = []
     for entry in per_kernel:
-        is_gemm = entry["classification"]["is_gemm"]
+        is_lib_mediated = entry["classification"].get(
+            "is_library_mediated", entry["classification"].get("is_gemm", False)
+        )
         # Prefer runtime-detected i_lib (matches tax computation) over DB heuristic
-        i_lib = entry.get("i_lib_runtime", entry["classification"].get("i_lib", int(is_gemm)))
-        kernel_class = entry["classification"].get("kernel_class", "gemm" if is_gemm else "non_gemm")
+        i_lib = entry.get("i_lib_runtime", entry["classification"].get("i_lib", int(is_lib_mediated)))
+        kernel_class = entry["classification"].get("kernel_class", "library_mediated" if is_lib_mediated else "framework_native")
         if i_lib == 1:
             ktype = "Library-mediated (I_lib=1)"
-        elif kernel_class == "gemm":
+        elif kernel_class in ("library_mediated", "gemm"):
             ktype = "FW-native (I_lib=0)"
         elif kernel_class == "unknown":
             ktype = "unknown"

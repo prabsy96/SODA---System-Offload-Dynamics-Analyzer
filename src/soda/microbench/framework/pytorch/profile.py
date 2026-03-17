@@ -186,6 +186,35 @@ def _safe_scatter_add(inputs: List[Any], inplace: bool = False) -> torch.Tensor:
     except Exception:
         return out
 
+def _safe_index_add_(inputs: List[Any]) -> torch.Tensor:
+    """Safe index_add_ for MoE expert output accumulation.
+
+    ATen signature: index_add_(dim, index, source, alpha=1)
+      inputs[0] = self (output tensor)
+      inputs[1] = dim (int)
+      inputs[2] = index (1D long tensor)
+      inputs[3] = source tensor
+    Clone self so in-place doesn't corrupt the tensor across replay iterations.
+    """
+    if not inputs or not isinstance(inputs[0], torch.Tensor):
+        return torch.tensor(0.0, device="cuda")
+    out = inputs[0].clone()
+    dim = int(inputs[1]) if len(inputs) > 1 and isinstance(inputs[1], (int, float)) else 0
+    if dim < 0:
+        dim += out.dim()
+    if dim < 0 or dim >= out.dim():
+        dim = 0
+    index = inputs[2] if len(inputs) > 2 and isinstance(inputs[2], torch.Tensor) else None
+    src   = inputs[3] if len(inputs) > 3 and isinstance(inputs[3], torch.Tensor) else None
+    if index is None or src is None:
+        return out
+    max_idx = max(0, out.shape[dim] - 1)
+    index = index.long().clamp_(0, max_idx)
+    try:
+        return out.index_add_(dim, index, src)
+    except Exception:
+        return out
+
 # ==============================================================================
 # Supported Operations Map
 # ==============================================================================
@@ -274,7 +303,14 @@ SUPPORTED_OPS = {
     # Indexing operations
     "aten::gather": lambda inputs: _safe_gather(inputs),
     # Use 1D integer-index gather to dispatch index_elementwise_kernel.
-    "aten::index": lambda inputs: inputs[0].reshape(-1)[torch.arange(inputs[0].numel(), device=inputs[0].device, dtype=torch.long)] if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) else inputs[0],
+    "aten::index": lambda inputs: (
+        # Use the index tensor from create_input_tensors (derived from input_dims) so
+        # the replay dispatches the same indexFunc variant as the original invocation.
+        inputs[0][inputs[1].long().clamp(0, max(0, inputs[0].size(0) - 1))]
+        if len(inputs) >= 2 and isinstance(inputs[0], torch.Tensor) and isinstance(inputs[1], torch.Tensor)
+        else inputs[0][[0]] if len(inputs) >= 1 and isinstance(inputs[0], torch.Tensor) and inputs[0].size(0) > 0
+        else inputs[0]
+    ),
     "aten::index_select": lambda inputs: _safe_index_select(inputs),
     "aten::index_put_": lambda inputs: inputs[0], # Simplified
     
@@ -348,7 +384,6 @@ SUPPORTED_OPS = {
     
     # Indexing operations (aten::gather defined above via _safe_gather; no duplicate here)
     "aten::scatter": lambda inputs: torch.scatter(inputs[0], 0, torch.zeros_like(inputs[0]).long(), inputs[1]) if len(inputs) >= 2 else None,
-    "aten::index_select": lambda inputs: torch.index_select(inputs[0], 0, torch.zeros(inputs[0].shape[0], dtype=torch.long)) if len(inputs) >= 1 else None,
     "aten::masked_select": lambda inputs: torch.masked_select(inputs[0], torch.ones_like(inputs[0], dtype=torch.bool)) if len(inputs) >= 1 else None,
     
     # Conditional operations
@@ -402,6 +437,11 @@ SUPPORTED_OPS.update({
     # scatter_add / scatter_add_ for accumulating expert outputs
     "aten::scatter_add":  lambda inputs: _safe_scatter_add(inputs, inplace=False),
     "aten::scatter_add_": lambda inputs: _safe_scatter_add(inputs, inplace=True),
+
+    # index_add / index_add_: MoE expert output accumulation
+    # Dispatches indexAddSmallIndex or indexAddLargeIndex depending on index size.
+    "aten::index_add":  lambda inputs: _safe_index_add_(inputs),
+    "aten::index_add_": lambda inputs: _safe_index_add_(inputs),
 
     # repeat_interleave for token-to-expert expansion / GQA KV head expansion
     "aten::repeat_interleave": lambda inputs: inputs[0].repeat_interleave(
@@ -1007,7 +1047,7 @@ def replay_all_sequences_from_aten_ops(
     warmup: int,
     runs: int
 ) -> List[Dict[str, Any]]:
-    """Replay all event sequences (GEMM and non-GEMM) with error isolation."""
+    """Replay all event sequences (library-mediated and framework-native) with error isolation."""
     kernel_traces_dir = utils.get_path("PYTORCH_TRACES")
     utils.ensure_dir(kernel_traces_dir)
 
@@ -1026,14 +1066,14 @@ def replay_all_sequences_from_aten_ops(
         aten_op_name = aten_op.get("name", "")
         expected_kernel = clean_kernel_name(kernel.get("name", ""))
         seq_idx = i + 1
-        is_gemm = event_sequence.get("is_gemm", False)
+        is_gemm = event_sequence.get("is_library_mediated", event_sequence.get("is_gemm", False))
         
         if not is_op_supported(aten_op_name):
             print(f"[{seq_idx}/{len(sequences)}] SKIP (unsupported): {aten_op_name} -> {expected_kernel}")
             skipped_count += 1
             continue
         
-        kernel_type = "GEMM" if is_gemm else "other"
+        kernel_type = "lib-mediated" if is_gemm else "fw-native"
         print(f"[{seq_idx}/{len(sequences)}] [{kernel_type}] {aten_op_name} -> {expected_kernel}")
         
         trace_file_name = utils.format_sequence_filename(seq_idx, aten_op_name, expected_kernel, extension="json")
@@ -1068,7 +1108,8 @@ def replay_all_sequences_from_aten_ops(
             )
             
             for seq in agg_sequence:
-                seq["is_gemm"] = is_gemm
+                seq["is_library_mediated"] = is_gemm
+                seq["is_gemm"] = is_gemm  # backward compat
             
             sequence_by_idx[i] = agg_sequence
             supported_count += 1
@@ -1091,7 +1132,7 @@ def replay_all_sequences_from_aten_ops(
     return all_replayed_sequences
 
 def profile_pytorch_all_sequences(target_sequences: Dict[str, Any], warmup: int, runs: int) -> Dict[str, Any]:
-    """Profile all PyTorch kernel sequences (GEMM and non-GEMM)."""
+    """Profile all PyTorch kernel sequences (library-mediated and framework-native)."""
     kernel_traces_dir = utils.get_path("PYTORCH_TRACES")
     utils.ensure_dir(kernel_traces_dir, cleanup=True)
     
@@ -1102,15 +1143,18 @@ def profile_pytorch_all_sequences(target_sequences: Dict[str, Any], warmup: int,
         if i < len(target_seqs):
             replayed_seq["freq"] = target_seqs[i].get("count", 1)
 
-    gemm_count = sum(1 for s in replayed_sequences if s.get("is_gemm", False))
-    non_gemm_count = len(replayed_sequences) - gemm_count
+    lib_med_count = sum(1 for s in replayed_sequences if s.get("is_library_mediated", s.get("is_gemm", False)))
+    fw_native_count = len(replayed_sequences) - lib_med_count
 
     pytorch_all_sequences_file = utils.get_path("PYTORCH_ALL_SEQUENCES")
     pytorch_all_sequences_data = {
         "summary": {
             "count": len(replayed_sequences),
-            "gemm_count": gemm_count,
-            "non_gemm_count": non_gemm_count,
+            "library_mediated_count": lib_med_count,
+            "framework_native_count": fw_native_count,
+            # backward compat
+            "gemm_count": lib_med_count,
+            "non_gemm_count": fw_native_count,
         },
         "sequences": replayed_sequences
     }
@@ -1120,7 +1164,7 @@ def profile_pytorch_all_sequences(target_sequences: Dict[str, Any], warmup: int,
     return pytorch_all_sequences_data
 
 def profile_pytorch_gemm_sequences(target_gemm_sequences: Dict[str, Any], warmup: int, runs: int) -> Dict[str, Any]:
-    """Profile PyTorch GEMM sequences to measure launch tax."""
+    """Profile PyTorch library-mediated sequences to measure launch tax."""
     kernel_traces_dir = utils.get_path("PYTORCH_TRACES")
     utils.ensure_dir(kernel_traces_dir, cleanup=True)
     
