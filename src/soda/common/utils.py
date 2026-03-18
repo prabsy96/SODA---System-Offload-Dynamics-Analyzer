@@ -864,6 +864,52 @@ def get_args_parser() -> argparse.ArgumentParser:
              "Default: <output_root>/.global_kernel_cache/<gpu_slug>/",
     )
 
+    # --- MoE per-expert-type memory profiling (Stage 3) ---
+    parser.add_argument(
+        "--moe-profile",
+        dest="moe_profile",
+        action="store_true",
+        default=False,
+        help="Run MoE per-expert-type memory profiling. Requires --kernel-db-path. "
+             "Reports NCU isolation HBM bytes and (optionally) NVBit in-context "
+             "L1/L2 cache reuse metrics. No model loading required.",
+    )
+    parser.add_argument(
+        "--nvbit-lib",
+        dest="nvbit_lib",
+        type=str,
+        default=None,
+        help="Path to compiled NVBit mem_reuse_tracker.so. If provided, runs a "
+             "second pass under LD_PRELOAD to measure in-context L1/L2 cache reuse "
+             "and cross-expert data reuse during actual model.generate().",
+    )
+    parser.add_argument(
+        "--moe-shared-dim",
+        dest="moe_shared_dim",
+        type=int,
+        default=None,
+        help="Override auto-detected shared expert intermediate dimension "
+             "(weight shape[0]). Used with --moe-profile.",
+    )
+    parser.add_argument(
+        "--moe-routed-dim",
+        dest="moe_routed_dim",
+        type=int,
+        default=None,
+        help="Override auto-detected routed expert intermediate dimension "
+             "(weight shape[0]). Used with --moe-profile.",
+    )
+    parser.add_argument(
+        "--moe-num-layers",
+        dest="moe_num_layers",
+        type=int,
+        default=None,
+        help="Override auto-detected number of transformer layers. "
+             "Used with --moe-profile to control layer_id expansion in "
+             "op_profile.json. Defaults to GCD-based detection from shared "
+             "expert entry frequencies.",
+    )
+
     return parser
 
 def parse_and_validate_args(args=None) -> argparse.Namespace:
@@ -872,8 +918,12 @@ def parse_and_validate_args(args=None) -> argparse.Namespace:
     parsed_args = parser.parse_args(args)
     
     # Validate arguments
-    # --model is required unless running in --taxbreak mode (Stage 2)
-    if not getattr(parsed_args, "taxbreak", False) and not parsed_args.model:
+    # --model is required unless running in --taxbreak or --moe-profile mode
+    _no_model_modes = (
+        getattr(parsed_args, "taxbreak", False)
+        or getattr(parsed_args, "moe_profile", False)
+    )
+    if not _no_model_modes and not parsed_args.model:
         parser.error("the following arguments are required: -m/--model")
 
     if parsed_args.device == "cpu" and parsed_args.precision in ["float16", "float8_e4m3fn", "float8_e5m2", "bfloat16"]:

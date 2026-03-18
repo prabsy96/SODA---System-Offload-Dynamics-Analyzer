@@ -344,6 +344,69 @@ echo ""
 #     2>&1 | tee "$SODA_OUTPUT/debug_sweep.log"
 
 # -----------------------------------------------------------------------------
+# 8b) MoE per-expert-type memory profiling (Stage 3)
+#     Generates op_profile.json: one record per kernel per layer across the
+#     full model, with is_shared_expert=true/false for shared expert kernels.
+#     Also generates moe_profile.json with NCU isolation HBM bytes per expert type.
+#     Requires: kernel_database.json from Stage 1 (--kernel-db)
+#     No model loading or GPU required to run this stage.
+#     Outputs (written to <exp_dir>/moe_profile/):
+#       op_profile.json    — per-kernel per-layer records with is_shared_expert flag
+#       moe_profile.json   — aggregate NCU isolation + optional NVBit reuse metrics
+# -----------------------------------------------------------------------------
+# soda-cli \
+#     --moe-profile \
+#     --kernel-db-path output/Qwen_Qwen1.5-MoE-A2.7B_eager_bfloat16_bs4_sl4096_mt1/kernel_database.json \
+#     2>&1 | tee "$SODA_OUTPUT/moe_profile.log"
+
+# -----------------------------------------------------------------------------
+# 8c) MoE profile — with CLI overrides for model dimensions and layer count
+#     Use when auto-detection of shared_dim/routed_dim/num_layers fails.
+#     --moe-shared-dim:  shared expert intermediate dimension (weight shape[0])
+#     --moe-routed-dim:  routed expert intermediate dimension (weight shape[0])
+#     --moe-num-layers:  number of transformer layers for layer_id expansion
+# -----------------------------------------------------------------------------
+# soda-cli \
+#     --moe-profile \
+#     --kernel-db-path output/Qwen_Qwen1.5-MoE-A2.7B_eager_bfloat16_bs4_sl4096_mt1/kernel_database.json \
+#     --moe-shared-dim 5632 \
+#     --moe-routed-dim 1408 \
+#     --moe-num-layers 24 \
+#     2>&1 | tee "$SODA_OUTPUT/moe_profile.log"
+
+# -----------------------------------------------------------------------------
+# 8d) Full MoE pipeline (Stage 1 then Stage 3 in one job)
+#     Stage 1 profiles the MoE model; Stage 3 classifies and annotates kernels.
+# -----------------------------------------------------------------------------
+# MODEL="Qwen/Qwen1.5-MoE-A2.7B"
+# OUTPUT_DIR="output/"
+# SEQ_LEN=4096
+# BATCH=4
+# PRECISION="bfloat16"
+#
+# # Stage 1: profiled inference + kernel database
+# soda-cli \
+#     --model "$MODEL" \
+#     --output-dir "$OUTPUT_DIR" \
+#     --seq-len "$SEQ_LEN" \
+#     --batch-size "$BATCH" \
+#     --precision "$PRECISION" \
+#     --kernel-db \
+#     2>&1 | tee "$SODA_OUTPUT/stage1.log"
+#
+# # Stage 3: MoE per-expert memory profiling + op_profile.json
+# EXP_DIR=$(ls -td "${OUTPUT_DIR}"/*MoE*_bs${BATCH}_sl${SEQ_LEN}_* 2>/dev/null | head -1)
+# if [ -n "$EXP_DIR" ]; then
+#     soda-cli \
+#         --moe-profile \
+#         --kernel-db-path "$EXP_DIR/kernel_database.json" \
+#         2>&1 | tee "$SODA_OUTPUT/stage3.log"
+# else
+#     echo "Error: could not locate MoE experiment directory under $OUTPUT_DIR"
+#     exit 1
+# fi
+
+# -----------------------------------------------------------------------------
 # 9) Microbenchmark sweep — GEMM kernel analysis (baremetal + PyTorch)
 #    Requires baremetal binary. Uses same SODA_SWEEP_CONFIG / SODA_SWEEP_MODEL
 #    / SODA_CUSTOM_MODEL env vars as soda_sweep.py.

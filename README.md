@@ -9,74 +9,77 @@ SODA implements the **TaxBreak methodology** for decomposing host-side overhead 
 
 ## What SODA Measures
 
-SODA profiles a model over 150 inference runs and reports the following:
+**Standard mode** — GPU utilization, inference latency (TTFT/TPOT), TKLQT launch tax, throughput + Pareto plot, memory (model/peak/KV cache/memcpy), kernel fragmentation, carbon footprint, top-K kernels, per-stream analysis.
 
-**Standard mode** (no kernel database required):
+**Stage 2 (TaxBreak)** — HDBI decomposed into FT_python + FT_dispatch + δCT + KT with `i_lib` gating; per-kernel isolation-replay launch tax (raw + floor-adjusted); ATen translation tax; GPU roofline (with `--ncu`).
 
-| Metric | Description |
-|--------|-------------|
-| **GPU Utilization** | Percentage of the inference span with at least one kernel actively executing (concurrent-aware). |
-| **Inference Latency** | Wall-clock inference time. Auto-labeled as TTFT (prefill) or TPOT (decode) based on `--max-new-tokens`. |
-| **TKLQT** | Top-K Launch Queue Tax — total observable CPU→GPU launch overhead for the most frequent kernels. |
-| **Throughput** | Tokens/sec (system) and tokens/sec/user (interactivity), with Pareto frontier plot across batch configs. |
-| **Memory** | Model footprint, peak allocated/reserved, inference delta, empirical KV cache size (GQA/MLA-aware), memcpy/memset. |
-| **Kernel Fragmentation** | Total launches, unique kernel count, diversity ratio, per-token dispatch rate. Useful for MoE models. |
-| **Carbon Footprint** | Estimated gCO₂eq per inference from GPU TDP × utilization × grid carbon intensity × PUE. |
-| **Top-K Kernels** | Highest-frequency and longest-duration kernels across the trace. |
-| **Per-Stream Analysis** | Kernel count, op count, and busy time per CUDA stream. |
-
-**Enhanced TaxBreak pipeline** (Stage 2, requires kernel database):
-
-| Metric | Description |
-|--------|-------------|
-| **HDBI** | Host-Device Balance Index — isolation-replay taxes decomposed into FT + CT + CudaT + KT components with `i_lib` gating. |
-| **Launch Tax (KT)** | Per-kernel isolation-replay launch overhead with dynamic T_sys floor subtracted. |
-| **ATen Translation Tax (CT)** | Per-kernel overhead between ATen dispatch and CUDA runtime entry. |
-| **GPU Roofline** | Arithmetic intensity, achieved GFLOP/s, bound classification, and roofline plot (requires `--ncu`). |
+**Stage 3 (MoE)** — per-kernel per-layer op profile with `is_shared_expert` flag; NCU isolation HBM bytes per expert type; optional NVBit in-context cache reuse.
 
 ## Output Files
 
-Each run writes an experiment directory under `<output-dir>/<model>_<precision>_bs<B>_sl<S>_mt<T>/` (single GPU) or `…_mt<T>_gpu<N>/` (multi-GPU, N > 1):
+Experiment directory: `<output-dir>/<model>_<precision>_bs<B>_sl<S>_mt<T>/`
 
-| File | Description |
-|------|-------------|
-| `trace.json` | Raw PyTorch profiler trace (Chrome trace format). Open in `chrome://tracing` or Perfetto. |
-| `report.json` | Full analysis: metadata, performance metrics, per-stream analysis, top-K kernels. |
-| `summary.md` | Compact human-readable summary of the run. |
-| `env_metadata.json` | Runtime environment snapshot (GPU, PyTorch, CUDA versions). |
-| `kernel_database.json` | Op-to-kernel mapping (Stage 1, with `--kernel-db`). Required for Stage 2. |
-| `taxbreak/enhanced_taxbreak.json` | Per-kernel isolation-replay breakdown with optional ncu metrics. |
-| `taxbreak/roofline.png` | GPU roofline plot (Stage 2 + `--ncu`). |
-| `pareto.png` | Throughput–interactivity Pareto plot across batch configurations. |
+| File | When | Description |
+|------|------|-------------|
+| `report.json` | always | Full metrics: performance, per-stream, top-K kernels |
+| `summary.md` | always | Human-readable summary |
+| `pareto.png` | always | Throughput–interactivity Pareto plot |
+| `trace.json` | always | Raw Chrome trace (open in Perfetto) |
+| `kernel_database.json` | `--kernel-db` | Op-to-kernel mapping; required for Stage 2 |
+| `taxbreak/enhanced_taxbreak.json` | Stage 2 | Per-kernel isolation-replay breakdown |
+| `taxbreak/roofline.png` | Stage 2 + `--ncu` | GPU roofline plot |
+| `moe_profile/op_profile.json` | Stage 3 | Per-kernel per-layer records with `is_shared_expert` |
+| `moe_profile/moe_profile.json` | Stage 3 | NCU isolation + NVBit reuse metrics per expert type |
 
 ## Installation
 
 ```bash
 conda create -y -n soda-311 python=3.11
 conda activate soda-311
-
-# CUDA-enabled PyTorch
 conda install -y -c pytorch -c nvidia pytorch pytorch-cuda=12.1
-
-# Clone and install
 git clone https://github.com/prabsy96/soda.git
 cd SODA---System-Offload-Dynamics-Analyzer
 pip install -e .
 ```
 
+### Optional: NVBit Tool Build (for MoE in-context cache reuse)
+
+The NVBit pass is optional and only used when running MoE profiling with `--nvbit-lib`.
+
+```bash
+# From repo root
+cd src/soda/moe/nvbit_tool
+
+# Uses bundled NVBit SDK by default
+make ARCH=all
+
+# Output shared library used by --nvbit-lib
+ls -lh mem_reuse_tracker.so
+```
+
+Build from downloaded NVBit SDK tarball (`nvbit-Linux-x86_64-1.7.7.3.tar.bz2`):
+
+```bash
+tar -xjf nvbit-Linux-x86_64-1.7.7.3.tar.bz2
+# Produces: nvbit_release_x86_64/
+
+cd src/soda/moe/nvbit_tool
+make clean
+make ARCH=all NVBIT_SDK_PATH=/path/to/nvbit_release_x86_64
+```
+
+Notes:
+
+- `NVBIT_SDK_PATH` must point to the extracted `nvbit_release_x86_64` root (the Makefile internally uses `<root>/core`).
+- If `NVBIT_SDK_PATH` is not set, the Makefile falls back to the repo-bundled SDK at `src/soda/moe/nvbit_tool/nvbit_release_x86_64/core`.
+
 ## Quick Start
 
 ```bash
-# Load environment (required before every run)
-source env.sh
+source env.sh   # required before every run
 
-# Profile a model
 soda-cli --model gpt2 --output-dir output/ --seq-len 512 --batch-size 1
-
-# With verbose expert output
 soda-cli --model gpt2 --output-dir output/ --seq-len 512 --batch-size 1 --verbose
-
-# Distribute model across 2 GPUs (model parallelism)
 soda-cli --model gpt2 --output-dir output/ --seq-len 512 --batch-size 1 --num-gpus 2
 ```
 
@@ -87,103 +90,74 @@ soda-cli --model gpt2 --output-dir output/ --seq-len 512 --batch-size 1 --num-gp
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `-m`, `--model` | *(required)* | HuggingFace model name or local path |
-| `--output-dir` | `$SODA_OUTPUT` | Output directory for traces and reports |
-| `-p`, `--precision` | `bfloat16` | Weight precision: `float32`, `float16`, `bfloat16`, `float8_e4m3fn` |
+| `--output-dir` | `$SODA_OUTPUT` | Output directory |
+| `-p`, `--precision` | `bfloat16` | `float32`, `float16`, `bfloat16`, `float8_e4m3fn` |
 | `-sl`, `--seq-len` | `128` | Input sequence length |
 | `-bs`, `--batch-size` | `1` | Batch size |
-| `--max-new-tokens` | `1` | Tokens to generate (1 = TTFT/prefill; >1 = TPOT/decode) |
-| `-c`, `--compile-type` | `eager` | Execution mode: `eager`, `torch.compile`, `flash-attention` |
-| `--runs` | `150` | Number of profiled inference iterations |
-| `--warmup` | `50` | Warmup iterations before profiling |
-| `--seed` | `42` | Random seed |
+| `--max-new-tokens` | `1` | Tokens to generate (1 = TTFT; >1 = TPOT) |
+| `-c`, `--compile-type` | `eager` | `eager`, `torch.compile`, `flash-attention` |
+| `--runs` / `--warmup` | `150` / `50` | Profiled and warmup iterations |
+| `--num-gpus` | `1` | GPUs for model parallelism (`device_map="balanced"`) |
+| `--verbose` | off | Full expert tables (per-kernel, derivation details) |
+| `--kernel-db` | off | Generate kernel database (required for Stage 2) |
+| `--carbon-intensity` | `400` | gCO₂eq/kWh — presets: FR=58, EU=295, US=386, CN=581 |
+| `--pue` | `1.1` | Power Usage Effectiveness |
 
-### Analysis Options
-
-| Argument | Description |
-|----------|-------------|
-| `--verbose` | Print full expert output (per-kernel tables, derivation details). Default shows compact summary. |
-| `-f`, `--fusion` | Kernel chain lengths to check for fusion candidates (e.g., `-f 2 3`) |
-| `--kernel-db` | Generate kernel database after profiling (required for Stage 2) |
-
-### Carbon & Environment
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--carbon-intensity` | `400` | Grid carbon intensity in gCO₂eq/kWh. Presets: FR=58, EU=295, US=386, CN=581 |
-| `--pue` | `1.1` | Power Usage Effectiveness of the data centre (1.05–1.6 typical) |
-
-### Multi-GPU
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--num-gpus` | `1` | Number of GPUs to use via `device_map="balanced"` (model parallelism). Values exceeding available GPU count are clamped. Single-GPU behaviour is unchanged. |
-
-### Enhanced TaxBreak (Stage 2)
+### Stage 2: Enhanced TaxBreak
 
 | Argument | Description |
 |----------|-------------|
-| `--taxbreak` | Run the enhanced TaxBreak pipeline (no model loading required) |
-| `--kernel-db-path` | Path to `kernel_database.json` produced by Stage 1 |
-| `--ncu` | Enable ncu profiling on top-N kernels |
-| `--ncu-top-n` | Number of kernels to profile with ncu (default: 10) |
+| `--taxbreak` | Run TaxBreak pipeline (no model loading required) |
+| `--kernel-db-path` | Path to `kernel_database.json` from Stage 1 |
+| `--ncu` / `--ncu-top-n` | Enable ncu profiling on top-N kernels (default N=10) |
 
-## Enhanced TaxBreak Pipeline
+### Stage 3: MoE Per-Expert Profiling
 
-The pipeline replaces hardcoded baselines with dynamic per-kernel measurements. It runs in two decoupled stages:
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--moe-profile` | — | Run MoE profiling (no model loading or GPU required) |
+| `--kernel-db-path` | — | Path to `kernel_database.json` from Stage 1 |
+| `--moe-shared-dim` | auto | Shared expert intermediate dimension override |
+| `--moe-routed-dim` | auto | Routed expert intermediate dimension override |
+| `--moe-num-layers` | auto | Number of transformer layers override |
+| `--nvbit-lib` | — | Path to `mem_reuse_tracker.so` for NVBit in-context pass |
+
+## Pipelines
+
+### Stage 1 → Stage 2: TaxBreak
 
 ```bash
-# Stage 1: Profile model and generate kernel database (single GPU)
+# Stage 1: profile + build kernel database
 soda-cli -m gpt2 --output-dir output/ --kernel-db
 
-# Stage 2: Run enhanced TaxBreak (reads kernel database, no model loading)
-soda-cli --taxbreak --kernel-db-path output/gpt2_eager_bfloat16_bs1_sl128_mt1/kernel_database.json
-
-# With ncu profiling on the top 5 kernels
+# Stage 2: isolation replay + optional ncu
 soda-cli --taxbreak \
   --kernel-db-path output/gpt2_eager_bfloat16_bs1_sl128_mt1/kernel_database.json \
   --ncu --ncu-top-n 5
 
-# Multi-GPU TaxBreak: Stage 1 with 2 GPUs, then Stage 2 (T_sys measured on both GPUs)
+# Multi-GPU
 soda-cli -m gpt2 --output-dir output/ --kernel-db --num-gpus 2
-soda-cli --taxbreak --kernel-db-path output/gpt2_eager_bfloat16_bs1_sl128_mt1_gpu2/kernel_database.json
+soda-cli --taxbreak \
+  --kernel-db-path output/gpt2_eager_bfloat16_bs1_sl128_mt1_gpu2/kernel_database.json
 ```
 
-Stage 2 performs:
-1. **Dynamic system floor** — measures null-kernel launch overhead via nsys (no hardcoded constants)
-2. **Isolation replay** — replays each kernel individually under nsys for clean launch-tax measurement
-3. **ncu profiling** (optional) — collects L1/L2 hit rates, DRAM throughput, compute utilization
-4. **Roofline analysis** (with ncu) — classifies kernels as compute/memory bound, generates `roofline.png`
-5. **Enhanced report** — writes `taxbreak/enhanced_taxbreak.json` with per-kernel breakdown
+### Stage 1 → Stage 3: MoE Op Profile
 
-## Sweep & Comparative Report
-
-Run a parameter sweep across batch sizes and sequence lengths, then generate a comparative HTML report.
+Generates `op_profile.json` with one record per kernel per layer. Every kernel is included; shared expert kernels are flagged with `"is_shared_expert": true`.
 
 ```bash
-# 1. Run the sweep (edits config.py to change the parameter grid)
-python experiments/sweep/soda_sweep.py --model gpt2 --output-dir output/sweep/
+# Stage 1
+soda-cli -m Qwen/Qwen1.5-MoE-A2.7B --output-dir output/ \
+  --seq-len 4096 --batch-size 4 --kernel-db
 
-# 2. Generate comparative HTML report and heatmaps
-python experiments/sweep/summarize_soda_sweep.py output/sweep/
+# Stage 3 (auto-detects dimensions and num_layers from kernel DB)
+soda-cli --moe-profile \
+  --kernel-db-path output/Qwen_Qwen1.5-MoE-A2.7B_eager_bfloat16_bs4_sl4096_mt1/kernel_database.json
 ```
 
-The summarizer writes `output/sweep/summary/` containing:
-
-| File | Description |
-|------|-------------|
-| `comparative_report.html` | Self-contained dark-mode HTML report with per-group heatmaps (base64-embedded) and a sortable run comparison table (inference time, throughput, GPU util, TKLQT, peak memory, KV cache). Opens from any path. |
-| `*_inference_heatmap.png` | Inference time heatmap (batch × seq-len grid) |
-| `*_gpu_active_heatmap.png` | GPU active time heatmap |
-| `*_t_exposed_heatmap.png` | T_exposed (GPU idle time) heatmap |
-| `*_tklqt_heatmap.png` | TKLQT launch overhead heatmap |
-| `*_peak_memory_heatmap.png` | Peak memory heatmap |
-| `*_pivot.csv` | Raw pivot tables for each metric |
-
-GPU utilization is color-coded: green ≥60%, yellow 30–60%, red <30%. OOM cells are shown in red. All table columns are client-side sortable with no external dependencies.
+Records with `layer_id == -1` are not layer-specific (embedding, LM head, variable-shape routed experts). `num_layers` auto-detection priority: `--moe-num-layers` → HF `AutoConfig` → GCD of shared expert frequencies.
 
 ## Running on SLURM
-
-Copy the template and edit the configuration variables at the top:
 
 ```bash
 cp slurm/sbatch_template.sh slurm/my_job.sh
@@ -191,99 +165,52 @@ cp slurm/sbatch_template.sh slurm/my_job.sh
 sbatch slurm/my_job.sh
 ```
 
+For the NVBit MoE shared-expert pipeline example, use the dedicated template:
+
+```bash
+cp slurm/sbatch_moe_shared_expert_template.sh slurm/my_moe_job.sh
+# Edit configurable paths/modules/model settings in USER CONFIGURATION
+sbatch slurm/my_moe_job.sh
+```
+
 ## Docker
 
 ```bash
-# Build the image
 docker compose build soda
-
-# Standard profiling
 docker compose run --rm soda soda-cli --model gpt2 --seq-len 512
 
-# Enhanced TaxBreak (two-stage)
+# Two-stage TaxBreak
 docker compose run --rm soda soda-cli -m gpt2 --kernel-db
 docker compose run --rm soda soda-cli --taxbreak \
   --kernel-db-path output/gpt2_eager_bfloat16_bs1_sl128_mt1/kernel_database.json
-
-# Interactive shell
-docker compose run --rm soda /bin/bash
-
-# Gated models (e.g., Llama)
-export HF_TOKEN=hf_your_token_here
-docker compose run --rm soda soda-cli --model meta-llama/Llama-3.2-1B
 ```
 
-Output is persisted to `./output` via volume mount. HuggingFace weights are cached in a named Docker volume (`hf-cache`) across runs.
+Output persists to `./output` via volume mount; HF weights cached in `hf-cache` Docker volume.
 
 ## Project Structure
 
 ```
 src/soda/
-├── __init__.py            # SodaAnalyzer, ModelTracer, main()
-├── kerneldb.py            # Kernel database generator (Stage 1)
-├── ncu.py                 # NVIDIA Compute Profiler integration
-├── roofline.py            # Roofline and Pareto plot generation
-├── carbon.py              # Carbon footprint computation
-├── taxbreak/              # Enhanced TaxBreak pipeline (Stage 2)
-│   ├── null_kernel.py     # Dynamic system floor measurement
-│   ├── nsys_replay.py     # Per-kernel nsys isolation replay
-│   ├── pipeline.py        # Pipeline orchestrator
-│   └── report.py          # Enhanced report generation
-├── common/                # Shared utilities, data structures, trace parsing
-└── microbench/            # Legacy baremetal + PyTorch GEMM replay pipeline
-
-experiments/
-├── sweep/
-│   ├── config.py                   # Parameter grids (batch × seq-len)
-│   ├── soda_sweep.py               # Sweep runner
-│   └── summarize_soda_sweep.py     # HTML report + heatmap generator
-└── rebuttal/              # One-off experiments for paper reviewers
-
-slurm/
-└── sbatch_template.sh     # SLURM job template
+├── __init__.py       # SodaAnalyzer, ModelTracer, main()
+├── kerneldb.py       # Kernel database generator (Stage 1)
+├── taxbreak/         # TaxBreak pipeline (Stage 2)
+├── moe/              # MoE per-expert profiling (Stage 3)
+│   ├── detect.py     # Expert type classification
+│   ├── op_profile.py # op_profile.json with is_shared_expert flag
+│   ├── pipeline.py   # Orchestrator (NCU + optional NVBit)
+│   └── report.py     # moe_profile.json
+├── common/           # Utilities, trace parsing, CLI args
+├── ncu.py            # NVIDIA Compute Profiler integration
+├── roofline.py       # Roofline and Pareto plots
+└── carbon.py         # Carbon footprint computation
 ```
 
-## Development & Testing
+## Testing
 
-### Running the unit tests
-
-SODA includes a pytest suite covering 225 tests across 7 modules. No GPU is required.
+350 tests, no GPU required:
 
 ```bash
-# Python 3.11+ is required (login node Python 3.9 fails on str|Path unions)
-# The conda base environment at /home/pvellais/miniconda3 has all dependencies.
-
-PYTHONPATH=src /home/pvellais/miniconda3/bin/python3.13 -m pytest
-```
-
-Expected output:
-```
-225 passed in ~4.5s
-```
-
-Install pytest once if needed:
-```bash
-/home/pvellais/miniconda3/bin/python3.13 -m pip install pytest
-```
-
-### Test coverage summary
-
-| File | Tests | Area |
-|---|---|---|
-| `tests/test_data.py` | 33 | `clean_kernel_name`, `Kernel`, `ATenOp`, `Sequence` |
-| `tests/test_utils.py` | 77 | Conversions, GEMM detection, sequence parsing, tax metrics, HDBI, GPU utilization, fragmentation |
-| `tests/test_carbon.py` | 12 | TDP lookup, carbon intensity presets, `compute_carbon_footprint` |
-| `tests/test_roofline.py` | 15 | GPU specs, `compute_gemm_flops`, Pareto frontier |
-| `tests/test_summary_report.py` | 21 | Formatting helpers, Rich table builders |
-| `tests/test_kerneldb.py` | 20 | Vendor-replayability, three-way kernel class, last-run extraction |
-| `tests/test_multi_gpu.py` | 47 | `num_gpus` naming, clamping, `device_map` selection, multi-GPU metadata |
-
-pytest configuration is in `pyproject.toml` under `[tool.pytest.ini_options]`.
-
-### Syntax check (works on Python 3.9)
-
-```bash
-python3 -c "import py_compile; py_compile.compile('src/soda/<file>.py', doraise=True)"
+PYTHONPATH=src python -m pytest
 ```
 
 ## Citation
@@ -297,3 +224,36 @@ python3 -c "import py_compile; py_compile.compile('src/soda/<file>.py', doraise=
   pages={49-61},
   doi={10.1109/ISPASS64960.2025.00015}}
 ```
+
+## NVBit MoE Shared-Expert Pipeline (Separate from SODA Flow)
+
+This is a separate workflow that should be run independently from standard SODA analysis and TaxBreak runs.
+
+```bash
+# 0) Required environment
+source env.sh
+
+# 1) Build NVBit tool once (if not already built)
+cd src/soda/moe/nvbit_tool
+make ARCH=all
+cd ../../../../
+
+# 2) Stage 1: build kernel DB from a profiled run
+soda-cli -m Qwen/Qwen1.5-MoE-A2.7B \
+  --output-dir output/ \
+  --seq-len 1024 --batch-size 1 --max-new-tokens 1 \
+  --precision bfloat16 \
+  --kernel-db
+
+# 3) Stage 3: MoE profile with NVBit shared library
+soda-cli --moe-profile \
+  --kernel-db-path output/Qwen_Qwen1.5-MoE-A2.7B_eager_bfloat16_bs1_sl1024_mt1/kernel_database.json \
+  --nvbit-lib src/soda/moe/nvbit_tool/mem_reuse_tracker.so
+```
+
+Outputs for this separate pipeline:
+
+- `moe_profile/op_profile.json` — per-kernel per-layer records with `is_shared_expert`
+- `moe_profile/moe_profile.json` — NCU isolation metrics + NVBit in-context reuse metrics
+
+If `--nvbit-lib` is omitted, MoE profiling still runs, but NVBit/data-reuse fields are not populated.
