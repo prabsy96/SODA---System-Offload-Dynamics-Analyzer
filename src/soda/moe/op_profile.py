@@ -67,12 +67,26 @@ def _compute_hbm_fields(
     if not input_dims:
         return _zero
 
-    act_shape = _normalize_shape(input_dims[0]) if len(input_dims) > 0 else []
-    weight_shape = _normalize_shape(input_dims[1]) if len(input_dims) > 1 else []
+    # addmm(bias, input, weight, ...) → activation at [1], weight at [2]
+    if aten_op_name == "aten::addmm":
+        act_shape = _normalize_shape(input_dims[1]) if len(input_dims) > 1 else []
+        weight_shape = _normalize_shape(input_dims[2]) if len(input_dims) > 2 else []
+    else:
+        act_shape = _normalize_shape(input_dims[0]) if len(input_dims) > 0 else []
+        weight_shape = _normalize_shape(input_dims[1]) if len(input_dims) > 1 else []
 
     if aten_op_name not in _GEMM_OPS:
-        # Non-GEMM: report activation bytes from first input tensor.
-        act_bytes = float(_product(act_shape) * dtype_bytes)
+        # Non-GEMM: report activation bytes from first input.
+        # Some ops (aten::cat, aten::stack) receive a *list of tensors* as
+        # input_dims[0], e.g. [[1,16,1024,64],[1,16,1024,64]].  Detect this
+        # (list-of-lists) and sum each tensor's bytes individually instead of
+        # blindly flattening into one huge product.
+        raw_first = input_dims[0] if input_dims else []
+        if raw_first and isinstance(raw_first, (list, tuple)) and raw_first and isinstance(raw_first[0], (list, tuple)):
+            # List of tensor shapes: sum each tensor's bytes.
+            act_bytes = float(sum(_product(t) for t in raw_first) * dtype_bytes)
+        else:
+            act_bytes = float(_product(act_shape) * dtype_bytes)
         return {**_zero, "activation_bytes": act_bytes, "hbm_bytes": act_bytes}
 
     if not act_shape or not weight_shape:
@@ -91,9 +105,8 @@ def _compute_hbm_fields(
         activation_bytes = float((M * K + M * N) * dtype_bytes)
 
     elif aten_op_name in ("aten::mm", "aten::addmm"):
-        # mm:    (M, K) × (K, N)  → input_dims[1] = (K, N)
-        # addmm: bias, (M, K), (K, N) → input_dims[1] = (M, K) activation.
-        # Plan uses input_dims[1] as the weight-like tensor for both.
+        # mm:    (M, K) × (K, N)  → weight_shape = (K, N)
+        # addmm: bias, (M, K), (K, N) → weight_shape = (K, N) (extracted above)
         K = int(weight_shape[0]) if len(weight_shape) > 0 else 1
         N = int(weight_shape[1]) if len(weight_shape) > 1 else 1
         M = _product(act_shape[:-1]) if len(act_shape) > 1 else int(act_shape[0])
@@ -404,33 +417,33 @@ def generate_op_profile(
                 hbm_fields = dict(hbm_fields)
                 hbm_fields["hbm_bytes"] = ncu_hbm
 
+        is_shared = expert_type == "shared_expert"
+
+        # Determine layer expansion: routed experts and non-divisible frequencies → layer_id=-1.
+        ops_count = _ops_per_layer(freq, num_layers) if expert_type != "routed_expert" else 0
+        is_layer_local = ops_count > 0
+
         # Position tracking: distinguishes gate_proj (pos=0) from up_proj (pos=1).
         w_shape = tuple(_normalize_shape(input_dims[1])) if len(input_dims) > 1 and input_dims[1] else ()
         shape_key = (w_shape, expert_type)
         pos = shape_position.get(shape_key, 0)
-        shape_position[shape_key] = pos + 1
-
-        op_name = _infer_op_name(aten_op_name, expert_type, input_dims, pos)
-        is_shared = expert_type == "shared_expert"
-
-        # Layer expansion: routed experts and non-divisible frequencies → layer_id=-1.
-        is_layer_local = (
-            expert_type != "routed_expert"
-            and _ops_per_layer(freq, num_layers) > 0
-        )
+        shape_position[shape_key] = pos + (ops_count if is_layer_local else 1)
 
         if is_layer_local:
             for layer_id in range(num_layers):
-                records.append(_make_record(
-                    layer_id=layer_id,
-                    op_name=op_name,
-                    hbm_fields=hbm_fields,
-                    cta_count=cta_count,
-                    latency_us=latency_us,
-                    is_shared=is_shared,
-                    expert_type=expert_type,
-                ))
+                for sub_pos in range(ops_count):
+                    op_name_n = _infer_op_name(aten_op_name, expert_type, input_dims, pos + sub_pos)
+                    records.append(_make_record(
+                        layer_id=layer_id,
+                        op_name=op_name_n,
+                        hbm_fields=hbm_fields,
+                        cta_count=cta_count,
+                        latency_us=latency_us,
+                        is_shared=is_shared,
+                        expert_type=expert_type,
+                    ))
         else:
+            op_name = _infer_op_name(aten_op_name, expert_type, input_dims, pos)
             records.append(_make_record(
                 layer_id=-1,
                 op_name=op_name,

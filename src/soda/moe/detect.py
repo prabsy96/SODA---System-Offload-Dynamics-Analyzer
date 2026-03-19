@@ -41,19 +41,54 @@ CV_THRESHOLD = 0.30        # coefficient of variation on act first-dim -> routed
 # ---------------------------------------------------------------------------
 
 def _get_weight_shape(entry: Dict) -> Optional[Tuple[int, ...]]:
-    """Return the weight tensor shape (input_dims[1]) or None."""
+    """Return the weight tensor shape or None.
+
+    Accounts for op-specific input ordering:
+      aten::addmm(bias, input, weight, ...) → weight at input_dims[2]
+      all others                             → weight at input_dims[1]
+    """
+    op_name = entry.get("aten_op", {}).get("name", "")
     input_dims = entry.get("aten_op", {}).get("input_dims", [])
+    if op_name == "aten::addmm":
+        if len(input_dims) >= 3 and input_dims[2]:
+            return tuple(int(d) for d in input_dims[2])
+        return None
     if len(input_dims) >= 2 and input_dims[1]:
         return tuple(int(d) for d in input_dims[1])
     return None
 
 
 def _get_activation_shape(entry: Dict) -> Optional[Tuple[int, ...]]:
-    """Return the activation tensor shape (input_dims[0]) or None."""
+    """Return the activation tensor shape or None.
+
+    Accounts for op-specific input ordering:
+      aten::addmm(bias, input, weight, ...) → activation at input_dims[1]
+      all others                             → activation at input_dims[0]
+    """
+    op_name = entry.get("aten_op", {}).get("name", "")
     input_dims = entry.get("aten_op", {}).get("input_dims", [])
+    if op_name == "aten::addmm":
+        if len(input_dims) >= 2 and input_dims[1]:
+            return tuple(int(d) for d in input_dims[1])
+        return None
     if input_dims and input_dims[0]:
         return tuple(int(d) for d in input_dims[0])
     return None
+
+
+def _get_gemm_dims(weight_shape: Tuple[int, ...], op_name: str) -> Tuple[int, int]:
+    """Return (output_dim, input_dim) based on ATen op weight storage convention.
+
+    aten::linear → weight = (N, K): output_dim = w[0], input_dim = w[1]
+    aten::mm/addmm/matmul/bmm/etc. → weight = (..., K, N): output = w[-1], input = w[-2]
+    """
+    if not weight_shape or len(weight_shape) < 2:
+        w0 = weight_shape[0] if weight_shape else 0
+        return (w0, 0)
+    if op_name == "aten::linear":
+        return (int(weight_shape[0]), int(weight_shape[1]))
+    # mm, addmm, matmul, _scaled_mm, bmm: (..., K, N)
+    return (int(weight_shape[-1]), int(weight_shape[-2]))
 
 
 def _is_gemm_entry(entry: Dict) -> bool:
@@ -155,17 +190,24 @@ def detect_moe_config(
     for weight_shape, entries in groups.items():
         signals = _compute_group_signals(entries)
         cardinality_per_group[str(list(weight_shape))] = signals["n_unique_act"]
+        # Derive GEMM output/input dims based on dominant ATen op type
+        dominant_op = entries[0].get("aten_op", {}).get("name", "")
+        output_dim, input_dim = _get_gemm_dims(weight_shape, dominant_op)
         group_stats.append({
             "weight_shape": weight_shape,
             "entries": entries,
             "w0": weight_shape[0],
             "w1": weight_shape[1] if len(weight_shape) > 1 else 0,
+            "output_dim": output_dim,
+            "input_dim": input_dim,
             **signals,
         })
 
-    # Infer hidden_dim: most common weight_shape[1]
-    w1_values = [g["w1"] for g in group_stats if g["w1"] > 0]
-    hidden_dim = max(set(w1_values), key=w1_values.count) if w1_values else None
+    # Infer hidden_dim: most common input_dim (contraction dimension K).
+    # For aten::linear weight=(N,K), input_dim=K.  For aten::mm weight=(K,N),
+    # input_dim=K.  In both cases K is the hidden dimension.
+    input_dim_values = [g["input_dim"] for g in group_stats if g["input_dim"] > 0]
+    hidden_dim = max(set(input_dim_values), key=input_dim_values.count) if input_dim_values else None
 
     # Split into routed (high cardinality) vs fixed (low cardinality) groups
     routed_groups = [
@@ -174,25 +216,40 @@ def detect_moe_config(
     ]
     fixed_groups = [g for g in group_stats if g not in routed_groups]
 
-    # Identify gate: smallest w0 significantly below hidden (routing vector)
+    # Identify gate: smallest output_dim significantly below hidden (routing vector).
+    # Exclude 3D groups (bmm attention heads) and scalar projections (output_dim <= 1).
     gate_dim = None
     if hidden_dim and fixed_groups:
-        small_fixed = [g for g in fixed_groups if g["w0"] <= hidden_dim // 4]
+        small_fixed = [
+            g for g in fixed_groups
+            if not g["is_3d"]
+            and g["output_dim"] > 1
+            and g["output_dim"] <= hidden_dim // 4
+        ]
         if small_fixed:
-            gate_dim = min(g["w0"] for g in small_fixed)
+            gate_dim = min(g["output_dim"] for g in small_fixed)
 
-    # Identify shared expert: largest w0 among non-3D fixed groups
+    # Identify shared expert: largest output_dim among non-3D, non-gate fixed groups
     shared_dim = None
-    non_3d_fixed = [g for g in fixed_groups if not g["is_3d"] and g["w0"] != gate_dim]
+    non_3d_fixed = [
+        g for g in fixed_groups
+        if not g["is_3d"] and g["output_dim"] != gate_dim
+    ]
     if non_3d_fixed:
-        best = max(non_3d_fixed, key=lambda g: g["w0"])
-        shared_dim = best["w0"]
+        best = max(non_3d_fixed, key=lambda g: g["output_dim"])
+        shared_dim = best["output_dim"]
 
-    # Identify routed expert: most common routed group by entry count
+    # Identify routed expert: most common routed group by entry count.
+    # Prefer groups whose output_dim != hidden_dim to avoid conflating
+    # the routed intermediate dimension with the down-projection dimension.
     routed_dim = None
     if routed_groups:
-        most_common = max(routed_groups, key=lambda g: len(g["entries"]))
-        routed_dim = most_common["w0"]
+        non_hidden_routed = [
+            g for g in routed_groups if g["output_dim"] != hidden_dim
+        ]
+        candidates = non_hidden_routed if non_hidden_routed else routed_groups
+        most_common = max(candidates, key=lambda g: len(g["entries"]))
+        routed_dim = most_common["output_dim"]
 
     return {
         "num_experts": gate_dim,
@@ -262,12 +319,19 @@ def classify_kernel_entries(
     group_type: Dict[Tuple[int, ...], str] = {}
     for weight_shape, indices in groups.items():
         entries = [kernels[i] for i in indices]
-        w0 = weight_shape[0]
+        # Derive semantic output/input dims from the op type
+        dominant_op = entries[0].get("aten_op", {}).get("name", "")
+        output_dim, input_dim = _get_gemm_dims(weight_shape, dominant_op)
 
         if detection_method == "override":
-            if shared_dim is not None and w0 == shared_dim:
+            if shared_dim is not None and output_dim == shared_dim:
                 group_type[weight_shape] = "shared_expert"
-            elif routed_dim is not None and w0 == routed_dim:
+            elif routed_dim is not None and output_dim == routed_dim:
+                group_type[weight_shape] = "routed_expert"
+            # Down-projection: output_dim = hidden, input_dim = intermediate
+            elif shared_dim is not None and input_dim == shared_dim:
+                group_type[weight_shape] = "shared_expert"
+            elif routed_dim is not None and input_dim == routed_dim:
                 group_type[weight_shape] = "routed_expert"
             else:
                 group_type[weight_shape] = "other"
@@ -281,19 +345,27 @@ def classify_kernel_entries(
             group_type[weight_shape] = "routed_expert"
             continue
 
-        # Known dims from auto-detection (override exact match)
-        if shared_dim is not None and w0 == shared_dim:
+        # Known dims from auto-detection
+        if shared_dim is not None and output_dim == shared_dim:
             group_type[weight_shape] = "shared_expert"
-        elif routed_dim is not None and w0 == routed_dim:
+        elif routed_dim is not None and output_dim == routed_dim:
             group_type[weight_shape] = "routed_expert"
-        elif num_experts is not None and w0 == num_experts:
+        elif num_experts is not None and output_dim == num_experts:
             group_type[weight_shape] = "gate"
         # Tiebreakers
         elif signals["is_3d"]:
             group_type[weight_shape] = "attention"
-        elif w0 == hidden_dim:
-            group_type[weight_shape] = "attention"
-        elif w0 <= hidden_dim // 4:
+        elif output_dim <= 1:
+            group_type[weight_shape] = "other"
+        elif output_dim == hidden_dim:
+            # Down-projection: check input_dim against known intermediates
+            if shared_dim is not None and input_dim == shared_dim:
+                group_type[weight_shape] = "shared_expert"
+            elif routed_dim is not None and input_dim == routed_dim:
+                group_type[weight_shape] = "routed_expert"
+            else:
+                group_type[weight_shape] = "attention"
+        elif output_dim > 1 and output_dim <= hidden_dim // 4:
             group_type[weight_shape] = "gate"
         else:
             group_type[weight_shape] = "shared_expert"
