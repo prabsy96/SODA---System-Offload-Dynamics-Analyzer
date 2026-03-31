@@ -259,21 +259,60 @@ except Exception as exc:
     print(f"Failed to create inputs for {{op_name}}: {{exc}}", file=sys.stderr)
     sys.exit(1)
 
+# Flush L2 cache before replay: read a buffer larger than L2 capacity
+# so that input tensors are evicted.  Without this, create_input_tensors()
+# warms L2 (torch.randn writes to DRAM, data stays in L2), causing the
+# first GEMM launch to read weights from L2 instead of DRAM — producing
+# near-zero dram__bytes_read.sum.
+_flush_size = 64 * 1024 * 1024  # 64 MB > H200 L2 (50 MB)
+_flush_buf = torch.empty(_flush_size, dtype=torch.uint8, device="cuda")
+torch.sum(_flush_buf)
+torch.cuda.synchronize()
+del _flush_buf
+
 # Run warmup + measured iterations.
 # ncu --launch-skip/--launch-count handles the split externally.
 total = {warmup + runs}
+_fail_count = 0
 with torch.no_grad():
-    for _ in range(total):
+    for _i in range(total):
         try:
             execute_operation(op_name, inputs)
-        except Exception:
-            pass
+        except Exception as _exc:
+            _fail_count += 1
+            if _fail_count <= 2:
+                print(f"execute_operation failed iter {{_i}}: {{_exc}}", file=sys.stderr)
         torch.cuda.synchronize()
+
+if _fail_count == total:
+    print(f"ALL {{total}} iterations of {{op_name}} failed", file=sys.stderr)
+    sys.exit(2)
 '''
 
     script_path.parent.mkdir(parents=True, exist_ok=True)
     with open(script_path, "w") as f:
         f.write(script)
+
+
+def _pick_best_launch(launches: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return the launch with the highest ``dram__bytes_read.sum``.
+
+    Used by ``ncu_profile_kernel(pick_best_kernel=True)`` to select the
+    actual compute kernel from a set of captures that may include
+    cuBLASLt workspace/init kernels, bias-add epilogues, or other
+    short helper kernels with negligible DRAM traffic.
+
+    Falls back to the first launch if all DRAM read values are zero.
+    """
+    def _dram_reads(launch: Dict[str, Any]) -> float:
+        val = launch.get("metrics", {}).get("dram__bytes_read.sum", 0)
+        try:
+            return float(val or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    best = max(launches, key=_dram_reads)
+    return best if _dram_reads(best) > 0 else launches[0]
 
 
 def ncu_profile_kernel(
@@ -284,6 +323,7 @@ def ncu_profile_kernel(
     metrics: Optional[List[str]] = None,
     timeout: int = 300,
     extra_env: Optional[dict] = None,
+    pick_best_kernel: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Profile a single kernel with ncu and return cache/memory metrics.
 
@@ -294,10 +334,16 @@ def ncu_profile_kernel(
     Args:
         kernel_entry: Entry from ``kernel_database.json``.
         output_dir: Directory for replay scripts and CSV output.
-        warmup: Iterations to skip (``--launch-skip``).
+        warmup: Iterations to skip (``--launch-skip``).  Ignored when
+            ``pick_best_kernel=True`` (all launches are captured instead).
         runs: Iterations to measure (``--launch-count``).
         metrics: Metric list (defaults to ``NCU_METRICS``).
         timeout: Seconds before killing ncu.
+        pick_best_kernel: When True, skip=0 and capture all kernel
+            launches from the replay, then return the one with the
+            highest ``dram__bytes_read.sum``.  Avoids the cuBLASLt
+            helper-kernel problem where workspace/init launches consume
+            the ``--launch-skip`` budget and the actual GEMM is missed.
 
     Returns:
         Dict with ``kernel_name``, ``aten_op``, ``metrics``, and
@@ -330,13 +376,25 @@ def ncu_profile_kernel(
     # 2. Run ncu
     csv_path = output_dir / f"ncu_{kernel_id}.csv"
 
+    if pick_best_kernel:
+        # Capture all kernel launches from the full replay (skip=0, large count).
+        # cuBLASLt ops dispatch helper/workspace kernels that would consume
+        # the skip budget in the standard path, causing the actual GEMM to be
+        # missed.  Capturing everything and selecting by highest DRAM reads is
+        # robust to any number of helper kernels.
+        ncu_launch_skip = 0
+        ncu_launch_count = (warmup + runs) * 8  # generous upper bound
+    else:
+        ncu_launch_skip = warmup
+        ncu_launch_count = runs
+
     success, msg = ncu_profile(
         command_args=["python", str(script_path)],
         metrics=metrics,
         output_csv=csv_path,
         kernel_name=kernel_filter,
-        launch_skip=warmup,
-        launch_count=runs,
+        launch_skip=ncu_launch_skip,
+        launch_count=ncu_launch_count,
         timeout=timeout,
         extra_env=extra_env,
     )
@@ -353,8 +411,11 @@ def ncu_profile_kernel(
         print(f"No ncu results for {kernel_id} ({op_name})")
         return None
 
-    # Take the first (or only) profiled launch
-    ncu_metrics = launches[0]["metrics"]
+    # Select the best launch — either by DRAM reads (pick_best_kernel) or first.
+    if pick_best_kernel and len(launches) > 1:
+        ncu_metrics = _pick_best_launch(launches)["metrics"]
+    else:
+        ncu_metrics = launches[0]["metrics"]
 
     result = {
         "kernel_id": kernel_id,

@@ -179,8 +179,15 @@ def _infer_op_name(
     expert_type: str,
     input_dims: List,
     position: int,
+    projection_type: Optional[str] = None,
 ) -> str:
-    """Map (aten_op, expert_type, input_dims, position) to a human-readable op_name."""
+    """Map (aten_op, expert_type, input_dims, position) to a human-readable op_name.
+
+    Args:
+        projection_type: "gate_up_proj" or "down_proj" annotation from
+            classify_kernel_entries(). When present, overrides the shape
+            heuristic for accurate gate/up vs down classification.
+    """
     # Non-GEMM special cases.
     if aten_op_name in ("aten::rms_norm",):
         return "rmsnorm"
@@ -201,9 +208,47 @@ def _infer_op_name(
             return "attn_bmm_kv"
         return "bmm"
 
-    # GEMM ops: classify by expert_type and expansion direction.
+    # GEMM ops: classify by expert_type and projection direction.
     if aten_op_name in _GEMM_OPS:
-        weight_shape = _normalize_shape(input_dims[1]) if len(input_dims) > 1 else []
+        if projection_type is not None:
+            # Dimension-aware classification from detect.py annotation.
+            if expert_type == "shared_expert":
+                if projection_type == "gate_proj":
+                    return "shared_expert_gate_proj"
+                if projection_type == "up_proj":
+                    return "shared_expert_up_proj"
+                if projection_type == "gate_up_proj":
+                    return "shared_expert_gate_proj" if position == 0 else "shared_expert_up_proj"
+                return "shared_expert_down_proj"
+            if expert_type == "routed_expert":
+                if projection_type == "gate_proj":
+                    return "routed_expert_gate_proj"
+                if projection_type == "up_proj":
+                    return "routed_expert_up_proj"
+                if projection_type == "gate_up_proj":
+                    return "routed_expert_gate_up_proj"
+                return "routed_expert_down_proj"
+            if expert_type == "gate":
+                return "moe_gate_proj"
+            if expert_type == "attention":
+                return "attn_proj"
+            return "linear"
+
+        # No annotation — for expert types, warn user and fall back to
+        # shape heuristic.  Non-expert types don't need projection_type.
+        if expert_type in ("shared_expert", "routed_expert"):
+            import warnings
+            warnings.warn(
+                "MoE op_profile: entry missing projection_type annotation for "
+                "expert_type='{}'. Classification may be wrong for models where "
+                "intermediate_size < hidden_dim.".format(expert_type),
+                stacklevel=2,
+            )
+        # Fix addmm weight index (weight at input_dims[2], not [1]).
+        if aten_op_name == "aten::addmm":
+            weight_shape = _normalize_shape(input_dims[2]) if len(input_dims) > 2 else []
+        else:
+            weight_shape = _normalize_shape(input_dims[1]) if len(input_dims) > 1 else []
         expanding = _is_expanding(aten_op_name, weight_shape)
 
         if expert_type == "shared_expert":
@@ -211,7 +256,7 @@ def _infer_op_name(
                 return "shared_expert_gate_proj" if position == 0 else "shared_expert_up_proj"
             return "shared_expert_down_proj"
         if expert_type == "routed_expert":
-            return "routed_expert_proj" if expanding else "routed_expert_down_proj"
+            return "routed_expert_gate_up_proj" if expanding else "routed_expert_down_proj"
         if expert_type == "gate":
             return "moe_gate_proj"
         if expert_type == "attention":
@@ -318,6 +363,7 @@ def _make_record(
     latency_us: float,
     is_shared: bool,
     expert_type: str,
+    l2_bytes: float = 0.0,
 ) -> Dict:
     """Build a single op_profile record dict."""
     shared_expert_bytes = hbm_fields["hbm_bytes"] if is_shared else 0.0
@@ -330,6 +376,7 @@ def _make_record(
         "activation_bytes": hbm_fields["activation_bytes"],
         "kv_bytes": hbm_fields["kv_bytes"],
         "shared_expert_bytes": shared_expert_bytes,
+        "l2_bytes": l2_bytes,
         "cta_count": cta_count,
         "latency_us": latency_us,
         "is_shared_expert": is_shared,
@@ -388,6 +435,7 @@ def generate_op_profile(
 
     for entry in classified_kernels:
         expert_type = entry.get("expert_type", "other")
+        projection_type = entry.get("projection_type")  # from classify_kernel_entries
         aten_op = entry.get("aten_op", {})
         aten_op_name = aten_op.get("name", "")
         input_dims = aten_op.get("input_dims", [])
@@ -432,7 +480,7 @@ def generate_op_profile(
         if is_layer_local:
             for layer_id in range(num_layers):
                 for sub_pos in range(ops_count):
-                    op_name_n = _infer_op_name(aten_op_name, expert_type, input_dims, pos + sub_pos)
+                    op_name_n = _infer_op_name(aten_op_name, expert_type, input_dims, pos + sub_pos, projection_type)
                     records.append(_make_record(
                         layer_id=layer_id,
                         op_name=op_name_n,
@@ -443,7 +491,7 @@ def generate_op_profile(
                         expert_type=expert_type,
                     ))
         else:
-            op_name = _infer_op_name(aten_op_name, expert_type, input_dims, pos)
+            op_name = _infer_op_name(aten_op_name, expert_type, input_dims, pos, projection_type)
             records.append(_make_record(
                 layer_id=-1,
                 op_name=op_name,
@@ -455,6 +503,131 @@ def generate_op_profile(
             ))
 
     # Sort: layer_id ASC with -1 at the end, then op_name for stability.
+    records.sort(key=lambda r: (
+        r["layer_id"] if r["layer_id"] >= 0 else 10 ** 9,
+        r["op_name"],
+    ))
+
+    if output_path is not None:
+        Path(output_path).write_text(json.dumps(records, indent=2))
+
+    return records
+
+
+# ---------------------------------------------------------------------------
+# CUPTI-based op_profile builder
+# ---------------------------------------------------------------------------
+
+def _infer_op_name_from_module(
+    aten_op: str,
+    expert_type: str,
+    projection_type: Optional[str],
+) -> str:
+    """Map profiler event fields to a human-readable op_name.
+
+    Similar to ``_infer_op_name()`` but uses the projection_type from the
+    module classifier instead of shape heuristics.
+    """
+    # Non-GEMM special cases by aten op name.
+    suffix = aten_op.split("::")[-1] if "::" in aten_op else aten_op
+    if suffix in ("rms_norm",):
+        return "rmsnorm"
+    if suffix in ("native_layer_norm", "layer_norm"):
+        return "layernorm"
+    if suffix in ("softmax", "_softmax"):
+        return "softmax"
+    if suffix in ("silu", "gelu", "relu"):
+        return "activation"
+    if suffix in ("mul", "add", "div", "sub"):
+        return "elementwise"
+    if suffix == "bmm":
+        return "bmm"
+
+    # GEMM ops with known expert_type + projection_type
+    if aten_op in _GEMM_OPS or suffix == "linear":
+        if expert_type == "shared_expert":
+            if projection_type == "gate_proj":
+                return "shared_expert_gate_proj"
+            if projection_type == "up_proj":
+                return "shared_expert_up_proj"
+            if projection_type == "down_proj":
+                return "shared_expert_down_proj"
+            return "shared_expert_gate"
+        if expert_type == "routed_expert":
+            if projection_type == "gate_proj":
+                return "routed_expert_gate_proj"
+            if projection_type == "up_proj":
+                return "routed_expert_up_proj"
+            if projection_type == "down_proj":
+                return "routed_expert_down_proj"
+            return "routed_expert_proj"
+        if expert_type == "gate":
+            return "moe_gate_proj"
+        if expert_type == "attention":
+            return "attn_proj"
+        return "linear"
+
+    # Fallback: strip aten:: prefix.
+    return suffix if suffix else aten_op
+
+
+def generate_op_profile_from_cupti(
+    cupti_events: List[Dict],
+    output_path: Optional[Path] = None,
+) -> List[Dict]:
+    """Build op_profile records from classified CUPTI profiler events.
+
+    Each event dict is expected to contain the fields produced by
+    :func:`cupti_profiler.profile_single_prompt`:
+    ``aten_op``, ``expert_type``, ``layer_id``, ``projection_type``,
+    ``hbm_bytes``, ``l2_bytes``, ``flops``, ``weight_bytes``,
+    ``activation_bytes``, ``cuda_time_us``, ``num_kernels``.
+
+    Args:
+        cupti_events: Classified event dicts from the CUPTI profiler.
+        output_path: If provided, writes ``op_profile.json`` to this path.
+
+    Returns:
+        List of record dicts in the standard op_profile schema, sorted by
+        ``layer_id`` ASC (``-1`` at end), then ``op_name``.
+    """
+    records: List[Dict] = []
+
+    for evt in cupti_events:
+        expert_type = evt.get("expert_type", "other")
+        projection_type = evt.get("projection_type")
+        aten_op = evt.get("aten_op", "")
+        layer_id = evt.get("layer_id", -1)
+
+        # Skip events with no CUDA activity and no meaningful classification
+        if evt.get("num_kernels", 0) == 0 and evt.get("cuda_time_us", 0) == 0:
+            continue
+
+        op_name = _infer_op_name_from_module(aten_op, expert_type, projection_type)
+        is_shared = expert_type == "shared_expert"
+
+        hbm_fields = {
+            "flops": evt.get("flops", 0),
+            "hbm_bytes": evt.get("hbm_bytes", 0.0),
+            "weight_bytes": evt.get("weight_bytes", 0.0),
+            "activation_bytes": evt.get("activation_bytes", 0.0),
+            "kv_bytes": 0.0,
+        }
+
+        record = _make_record(
+            layer_id=layer_id,
+            op_name=op_name,
+            hbm_fields=hbm_fields,
+            cta_count=evt.get("num_kernels", 0),
+            latency_us=evt.get("cuda_time_us", 0.0),
+            is_shared=is_shared,
+            expert_type=expert_type,
+            l2_bytes=evt.get("l2_bytes", 0.0),
+        )
+        record["hbm_source"] = evt.get("hbm_source", "unknown")
+        records.append(record)
+
+    # Sort: layer_id ASC with -1 at end, then op_name.
     records.sort(key=lambda r: (
         r["layer_id"] if r["layer_id"] >= 0 else 10 ** 9,
         r["op_name"],

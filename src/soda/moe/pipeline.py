@@ -1,298 +1,370 @@
-"""MoE per-expert-type memory profiling pipeline.
+"""MoE per-operator memory profiling pipeline via PyTorch Profiler CUPTI.
 
-Two-pass design — passes are always separate invocations:
-
-  Pass 1 — NCU isolation (always):
-    ncu_profile_kernel() on sampled entries per expert type.
-    Provides absolute HBM bytes (hardware counters, accurate regardless
-    of cache context).  L1/L2 hit rates from NCU are isolation-only
-    (self-reuse) and are labelled as such.
-
-  Pass 2 — NVBit in-process (if --nvbit-lib provided):
-    Full model.generate() under LD_PRELOAD=mem_reuse_tracker.so.
-    Instruments kernels tagged by expert_type in execution order.
-    Provides in-context L1/L2 cache-line reuse and cross-expert data reuse.
+Standalone pipeline that loads a model, runs inference with curated
+benchmark prompts from ``soda.moe.prompts``, and measures per-operator
+HBM and L2 traffic using CUPTI hardware counters.  No dependency on
+kernel_database.json or the main SODA pipeline.
 
 Usage::
 
-    soda-cli --moe-profile --kernel-db-path <path>
-    soda-cli --moe-profile --kernel-db-path <path> --nvbit-lib <path>
+    soda-cli --moe-profile -m Qwen/Qwen1.5-MoE-A2.7B
+    soda-cli --moe-profile -m Qwen/Qwen1.5-MoE-A2.7B --moe-prompts code_python science_physics
+    soda-cli --moe-profile -m Qwen/Qwen1.5-MoE-A2.7B --max-seq-len 2048
 """
 from __future__ import annotations
 
 import json
-import os
 import sys
+from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from soda.moe.detect import (
-    classify_kernel_entries,
-    get_entries_by_type,
-    sample_routed_entries,
+from soda.moe.cupti_profiler import profile_single_prompt
+from soda.moe.ncu_bridge import merge_ncu_into_events, run_ncu_on_profiler_events
+from soda.moe.op_profile import generate_op_profile_from_cupti
+from soda.moe.prompts import (
+    MOE_BENCHMARK_PROMPTS,
+    SWEEP_REPRESENTATIVE_PROMPTS,
+    get_prompts_for_categories,
 )
-from soda.moe.op_profile import _detect_num_layers, generate_op_profile
-from soda.moe.report import generate_moe_report
 
-_NCU_SAMPLE_SIZE = 10  # Max entries to NCU-profile per expert type
+_DEFAULT_WARMUP = 2
 
 
 class MoEProfilePipeline:
-    """MoE memory profiling pipeline (NCU isolation + optional NVBit in-process)."""
+    """Standalone MoE memory profiling pipeline using CUPTI hardware counters.
 
-    def __init__(self, kernel_db_path: Path, args) -> None:
-        self.kernel_db_path = Path(kernel_db_path)
+    Loads the model, iterates over curated prompts, runs each under
+    ``torch.profiler`` with CUPTI metrics, classifies operators via
+    nn.Module hierarchy, and writes per-prompt + aggregated ``op_profile.json``.
+    """
+
+    def __init__(self, model_name: str, args: Any) -> None:
+        self.model_name = model_name
         self.args = args
+        self.precision = getattr(args, "precision", "bfloat16") or "bfloat16"
+        self.max_seq_len = getattr(args, "max_seq_len", 4096)
+        self.max_new_tokens = getattr(args, "max_new_tokens", 1)
+        self.warmup_iters = getattr(args, "moe_warmup", _DEFAULT_WARMUP)
 
-        # Load kernel DB
-        with open(self.kernel_db_path, "r", encoding="utf-8") as f:
-            self.kernel_db = json.load(f)
-
-        self.kernels: List[Dict] = self.kernel_db.get("kernels", [])
-
-        # Derive output directory alongside the kernel DB
-        self.output_dir = self.kernel_db_path.parent / "moe_profile"
+        # Output directory
+        output_root = Path(getattr(args, "output_dir", "output"))
+        model_slug = model_name.replace("/", "_")
+        self.output_dir = output_root / model_slug / "moe_cupti_profile"
         self.output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Optional overrides
-        self.shared_dim_override: Optional[int] = getattr(args, "moe_shared_dim", None)
-        self.routed_dim_override: Optional[int] = getattr(args, "moe_routed_dim", None)
-        self.nvbit_lib: Optional[Path] = (
-            Path(getattr(args, "nvbit_lib", None))
-            if getattr(args, "nvbit_lib", None)
-            else None
-        )
+        self.per_prompt_dir = self.output_dir / "per_prompt"
+        self.per_prompt_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
 
     def run(self) -> Path:
-        """Run the full pipeline and return the path to moe_profile.json."""
-        print(f"\n[MoE Profile] Kernel DB: {self.kernel_db_path}")
-        print(f"[MoE Profile] Output:     {self.output_dir}")
+        """Run the full CUPTI profiling pipeline.
 
-        # 1. Classify entries
-        hf_config = self.kernel_db.get("metadata", {}).get("model_config")
-        classified = classify_kernel_entries(
-            self.kernels,
-            model_config=hf_config,
-            shared_dim_override=self.shared_dim_override,
-            routed_dim_override=self.routed_dim_override,
+        Returns:
+            Path to the aggregated ``op_profile.json``.
+        """
+        import torch
+
+        print(f"\n[MoE CUPTI Profile] Model:        {self.model_name}")
+        print(f"[MoE CUPTI Profile] Output:       {self.output_dir}")
+        print(f"[MoE CUPTI Profile] Precision:    {self.precision}")
+        print(f"[MoE CUPTI Profile] Max seq len:  {self.max_seq_len} (truncation cap)")
+        print(f"[MoE CUPTI Profile] Max tokens:   {self.max_new_tokens}")
+
+        # 1. Load model + tokenizer
+        model, tokenizer = self._load_model()
+
+        # 2. Select prompts
+        prompts = self._select_prompts()
+        print(f"[MoE CUPTI Profile] Prompts:    {len(prompts)} selected")
+
+        # 3. Warmup
+        self._warmup(model, tokenizer, prompts[0][1])
+
+        # 4. Profile each prompt (collect events only — no file writing yet)
+        all_events: Dict[str, List[Dict]] = {}
+        for i, (name, text) in enumerate(prompts, 1):
+            print(f"  [{i}/{len(prompts)}] Profiling: {name}")
+            events = profile_single_prompt(
+                model=model,
+                tokenizer=tokenizer,
+                prompt_text=text,
+                max_seq_len=self.max_seq_len,
+                max_new_tokens=self.max_new_tokens,
+                precision=self.precision,
+            )
+            all_events[name] = events
+
+        # 5. NCU bridge: fill HBM/L2 bytes when CUPTI returned zeros
+        self._run_ncu_bridge_if_needed(all_events)
+
+        # 6. Write per-prompt op_profile files (after NCU bridge so hbm_bytes are real)
+        for name, events in all_events.items():
+            per_prompt_path = self.per_prompt_dir / f"op_profile_{name}.json"
+            records = generate_op_profile_from_cupti(events, output_path=per_prompt_path)
+            print(f"  [per-prompt] {name}: {len(records)} records → {per_prompt_path.name}")
+
+        # 7. Aggregate across prompts
+        agg_path = self._write_aggregated_profile(all_events)
+        print(f"\n[MoE CUPTI Profile] Aggregated: {agg_path}")
+
+        # 8. Write metadata
+        self._write_metadata(prompts, all_events)
+
+        # 9. Print summary
+        self._print_summary(all_events)
+
+        # 10. Free model
+        del model, tokenizer
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        return agg_path
+
+    # ------------------------------------------------------------------
+    # Model loading
+    # ------------------------------------------------------------------
+
+    def _load_model(self):
+        """Load HuggingFace model and tokenizer."""
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        print(f"[MoE CUPTI Profile] Loading model: {self.model_name}")
+        dtype = getattr(torch, self.precision, torch.bfloat16)
+        tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        model = AutoModelForCausalLM.from_pretrained(
+            self.model_name,
+            torch_dtype=dtype,
+            device_map="auto",
         )
-        self._print_classification_summary(classified)
+        model.eval()
+        print(f"[MoE CUPTI Profile] Model loaded on {next(model.parameters()).device}")
+        return model, tokenizer
 
-        # 2. Pass 1 — NCU (isolation HBM baseline)
-        ncu_results: Dict[str, Dict] = {}
-        try:
-            from soda.ncu import ncu_check_available
-            if ncu_check_available():
-                ncu_results = self._run_ncu_pass(classified)
-            else:
-                print("[MoE Profile] ncu not available — skipping NCU pass")
-        except ImportError:
-            print("[MoE Profile] soda.ncu not importable — skipping NCU pass")
+    # ------------------------------------------------------------------
+    # Prompt selection
+    # ------------------------------------------------------------------
 
-        # 3. Pass 2 — NVBit in-process (required if --nvbit-lib provided)
-        nvbit_results: Optional[Dict] = None
-        if self.nvbit_lib is not None:
-            if not self.nvbit_lib.exists():
-                print(
-                    f"[MoE Profile] Error: NVBit library not found: {self.nvbit_lib}",
-                    file=sys.stderr,
+    def _select_prompts(self) -> List[tuple]:
+        """Select prompts based on CLI args.
+
+        Returns list of (name, text) tuples.
+        """
+        # Explicit prompt names
+        moe_prompts = getattr(self.args, "moe_prompts", None)
+        if moe_prompts:
+            selected = []
+            for name in moe_prompts:
+                text = MOE_BENCHMARK_PROMPTS.get(name)
+                if text is None:
+                    print(
+                        f"[MoE CUPTI Profile] Warning: unknown prompt '{name}', skipping",
+                        file=sys.stderr,
+                    )
+                    continue
+                selected.append((name, text))
+            if selected:
+                return selected
+
+        # Explicit categories
+        moe_categories = getattr(self.args, "moe_categories", None)
+        if moe_categories:
+            pairs = get_prompts_for_categories(moe_categories)
+            if pairs:
+                return pairs
+
+        # Default: representative subset (7 prompts, one per domain)
+        return [
+            (name, MOE_BENCHMARK_PROMPTS[name])
+            for name in SWEEP_REPRESENTATIVE_PROMPTS
+            if name in MOE_BENCHMARK_PROMPTS
+        ]
+
+    # ------------------------------------------------------------------
+    # Warmup
+    # ------------------------------------------------------------------
+
+    def _warmup(self, model, tokenizer, first_prompt: str) -> None:
+        """Run warmup iterations to JIT-compile kernels."""
+        import torch
+
+        if self.warmup_iters <= 0:
+            return
+
+        print(f"[MoE CUPTI Profile] Warmup: {self.warmup_iters} iterations")
+
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+
+        inputs = tokenizer(
+            first_prompt,
+            return_tensors="pt",
+            max_length=self.max_seq_len,
+            truncation=True,
+        )
+        device = next(model.parameters()).device
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            for _ in range(self.warmup_iters):
+                model.generate(
+                    **inputs,
+                    max_new_tokens=self.max_new_tokens,
+                    do_sample=False,
                 )
-                raise SystemExit(1)
-            nvbit_results = self._run_nvbit_pass(classified)
-            if nvbit_results is None:
-                print(
-                    "[MoE Profile] Error: NVBit pass failed — see stderr above.",
-                    file=sys.stderr,
-                )
-                raise SystemExit(1)
-        else:
-            print("[MoE Profile] --nvbit-lib not provided — skipping NVBit pass")
 
-        # 4. Generate report
-        report_path = generate_moe_report(
-            classified_kernels=classified,
-            ncu_results=ncu_results,
-            nvbit_results=nvbit_results,
-            output_dir=self.output_dir,
-            args=self.args,
-        )
-        print(f"\n[MoE Profile] Report: {report_path}")
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
 
-        # 5. Generate op_profile.json
-        num_layers = self._get_num_layers(classified)
-        meta = self.kernel_db.get("metadata", {})
-        cfg = meta.get("config", meta)
-        precision = cfg.get("precision", "bfloat16") or "bfloat16"
-        op_profile_path = self.output_dir / "op_profile.json"
-        records = generate_op_profile(
-            classified_kernels=classified,
-            num_layers=num_layers,
-            precision=precision,
-            ncu_results=ncu_results,
-            output_path=op_profile_path,
+    # ------------------------------------------------------------------
+    # NCU bridge
+    # ------------------------------------------------------------------
+
+    def _run_ncu_bridge_if_needed(
+        self, all_events: Dict[str, List[Dict]]
+    ) -> None:
+        """If CUPTI returned all-zero HBM bytes, fill them in via NCU.
+
+        Checks whether any CUDA-active event has nonzero ``hbm_bytes``.  If
+        not, and ``ncu`` is available, deduplicates all events by
+        ``(aten_op, input_shapes)`` and runs ``ncu_profile_kernel()`` on each
+        unique entry.  Results are stamped back into the event dicts in-place
+        (``hbm_source = "ncu"``).
+
+        No-ops when:
+        - CUPTI already returned nonzero data.
+        - ``ncu`` is not in PATH.
+        """
+        from soda.ncu import ncu_check_available
+
+        # Flatten all events to check if any have nonzero HBM
+        all_flat = [evt for evts in all_events.values() for evt in evts]
+        has_nonzero = any(
+            (evt.get("hbm_bytes") or 0.0) > 0.0
+            or (evt.get("l2_bytes") or 0.0) > 0.0
+            for evt in all_flat
+            if (evt.get("cuda_time_us") or 0.0) > 0.0
         )
+        if has_nonzero:
+            return  # CUPTI data is present — NCU not needed
+
+        if not ncu_check_available():
+            print(
+                "[MoE CUPTI Profile] Warning: CUPTI counters are zero and ncu is not "
+                "available. HBM/L2 bytes will remain zero in op_profile.json."
+            )
+            return
+
         print(
-            f"[MoE Profile] Op profile ({len(records)} records, "
-            f"{num_layers} layers): {op_profile_path}"
+            "[MoE CUPTI Profile] CUPTI counters are zero — running NCU bridge "
+            "to measure HBM/L2 bytes per unique (op, shape)."
+        )
+        ncu_dir = self.output_dir / "ncu_bridge"
+        ncu_results = run_ncu_on_profiler_events(
+            all_flat,
+            ncu_output_dir=ncu_dir,
+            model_dtype=self.precision,
         )
 
-        return report_path
+        if ncu_results:
+            # Stamp back into per-prompt event lists
+            for evts in all_events.values():
+                merge_ncu_into_events(evts, ncu_results, model_dtype=self.precision)
 
     # ------------------------------------------------------------------
-    # Pass 1: NCU isolation
+    # Aggregation
     # ------------------------------------------------------------------
 
-    def _run_ncu_pass(self, classified: List[Dict]) -> Dict[str, Dict]:
-        """Run NCU on sampled entries per expert type.
+    def _write_aggregated_profile(
+        self, all_events: Dict[str, List[Dict]]
+    ) -> Path:
+        """Aggregate per-prompt events and write a single op_profile.json.
 
-        Returns dict mapping kernel_id -> NCU result dict.
+        Concatenates all per-prompt events into one record list (each tagged
+        with the prompt name) so the aggregated file captures the full
+        picture across inputs.
         """
-        from soda.ncu import ncu_profile_kernel
+        merged: List[Dict] = []
+        for prompt_name, events in all_events.items():
+            for evt in events:
+                evt_copy = dict(evt)
+                evt_copy["prompt_name"] = prompt_name
+                merged.append(evt_copy)
 
-        ncu_dir = self.output_dir / "ncu"
-        ncu_dir.mkdir(parents=True, exist_ok=True)
-
-        results: Dict[str, Dict] = {}
-        expert_types = ["shared_expert", "routed_expert", "gate"]
-
-        for et in expert_types:
-            entries = get_entries_by_type(classified, et)
-            if not entries:
-                continue
-
-            if et == "routed_expert":
-                to_profile = sample_routed_entries(entries, n_samples=_NCU_SAMPLE_SIZE)
-            else:
-                to_profile = entries[:_NCU_SAMPLE_SIZE]
-
-            print(
-                f"[MoE Profile] NCU: {et} — profiling {len(to_profile)} "
-                f"of {len(entries)} entries"
-            )
-
-            for i, entry in enumerate(to_profile, 1):
-                kid = entry.get("id", f"?{i}")
-                op = entry.get("aten_op", {}).get("name", "?")
-                kname = entry.get("kernel", {}).get("name", "?")
-                print(f"  [{i}/{len(to_profile)}] {kid}: {op} -> {kname}")
-
-                result = ncu_profile_kernel(entry, output_dir=ncu_dir)
-                if result is not None:
-                    result["expert_type"] = et
-                    results[kid] = result
-
-        return results
+        agg_path = self.output_dir / "op_profile.json"
+        records = generate_op_profile_from_cupti(merged, output_path=agg_path)
+        return agg_path
 
     # ------------------------------------------------------------------
-    # Pass 2: NVBit in-process inference
+    # Metadata
     # ------------------------------------------------------------------
 
-    def _run_nvbit_pass(self, classified: List[Dict]) -> Optional[Dict]:
-        """Run full model inference under NVBit LD_PRELOAD.
+    def _write_metadata(
+        self,
+        prompts: List[tuple],
+        all_events: Dict[str, List[Dict]],
+    ) -> None:
+        """Write metadata.json with run configuration and summary."""
+        # Determine CUPTI/NCU status from events
+        cupti_available = False
+        hbm_source_counts: Dict[str, int] = {}
+        for events in all_events.values():
+            for evt in events:
+                if not cupti_available:
+                    cupti_available = evt.get("cupti_available", False)
+                src = evt.get("hbm_source", "unknown")
+                hbm_source_counts[src] = hbm_source_counts.get(src, 0) + 1
 
-        Returns parsed NVBit reuse metrics dict, or None on failure.
-        """
-        from soda.moe.nvbit_profiler import build_expert_type_map, nvbit_profile_inference
-        from soda.moe.nvbit_parser import parse_reuse_log
-
-        # Build kernel_name -> expert_type map
-        expert_type_map = build_expert_type_map(classified)
-        if not expert_type_map:
-            print("[MoE Profile] NVBit: no tagged kernels — skipping")
-            return None
-
-        # Read model name and generation config from kernel DB metadata
-        meta = self.kernel_db.get("metadata", {})
-        cfg = meta.get("config", meta)
-        model_name = cfg.get("model_name") or cfg.get("model")
-        if not model_name:
-            print(
-                "[MoE Profile] NVBit: model_name not found in kernel DB metadata",
-                file=sys.stderr,
-            )
-            return None
-
-        generation_config = {
-            "batch_size": cfg.get("batch_size", 1),
-            "seq_len": cfg.get("seq_len", 128),
-            "max_new_tokens": cfg.get("max_new_tokens", 1),
-            "precision": cfg.get("precision", "bfloat16"),
+        metadata = {
+            "model": self.model_name,
+            "precision": self.precision,
+            "max_seq_len": self.max_seq_len,
+            "max_new_tokens": self.max_new_tokens,
+            "warmup_iterations": self.warmup_iters,
+            "cupti_available": cupti_available,
+            "hbm_source_counts": hbm_source_counts,
+            "prompts": [name for name, _ in prompts],
+            "num_prompts": len(prompts),
+            "events_per_prompt": {
+                name: len(evts) for name, evts in all_events.items()
+            },
         }
-
-        output_log = self.output_dir / "nvbit_reuse.jsonl"
-        print(
-            f"[MoE Profile] NVBit: running inference under {self.nvbit_lib.name} "
-            f"({len(expert_type_map)} tagged kernels)"
-        )
-
-        success, log_path, msg = nvbit_profile_inference(
-            model_name=model_name,
-            generation_config=generation_config,
-            expert_type_map=expert_type_map,
-            nvbit_lib_path=self.nvbit_lib,
-            output_log=output_log,
-        )
-
-        if not success:
-            print(f"[MoE Profile] NVBit failed: {msg}", file=sys.stderr)
-            return None
-
-        nvbit_results = parse_reuse_log(log_path)
-        if nvbit_results is None:
-            print("[MoE Profile] NVBit log empty or unparseable", file=sys.stderr)
-            return None
-
-        print(
-            f"[MoE Profile] NVBit: parsed {nvbit_results.get('total_records', 0)} "
-            "kernel invocation records"
-        )
-        return nvbit_results
+        meta_path = self.output_dir / "metadata.json"
+        meta_path.write_text(json.dumps(metadata, indent=2))
 
     # ------------------------------------------------------------------
-    # Helpers
+    # Summary
     # ------------------------------------------------------------------
-
-    def _get_num_layers(self, classified: List[Dict]) -> int:
-        """Determine number of transformer layers for op_profile layer expansion.
-
-        Priority:
-          1. CLI --moe-num-layers override.
-          2. num_hidden_layers from HuggingFace AutoConfig (if model accessible).
-          3. GCD-based detection from shared expert entry frequencies.
-        """
-        # CLI override takes highest priority.
-        num_layers_override = getattr(self.args, "moe_num_layers", None)
-        if num_layers_override is not None:
-            return int(num_layers_override)
-
-        # Try HuggingFace AutoConfig.
-        meta = self.kernel_db.get("metadata", {})
-        cfg = meta.get("config", meta)
-        model_name = cfg.get("model_name") or cfg.get("model")
-        if model_name:
-            try:
-                from transformers import AutoConfig
-                hf_cfg = AutoConfig.from_pretrained(model_name)
-                num_layers = getattr(hf_cfg, "num_hidden_layers", None)
-                if num_layers:
-                    return int(num_layers)
-            except Exception:
-                pass
-
-        # GCD-based fallback.
-        return _detect_num_layers(classified)
 
     @staticmethod
-    def _print_classification_summary(classified: List[Dict]) -> None:
+    def _print_summary(all_events: Dict[str, List[Dict]]) -> None:
+        """Print classification and traffic summary."""
         from collections import Counter
-        counts = Counter(e.get("expert_type", "other") for e in classified)
-        print("\n[MoE Profile] Classification summary:")
+
+        total_records = 0
+        type_counts: Counter = Counter()
+        total_hbm = 0.0
+        total_l2 = 0.0
+
+        for events in all_events.values():
+            for evt in events:
+                if evt.get("num_kernels", 0) == 0 and evt.get("cuda_time_us", 0) == 0:
+                    continue
+                total_records += 1
+                type_counts[evt.get("expert_type", "other")] += 1
+                total_hbm += evt.get("hbm_bytes", 0.0)
+                total_l2 += evt.get("l2_bytes", 0.0)
+
+        print(f"\n[MoE CUPTI Profile] Summary:")
+        print(f"  Total op records:   {total_records}")
+        print(f"  Total HBM traffic:  {total_hbm / 1e6:.1f} MB")
+        print(f"  Total L2 traffic:   {total_l2 / 1e6:.1f} MB")
+        print(f"  Expert type breakdown:")
         for et in ["shared_expert", "routed_expert", "gate", "attention", "other"]:
-            n = counts.get(et, 0)
+            n = type_counts.get(et, 0)
             if n > 0:
-                print(f"  {et:<18} {n:>5} entries")
-        print()
+                print(f"    {et:<18} {n:>5} ops")

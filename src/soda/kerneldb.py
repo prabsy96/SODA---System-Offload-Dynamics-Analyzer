@@ -241,6 +241,14 @@ def generate_kernel_database(
     total_unique = len(db_entries)
     lib_mediated_count = sum(1 for e in db_entries if e["classification"]["is_library_mediated"])
 
+    # Extract HuggingFace model config for downstream MoE classification.
+    model_config_dict = None
+    if hasattr(tracer, "model") and hasattr(getattr(tracer, "model", None), "config"):
+        try:
+            model_config_dict = tracer.model.config.to_dict()
+        except Exception:
+            pass
+
     database = {
         "version": "1.0",
         "metadata": {
@@ -256,6 +264,7 @@ def generate_kernel_database(
             "timestamp": datetime.now().isoformat(),
             "num_profiled_runs": num_runs,
             "last_run_sequences": len(last_run_seqs),
+            "model_config": model_config_dict,
         },
         "summary": {
             "total_unique_kernels": total_unique,

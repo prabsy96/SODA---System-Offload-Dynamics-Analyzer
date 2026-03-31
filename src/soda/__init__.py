@@ -1406,22 +1406,11 @@ def main() -> int:
             pipeline.run()
             return 0
 
-        # --- MoE per-expert-type memory profiling (Stage 3: no model loading) ---
+        # --- MoE per-operator memory profiling via CUPTI ---
         if getattr(args, "moe_profile", False):
             from soda.moe.pipeline import MoEProfilePipeline
 
-            db_path = getattr(args, "kernel_db_path", None)
-            if not db_path:
-                print("Error: --moe-profile requires --kernel-db-path", file=sys.stderr)
-                return 1
-            db_path = Path(db_path)
-            if not db_path.exists():
-                print(f"Error: kernel DB not found: {db_path}", file=sys.stderr)
-                return 1
-
-            os.environ["EXPERIMENT_DIR"] = str(db_path.parent.resolve())
-
-            pipeline = MoEProfilePipeline(kernel_db_path=db_path, args=args)
+            pipeline = MoEProfilePipeline(model_name=args.model, args=args)
             pipeline.run()
             return 0
 
