@@ -1,8 +1,25 @@
 # SODA — System Offload Dynamics Analyzer
 
+```
+╔═══════════════════════════════════════════════════════════════╗
+║                                                               ║
+║  ███████╗ ██████╗ ██████╗   █████╗                           ║
+║  ██╔════╝██╔═══██╗██╔══██╗██╔══██╗                           ║
+║  ███████╗██║   ██║██║  ██║███████║                           ║
+║  ╚════██║██║   ██║██║  ██║██╔══██║                           ║
+║  ███████║╚██████╔╝██████╔╝██║  ██║                           ║
+║  ╚══════╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═╝                          ║
+║                                                               ║
+║           System Offload Dynamics Analyzer                   ║
+║                 Prabhu Vellaisamy                            ║
+║              Carnegie Mellon University                      ║
+║                  © Apache 2.0 License                        ║
+╚═══════════════════════════════════════════════════════════════╝
+```
+
 ![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?style=flat&logo=pytorch&logoColor=white)
 ![CUDA](https://img.shields.io/badge/CUDA-enabled-green?logo=nvidia&logoColor=white)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)
 
 SODA implements the **TaxBreak methodology** for decomposing host-side overhead in LLM inference. It parses PyTorch profiler traces to quantify where inference time is spent across the CPU-GPU execution stack.
@@ -37,7 +54,7 @@ Experiment directory: `<output-dir>/<model>_<precision>_bs<B>_sl<S>_mt<T>/`
 conda create -y -n soda-311 python=3.11
 conda activate soda-311
 conda install -y -c pytorch -c nvidia pytorch pytorch-cuda=12.1
-git clone https://github.com/prabsy96/soda.git
+git clone https://github.com/prabsy96/SODA---System-Offload-Dynamics-Analyzer.git
 cd SODA---System-Offload-Dynamics-Analyzer
 pip install -e .
 ```
@@ -215,6 +232,10 @@ PYTHONPATH=src python -m pytest
 
 ## Citation
 
+SODA implements the methodology from our ISPASS 2025 paper (TKLQT characterization) and ISPASS 2026 paper (TaxBreak decomposition). If you use SODA or build upon it in your research or product, **you must cite the following papers**:
+
+**ISPASS 2025 — TKLQT Characterization:**
+
 ```bibtex
 @INPROCEEDINGS{11096369,
   author={Vellaisamy, Prabhu and Labonte, Thomas and Chakraborty, Sourav and Turner, Matt and Sury, Samantika and Shen, John Paul},
@@ -224,6 +245,10 @@ PYTHONPATH=src python -m pytest
   pages={49-61},
   doi={10.1109/ISPASS64960.2025.00015}}
 ```
+
+**ISPASS 2026 — TaxBreak:**
+
+*Citation forthcoming.*
 
 ## NVBit MoE Shared-Expert Pipeline (Separate from SODA Flow)
 

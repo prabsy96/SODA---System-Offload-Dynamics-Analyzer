@@ -32,10 +32,22 @@ GPU_SPECS: Dict[str, Dict[str, float]] = {
     "V100 SXM2": {"peak_tflops_fp16": 125.0, "peak_bw_tb_s": 0.9},
     "A6000": {"peak_tflops_fp16": 155.0, "peak_bw_tb_s": 0.768},
     "L40S": {"peak_tflops_fp16": 362.0, "peak_bw_tb_s": 0.864},
+    # Blackwell workstation — RTX 6000 Blackwell (96 GB GDDR7, 600 W TDP)
+    # FP16 Tensor (dense) = 2× FP32 CUDA (125 TFLOPS); same multiplier as RTX 6000 Ada.
+    "RTX 6000 Blackwell": {"peak_tflops_fp16": 250.0, "peak_bw_tb_s": 1.792},
+    # Blackwell data-center — B200 SXM5 (192 GB HBM3e, 8.0 TB/s, 1000 W TDP)
+    "B200 SXM": {"peak_tflops_fp16": 2250.0, "peak_bw_tb_s": 8.0},
+    # GB200 NVL — per-GPU spec in NVLink fabric (same die as B200 SXM)
+    "GB200 NVL": {"peak_tflops_fp16": 2250.0, "peak_bw_tb_s": 8.0},
 }
 
 # Patterns for fuzzy-matching torch.cuda.get_device_name() strings
 _GPU_PATTERNS: List[Tuple[re.Pattern, str]] = [
+    # Blackwell — match before any generic H/A patterns
+    (re.compile(r"RTX\s*6000.*Blackwell", re.IGNORECASE), "RTX 6000 Blackwell"),
+    (re.compile(r"GB200.*NVL|NVL.*GB200", re.IGNORECASE), "GB200 NVL"),
+    (re.compile(r"B200.*SXM|B200", re.IGNORECASE), "B200 SXM"),
+    # Hopper
     (re.compile(r"H200.*NVL", re.IGNORECASE), "H200 NVL"),
     (re.compile(r"H200.*SXM", re.IGNORECASE), "H200 SXM"),
     # H200 without variant qualifier — default to SXM (most common data-centre config)

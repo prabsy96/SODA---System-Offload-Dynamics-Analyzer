@@ -8,13 +8,13 @@ version = "0.1.0"
 description = "System Offload Dynamics Analyzer (SODA): analyze CPU–GPU dynamics of PyTorch models."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
-authors = [{ name = "SODA Developers" }]
+license = { text = "Apache-2.0 with additional terms" }
+authors = [{ name = "Prabhu Vellaisamy" }]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.11",
-  "License :: OSI Approved :: MIT License",
+  "License :: OSI Approved :: Apache Software License",
   "Operating System :: POSIX :: Linux"
 ]
 dependencies = [
@@ -27,8 +27,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/prabsy96/soda"
-Repository = "https://github.com/prabsy96/soda"
+Homepage = "https://github.com/prabsy96/SODA---System-Offload-Dynamics-Analyzer"
+Repository = "https://github.com/prabsy96/SODA---System-Offload-Dynamics-Analyzer"
 
 [project.scripts]
 soda-cli = "soda:main"

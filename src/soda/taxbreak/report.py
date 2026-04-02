@@ -26,8 +26,10 @@ _NCU_FRIENDLY = {
     "l1tex__t_bytes.sum.per_second": "l1_throughput_bytes_per_sec",
     "lts__t_bytes.sum.per_second": "l2_throughput_bytes_per_sec",
     "dram__bytes.sum.per_second": "dram_throughput_bytes_per_sec",
-    "dram__bytes_read.sum": "dram_bytes_read",
-    "dram__bytes_write.sum": "dram_bytes_write",
+    "dram__bytes_read.sum": "dram_bytes_read",          # pre-Blackwell
+    "dram__bytes_write.sum": "dram_bytes_write",         # pre-Blackwell
+    "dram__bytes_op_read.sum": "dram_bytes_read",        # Blackwell CC 12.x+
+    "dram__bytes_op_write.sum": "dram_bytes_write",      # Blackwell CC 12.x+
     "sm__throughput.avg.pct_of_peak_sustained_elapsed": "compute_throughput_pct",
 }
 

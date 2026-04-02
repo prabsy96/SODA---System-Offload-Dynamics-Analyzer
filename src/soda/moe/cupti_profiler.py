@@ -22,10 +22,16 @@ import torch
 from soda.moe.module_classifier import classify_profiler_event
 from soda.moe.op_profile import _compute_hbm_fields, _dtype_bytes
 
-# CUPTI metric names requested from the profiler.
+# CUPTI metric names requested from the profiler via _ExperimentalConfig.
+# Both pre-Blackwell and Blackwell names are requested — on each generation
+# the unsupported names are silently ignored by the profiler.
+#   Pre-Blackwell (Ampere/Hopper):  dram__bytes_read.sum, dram__bytes_write.sum
+#   Blackwell (CC 12.x):            dram__bytes_op_read.sum, dram__bytes_op_write.sum
 _CUPTI_METRICS = [
-    "dram__bytes_read.sum",
-    "dram__bytes_write.sum",
+    "dram__bytes_read.sum",        # pre-Blackwell (Ampere/Hopper)
+    "dram__bytes_write.sum",       # pre-Blackwell (Ampere/Hopper)
+    "dram__bytes_op_read.sum",     # Blackwell CC 12.x+
+    "dram__bytes_op_write.sum",    # Blackwell CC 12.x+
     "lts__t_bytes.sum",
 ]
 
@@ -140,11 +146,11 @@ def _find_metric_value(metrics: Dict[str, float], kind: str) -> float:
     if not metrics:
         return 0.0
 
-    # Exact preferred keys
+    # Exact preferred keys — Blackwell names first (CC 12.x+), then pre-Blackwell.
     exact = {
-        "hbm_read": ["dram__bytes_read.sum", "dram__bytes_read"],
-        "hbm_write": ["dram__bytes_write.sum", "dram__bytes_write"],
-        "l2_bytes": ["lts__t_bytes.sum", "lts__t_bytes"],
+        "hbm_read":  ["dram__bytes_op_read.sum",  "dram__bytes_read.sum",  "dram__bytes_read"],
+        "hbm_write": ["dram__bytes_op_write.sum", "dram__bytes_write.sum", "dram__bytes_write"],
+        "l2_bytes":  ["lts__t_bytes.sum", "lts__t_bytes"],
     }
     for k in exact.get(kind, []):
         if k in metrics:

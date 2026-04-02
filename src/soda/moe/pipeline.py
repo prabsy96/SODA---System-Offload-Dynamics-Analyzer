@@ -20,7 +20,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from soda.moe.cupti_profiler import profile_single_prompt
-from soda.moe.ncu_bridge import merge_ncu_into_events, run_ncu_on_profiler_events
+from soda.moe.ncu_bridge import (
+    _NCU_ELIGIBLE_OPS,
+    merge_ncu_into_events,
+    run_ncu_on_profiler_events,
+)
 from soda.moe.op_profile import generate_op_profile_from_cupti
 from soda.moe.prompts import (
     MOE_BENCHMARK_PROMPTS,
@@ -141,6 +145,19 @@ class MoEProfilePipeline:
             device_map="auto",
         )
         model.eval()
+        # Resolve "auto" / unknown precision strings to the actual model dtype so
+        # that _dtype_bytes() and create_input_tensors() use the correct byte width.
+        if self.precision in ("auto", None) or not hasattr(torch, self.precision):
+            inferred = str(next(model.parameters()).dtype).split(".")[-1]
+            if self.precision != inferred:
+                import warnings
+                warnings.warn(
+                    f"[MoE] precision='{self.precision}' resolved to '{inferred}' "
+                    "from model parameters. Shape-based HBM estimates will use "
+                    f"{inferred}.",
+                    stacklevel=2,
+                )
+            self.precision = inferred
         print(f"[MoE CUPTI Profile] Model loaded on {next(model.parameters()).device}")
         return model, tokenizer
 
@@ -241,16 +258,20 @@ class MoEProfilePipeline:
         """
         from soda.ncu import ncu_check_available
 
-        # Flatten all events to check if any have nonzero HBM
+        # Flatten all events to check if any NCU-eligible GEMM op has nonzero HBM.
+        # Deliberately restrict to NCU-eligible ops: on Blackwell, non-GEMM ops
+        # (layer_norm, softmax) may return nonzero l2_bytes via a different CUPTI
+        # path while all GEMM HBM counters remain zero. A single non-GEMM nonzero
+        # event must not suppress the bridge for GEMM ops.
         all_flat = [evt for evts in all_events.values() for evt in evts]
         has_nonzero = any(
             (evt.get("hbm_bytes") or 0.0) > 0.0
-            or (evt.get("l2_bytes") or 0.0) > 0.0
             for evt in all_flat
-            if (evt.get("cuda_time_us") or 0.0) > 0.0
+            if evt.get("aten_op") in _NCU_ELIGIBLE_OPS
+            and (evt.get("cuda_time_us") or 0.0) > 0.0
         )
         if has_nonzero:
-            return  # CUPTI data is present — NCU not needed
+            return  # CUPTI data is present for GEMM ops — NCU not needed
 
         if not ncu_check_available():
             print(
@@ -274,6 +295,18 @@ class MoEProfilePipeline:
             # Stamp back into per-prompt event lists
             for evts in all_events.values():
                 merge_ncu_into_events(evts, ncu_results, model_dtype=self.precision)
+
+        # Mark ops that were skipped because they are not NCU-replayable.
+        # hbm_source="ncu_ineligible" distinguishes "we chose not to measure"
+        # from "cupti_zero" which could mean either measured-zero or missing data.
+        for evts in all_events.values():
+            for evt in evts:
+                if (
+                    evt.get("hbm_source") == "cupti_zero"
+                    and evt.get("aten_op") not in _NCU_ELIGIBLE_OPS
+                    and (evt.get("cuda_time_us") or 0.0) > 0.0
+                ):
+                    evt["hbm_source"] = "ncu_ineligible"
 
     # ------------------------------------------------------------------
     # Aggregation
@@ -332,6 +365,9 @@ class MoEProfilePipeline:
             "events_per_prompt": {
                 name: len(evts) for name, evts in all_events.items()
             },
+            # op_profile.json contains one record per event per prompt (raw concat).
+            # To get per-inference averages, divide latency_us / hbm_bytes by num_prompts.
+            "aggregation": "per_prompt_raw",
         }
         meta_path = self.output_dir / "metadata.json"
         meta_path.write_text(json.dumps(metadata, indent=2))
