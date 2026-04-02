@@ -233,7 +233,14 @@ SODA implements the methodology from our ISPASS 2025 paper (TKLQT characterizati
 
 **ISPASS 2026 — TaxBreak:**
 
-*Citation forthcoming.*
+```bibtex
+@article{vellaisamy2026taxbreak,
+  title={TaxBreak: Unmasking the Hidden Costs of LLM Inference Through Overhead Decomposition},
+  author={Vellaisamy, Prabhu and Tripathi, Shreesh and Natarajan, Vignesh and Thenarasu, Surya Santhan and Blanton, Shawn and Shen, John P},
+  journal={arXiv preprint arXiv:2603.12465},
+  year={2026}
+}
+```
 
 ## NVBit MoE Shared-Expert Pipeline (Separate from SODA Flow)
 
