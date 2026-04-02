@@ -6,7 +6,7 @@ host-side overhead in LLM inference workloads on CPU-GPU architectures.
 
 If you use this software in academic or industry work, you must cite:
 
-  Vellaisamy, P., Tripathi, S., Natarajan, V., Thenarasu, S.S., Blanton, S. and Shen, J.P., 2026. TaxBreak: Unmasking the Hidden Costs of LLM Inference Through Overhead Decomposition. arXiv preprint arXiv:2603.12465.git 
+  Vellaisamy, P., Tripathi, S., Natarajan, V., Thenarasu, S.S., Blanton, S. and Shen, J.P., 2026. TaxBreak: Unmasking the Hidden Costs of LLM Inference Through Overhead Decomposition. arXiv preprint arXiv:2603.12465
 
   P. Vellaisamy, T. Labonte, S. Chakraborty, M. Turner, S. Sury,
   and J. P. Shen, "Characterizing and Optimizing LLM Inference
