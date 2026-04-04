@@ -19,7 +19,7 @@ import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from soda.common import utils, print_utils
 from soda.taxbreak.null_kernel import measure_system_floor
@@ -138,10 +138,22 @@ class TaxBreakPipeline:
             print(f"\nCompleted ncu: {len(ncu_results)} kernels")
             print_utils.section_end(section)
 
+        # --- Step 3.5: Optional per-kernel power replay ---
+        power_replay_results: Dict[str, Any] = {}
+        power_idle_baseline_w: float = 0.0
+        if getattr(self.args, "power_replay", False):
+            section = "Per-Kernel Power Replay"
+            print_utils.section_start(section)
+            power_replay_results, power_idle_baseline_w = self._run_kernel_power_replay(kernels)
+            print_utils.section_end(section)
+
         # --- Step 4: Generate report ---
         section = "Enhanced Report"
         print_utils.section_start(section)
-        report_path = self._generate_report(floor, nsys_results, ncu_results)
+        report_path = self._generate_report(
+            floor, nsys_results, ncu_results,
+            power_replay_results, power_idle_baseline_w,
+        )
         print_utils.section_end(section)
 
         return report_path
@@ -509,11 +521,54 @@ class TaxBreakPipeline:
 
         return results
 
+    def _run_kernel_power_replay(
+        self, kernels: List[Dict[str, Any]]
+    ) -> "tuple[Dict[str, Dict[str, Any]], float]":
+        """Run per-kernel NVML power replay for all unique kernels.
+
+        Power replay is always serial — running kernels in parallel on separate
+        GPUs would contaminate per-GPU NVML package-power readings.
+
+        Returns:
+            (results_dict, idle_baseline_w) where results_dict maps
+            kernel_id → power result dict.
+        """
+        from soda.taxbreak.kernel_power_replay import power_profile_all_kernels
+
+        max_kernels = getattr(self.args, "power_replay_max_kernels", None)
+        entries = kernels
+        if max_kernels is not None:
+            entries = kernels[:max_kernels]
+
+        total = len(entries)
+        print(
+            f"  Profiling power for {total} unique kernel"
+            f"{'s' if total != 1 else ''} "
+            f"(warmup={getattr(self.args, 'power_replay_warmup_ms', 500)} ms, "
+            f"windows={getattr(self.args, 'power_replay_windows', 3)}×"
+            f"{getattr(self.args, 'power_replay_target_ms', 300)} ms)"
+        )
+
+        gpu_ids = list(range(self.num_gpus))
+        results, idle_w = power_profile_all_kernels(
+            kernel_db_entries=entries,
+            output_dir=self.output_dir,
+            gpu_ids=gpu_ids,
+            target_warmup_ms=getattr(self.args, "power_replay_warmup_ms", 500),
+            target_meas_ms=getattr(self.args, "power_replay_target_ms", 300),
+            num_windows=getattr(self.args, "power_replay_windows", 3),
+            interval_ms=getattr(self.args, "power_replay_interval", 50),
+            max_kernels=None,  # already sliced above
+        )
+        return results, idle_w
+
     def _generate_report(
         self,
         floor: Dict[str, Any],
         nsys_results: Dict[str, Any],
         ncu_results: Dict[str, Any],
+        power_replay_results: Optional["Dict[str, Any]"] = None,
+        power_idle_baseline_w: float = 0.0,
     ) -> Path:
         """Delegate to the report module (Phase 6)."""
         return generate_enhanced_report(
@@ -523,4 +578,6 @@ class TaxBreakPipeline:
             ncu_results=ncu_results,
             output_dir=self.output_dir,
             verbose=getattr(self.args, "verbose", False),
+            power_replay_results=power_replay_results,
+            power_idle_baseline_w=power_idle_baseline_w,
         )

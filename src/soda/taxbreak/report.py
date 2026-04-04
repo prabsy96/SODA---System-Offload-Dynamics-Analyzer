@@ -167,6 +167,8 @@ def generate_enhanced_report(
     ncu_results: Dict[str, Dict[str, Any]],
     output_dir: Path,
     verbose: bool = False,
+    power_replay_results: Optional[Dict[str, Dict[str, Any]]] = None,
+    power_idle_baseline_w: float = 0.0,
 ) -> Path:
     """Build and write the enhanced TaxBreak report.
 
@@ -340,6 +342,9 @@ def generate_enhanced_report(
         ncu_entry = ncu_results.get(kid)
         ncu_data = _remap_ncu_metrics(ncu_entry["metrics"]) if ncu_entry else None
 
+        # power replay (optional)
+        power_data = (power_replay_results or {}).get(kid)
+
         per_kernel.append({
             "id": kid,
             "rank": entry["rank"],
@@ -362,6 +367,7 @@ def generate_enhanced_report(
             "i_lib_runtime": i_lib,
             "i_lib_source": i_lib_source,
             "ncu": ncu_data,
+            "power_replay": power_data,
             "replay_anomaly_reasons": replay_anomaly_reasons,
             # Temp field for roofline FLOPs derivation (stripped before JSON)
             "_aten_op_full": entry.get("aten_op", {}),
@@ -465,6 +471,11 @@ def generate_enhanced_report(
             "total_unique_kernels": len(kernels),
             "kernels_with_nsys": len(nsys_results),
             "kernels_with_ncu": len(ncu_results),
+            "kernels_with_power_replay": len(power_replay_results) if power_replay_results else 0,
+            "total_measured_energy_nj": round(
+                sum(r.get("energy_nj", 0.0) for r in (power_replay_results or {}).values()), 2
+            ),
+            "idle_baseline_w": round(power_idle_baseline_w, 2),
             "total_invocations": total_invocations,
             # Library-mediated (I_lib=1): cuBLAS/cuBLASLt/cutlass kernels
             "library_mediated_invocations": library_mediated_invocations,
@@ -517,6 +528,23 @@ def generate_enhanced_report(
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2)
 
+    # --- standalone power report (when power replay was run) ---
+    if power_replay_results:
+        # Ground truth inference power from Stage 1 energy counter measurement
+        ground_truth = metadata.get("inference_energy", {})
+
+        _, inference_power = _write_power_report(
+            power_replay_results=power_replay_results,
+            idle_baseline_w=power_idle_baseline_w,
+            per_kernel=per_kernel,
+            metadata=metadata,
+            output_dir=output_dir,
+            ground_truth=ground_truth,
+        )
+        # Surface reconstructed inference power into the main report so that
+        # render_taxbreak_analysis can display it without reading a second file.
+        report["summary"]["inference_power"] = inference_power
+
     # --- layperson summary (always shown) ---
     from soda.common.summary_report import render_taxbreak_analysis
     render_taxbreak_analysis(report, _make_verbose_args(verbose), output_dir)
@@ -528,6 +556,195 @@ def generate_enhanced_report(
 
     print(f"\nSaved enhanced TaxBreak report to {report_path}")
     return report_path
+
+
+# ------------------------------------------------------------------
+# Power report
+# ------------------------------------------------------------------
+
+def _write_power_report(
+    power_replay_results: Dict[str, Dict[str, Any]],
+    idle_baseline_w: float,
+    per_kernel: List[Dict[str, Any]],
+    metadata: Dict[str, Any],
+    output_dir: Path,
+    ground_truth: Optional[Dict[str, Any]] = None,
+) -> "tuple[Path, Dict[str, Any]]":
+    """Write power_report.json and print a console power summary.
+
+    Includes per-kernel isolated power measurements and a reconstructed
+    full-inference power estimate: the idle baseline plus a duration-weighted
+    average of per-kernel net power across all kernel invocations.
+
+      P_inference ≈ idle_w + Σ_k(net_w_k × dur_k × freq_k) / Σ_k(dur_k × freq_k)
+
+    This is the best approximation available without re-running the model
+    under live NVML monitoring in Stage 2.  It does not include host-side
+    launch overhead time (during which the GPU idles at ~idle_w), so it
+    slightly over-estimates average inference power.
+
+    Returns the path to the written file.
+    """
+    # Build a lookup from kernel_id → per_kernel entry for name/freq/duration
+    pk_by_id = {k["id"]: k for k in per_kernel}
+
+    # Build per-kernel power rows (only kernels that have power data)
+    rows: List[Dict[str, Any]] = []
+    total_energy_nj = 0.0          # Σ energy_nj × freq (net, kernel-active only)
+    reliable_count = 0
+    energy_counter_count = 0
+
+    # Accumulators for reconstructed inference power
+    weighted_net_power_sum = 0.0   # Σ net_w × dur_us × freq  (W·µs)
+    total_kernel_time_us = 0.0     # Σ dur_us × freq           (µs)
+
+    for kid, pr in power_replay_results.items():
+        pk = pk_by_id.get(kid, {})
+        freq = pk.get("frequency", 1)
+        dur_us = pk.get("kernel_duration_us", 0.0)
+        net_w = pr.get("net_power_w", 0.0)
+        energy_nj = pr.get("energy_nj", 0.0)
+        is_reliable = pr.get("is_reliable", False)
+        method = pr.get("measurement_method", "nvml_polling")
+
+        total_energy_nj += energy_nj * freq
+        weighted_net_power_sum += net_w * dur_us * freq
+        total_kernel_time_us += dur_us * freq
+
+        if is_reliable:
+            reliable_count += 1
+        if method == "energy_counter":
+            energy_counter_count += 1
+
+        rows.append({
+            "kernel_id": kid,
+            "kernel_name": pk.get("kernel_name", ""),
+            "aten_op": pk.get("aten_op", ""),
+            "frequency": freq,
+            "avg_duration_us": round(dur_us, 3),
+            "raw_power_w": round(pr.get("raw_power_w", 0.0), 3),
+            "idle_power_w": round(pr.get("idle_power_w", idle_baseline_w), 3),
+            "net_power_w": round(net_w, 3),
+            "std_power_w": round(pr.get("std_power_w", 0.0), 3),
+            "thermal_variance_pct": round(pr.get("thermal_variance_pct", 0.0), 2),
+            "energy_nj": round(energy_nj, 2),
+            "energy_nj_total": round(energy_nj * freq, 2),
+            "is_reliable": is_reliable,
+            "measurement_method": method,
+            "num_windows": pr.get("num_windows", 0),
+        })
+
+    rows.sort(key=lambda r: r["net_power_w"], reverse=True)
+    n_kernels = len(rows)
+
+    # Reconstructed inference power: idle floor + duration-weighted net power
+    # across all kernel invocations per inference pass.
+    if total_kernel_time_us > 0:
+        net_inference_power_w = weighted_net_power_sum / total_kernel_time_us
+    else:
+        net_inference_power_w = 0.0
+    reconstructed_inference_power_w = idle_baseline_w + net_inference_power_w
+
+    # Total energy per inference (kernel-active time only, net above idle)
+    # = Σ net_w_k × dur_us_k × freq_k, converted µW·s → µJ → mJ
+    kernel_active_energy_uj = weighted_net_power_sum / 1.0   # W × µs = µJ
+    idle_energy_uj = idle_baseline_w * total_kernel_time_us  # W × µs = µJ
+    total_inference_energy_uj = kernel_active_energy_uj + idle_energy_uj
+
+    # --- Validation: compare reconstructed power against ground truth ---
+    validation: Optional[Dict[str, Any]] = None
+    measured_power_w: Optional[float] = None
+    if ground_truth and ground_truth.get("power_w"):
+        measured_power_w = ground_truth["power_w"]
+        error_w = reconstructed_inference_power_w - measured_power_w
+        error_pct = (error_w / measured_power_w * 100.0) if measured_power_w > 0 else 0.0
+        validation = {
+            "measured_inference_power_w": round(measured_power_w, 3),
+            "measured_energy_mj": ground_truth.get("energy_mj"),
+            "measured_duration_s": ground_truth.get("duration_s"),
+            "measured_method": ground_truth.get("method", "unknown"),
+            "reconstructed_inference_power_w": round(reconstructed_inference_power_w, 3),
+            "error_w": round(error_w, 3),
+            "error_pct": round(error_pct, 2),
+        }
+
+    power_report = {
+        "version": "1.0",
+        "timestamp": datetime.now().isoformat(),
+        "metadata": {
+            "model": metadata.get("model", "unknown"),
+            "gpu_name": metadata.get("gpu_name", "unknown"),
+        },
+        "inference_power": {
+            # Reconstructed full inference power: idle + duration-weighted net
+            "reconstructed_inference_power_w": round(reconstructed_inference_power_w, 3),
+            # Breakdown
+            "idle_baseline_w": round(idle_baseline_w, 3),
+            "net_kernel_power_w": round(net_inference_power_w, 3),
+            # Energy per inference (kernel-active portion only, excludes host-side gaps)
+            "kernel_active_time_us": round(total_kernel_time_us, 1),
+            "kernel_active_energy_uj": round(kernel_active_energy_uj, 2),
+            "idle_energy_during_kernels_uj": round(idle_energy_uj, 2),
+            "total_inference_energy_uj": round(total_inference_energy_uj, 2),
+            # Note for consumers
+            "note": (
+                "reconstructed_inference_power_w = idle_baseline_w + "
+                "duration-weighted average net kernel power. "
+                "Excludes host-side launch overhead (GPU idles at ~idle_baseline_w "
+                "during that time), so this slightly over-estimates steady-state "
+                "inference power."
+            ),
+        },
+        "validation": validation,
+        "per_kernel_summary": {
+            "kernels_profiled": n_kernels,
+            "kernels_reliable": reliable_count,
+            "kernels_energy_counter": energy_counter_count,
+            "total_kernel_energy_nj": round(total_energy_nj, 2),
+        },
+        "kernels": rows,
+    }
+
+    report_path = output_dir / "power_report.json"
+    with open(report_path, "w") as f:
+        json.dump(power_report, f, indent=2)
+
+    # Console summary
+    print()
+    print("=== Per-Kernel Power Replay ===")
+    print(f"  Idle baseline              : {idle_baseline_w:.2f} W")
+    print(f"  Net kernel power (avg)     : {net_inference_power_w:.2f} W")
+    print(f"  Reconstructed infer power  : {reconstructed_inference_power_w:.2f} W  "
+          f"[idle + duration-weighted kernel net]")
+    if validation:
+        print(f"  Measured infer power (GT)  : {measured_power_w:.2f} W  "
+              f"[energy counter during live inference]")
+        err_sign = "+" if validation["error_w"] >= 0 else ""
+        print(f"  Validation error           : {err_sign}{validation['error_w']:.2f} W  "
+              f"({err_sign}{validation['error_pct']:.1f}%)")
+    else:
+        print(f"  Measured infer power (GT)  : N/A  [re-run Stage 1 to capture ground truth]")
+    print(f"  Total inference energy     : {total_inference_energy_uj / 1e3:.4f} mJ / inference  "
+          f"[kernel-active time only]")
+    print(f"  Kernels profiled           : {n_kernels}  ({reliable_count} reliable, "
+          f"{energy_counter_count} via energy counter)")
+    print()
+    top_n = min(10, len(rows))
+    if top_n:
+        print(f"  Top {top_n} kernels by net power draw:")
+        fmt = "    {:>4}  {:>8.2f} W  {:>7.1f} nJ  {:>5}  {:<30}  {}"
+        print(f"    {'ID':>4}  {'Net(W)':>8}  {'Energy':>7}  {'Freq':>5}  {'ATen Op':<30}  Kernel")
+        for r in rows[:top_n]:
+            print(fmt.format(
+                r["kernel_id"],
+                r["net_power_w"],
+                r["energy_nj"],
+                r["frequency"],
+                (r["aten_op"] or "")[:30],
+                (r["kernel_name"] or "")[:40],
+            ))
+    print(f"\nSaved power report to {report_path}")
+    return report_path, power_report["inference_power"]
 
 
 # ------------------------------------------------------------------

@@ -265,6 +265,10 @@ def generate_kernel_database(
             "num_profiled_runs": num_runs,
             "last_run_sequences": len(last_run_seqs),
             "model_config": model_config_dict,
+            # Ground truth inference power measured via energy counter during
+            # the last profiled inference pass. Used by Stage 2 power report
+            # for validation against reconstructed per-kernel power.
+            "inference_energy": getattr(tracer, "_inference_energy_measurement", {}),
         },
         "summary": {
             "total_unique_kernels": total_unique,

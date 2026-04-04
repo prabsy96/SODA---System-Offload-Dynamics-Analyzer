@@ -908,6 +908,105 @@ def get_args_parser() -> argparse.ArgumentParser:
              "prompts that exceed the limit.",
     )
 
+    parser.add_argument(
+        "--power-sample",
+        dest="power_sample",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable NVML-based GPU power sampling during inference profiling. "
+            "Requires pynvml (pip install pynvml) or nvidia-smi in PATH. "
+            "Reports mean/peak measured power alongside the TDP-based carbon estimate. "
+            "Sampling interval is controlled by --power-sample-interval."
+        ),
+    )
+    parser.add_argument(
+        "--power-sample-interval",
+        dest="power_sample_interval",
+        type=int,
+        default=50,
+        metavar="MS",
+        help=(
+            "GPU power sampling interval in milliseconds when --power-sample is active "
+            "(default: 50). Minimum 10 ms. The pynvml backend honours this interval "
+            "directly; the nvidia-smi fallback enforces a minimum of 200 ms."
+        ),
+    )
+
+    # ── Per-kernel power replay (Stage 2 / --taxbreak) ────────────────────
+    parser.add_argument(
+        "--power-replay",
+        dest="power_replay",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable per-kernel GPU power measurement via isolated tight-loop replay. "
+            "Requires --taxbreak and a kernel database. Each unique kernel is replayed "
+            "in isolation; GPU package power is sampled with NVML and averaged across "
+            "measurement windows. Reports raw_power_w, net_power_w (idle-subtracted), "
+            "thermal_variance_pct, and energy_nj per kernel. "
+            "Requires pynvml (pip install pynvml) or nvidia-smi in PATH."
+        ),
+    )
+    parser.add_argument(
+        "--power-replay-windows",
+        dest="power_replay_windows",
+        type=int,
+        default=3,
+        metavar="N",
+        help=(
+            "Number of measurement windows per kernel during power replay "
+            "(default: 3). More windows improve thermal stability detection "
+            "at the cost of longer runtime."
+        ),
+    )
+    parser.add_argument(
+        "--power-replay-warmup-ms",
+        dest="power_replay_warmup_ms",
+        type=int,
+        default=500,
+        metavar="MS",
+        help=(
+            "Warmup phase duration per kernel in milliseconds (default: 500). "
+            "The kernel runs in a tight loop for this long before NVML sampling "
+            "begins, warming L2 cache and GPU thermal state."
+        ),
+    )
+    parser.add_argument(
+        "--power-replay-target-ms",
+        dest="power_replay_target_ms",
+        type=int,
+        default=500,
+        metavar="MS",
+        help=(
+            "Target duration of each NVML measurement window per kernel in "
+            "milliseconds (default: 300). Longer windows yield more NVML samples "
+            "but increase total runtime."
+        ),
+    )
+    parser.add_argument(
+        "--power-replay-interval",
+        dest="power_replay_interval",
+        type=int,
+        default=50,
+        metavar="MS",
+        help=(
+            "NVML polling interval in milliseconds for per-kernel power replay "
+            "(default: 50). Minimum 10 ms."
+        ),
+    )
+    parser.add_argument(
+        "--power-replay-max-kernels",
+        dest="power_replay_max_kernels",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Cap the number of kernels profiled during power replay "
+            "(default: None = all unique kernels). Useful for time-limited runs."
+        ),
+    )
+
     return parser
 
 def parse_and_validate_args(args=None) -> argparse.Namespace:
