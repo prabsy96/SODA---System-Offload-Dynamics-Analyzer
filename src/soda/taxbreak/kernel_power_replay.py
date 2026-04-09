@@ -299,7 +299,7 @@ def power_profile_kernel(
     Returns:
         Dict with keys:
             kernel_id, raw_power_w, idle_power_w, net_power_w,
-            std_power_w, thermal_variance_pct, energy_nj,
+            std_power_w, thermal_variance_pct, energy_uj,
             sample_count_per_window, num_windows,
             warmup_iters, meas_iters, sync_batch, backend,
             measurement_method, is_reliable.
@@ -500,8 +500,8 @@ def power_profile_kernel(
             " — GPU may not be at thermal steady state (is_reliable=False)"
         )
 
-    # energy = net power × avg kernel duration (W × µs × 1e-3 = nJ)
-    energy_nj = net_power_w * avg_dur_us * 1e-3
+    # energy = net power × avg kernel duration; W × µs = µJ (direct, no scaling)
+    energy_uj = net_power_w * avg_dur_us
 
     # Rough sample count: total samples / number of completed windows
     total_samples = sum(len(r) for r in sampler._samples.values())
@@ -516,7 +516,7 @@ def power_profile_kernel(
         "net_power_w": round(net_power_w, 2),
         "std_power_w": round(std_power_w, 2),
         "thermal_variance_pct": round(thermal_variance_pct, 2),
-        "energy_nj": round(energy_nj, 2),
+        "energy_uj": round(energy_uj, 2),
         "sample_count_per_window": sample_count_per_window,
         "num_windows": len(per_window_means),
         "warmup_iters": warmup_iters,

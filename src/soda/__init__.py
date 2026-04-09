@@ -1252,13 +1252,22 @@ class ModelTracer:
                             if _energy_end_mj is not None:
                                 _dur_s = _energy_wall_end - _energy_wall_start
                                 _delta_mj = _energy_end_mj - _energy_start_mj
-                                if _dur_s > 0.001 and _delta_mj >= 0.0:
-                                    self._inference_energy_measurement = {
-                                        "power_w": round((_delta_mj * 1e-3) / _dur_s, 3),
-                                        "energy_mj": round(_delta_mj, 3),
-                                        "duration_s": round(_dur_s, 6),
-                                        "method": "energy_counter",
-                                    }
+                                if _dur_s > 0.001:
+                                    if _delta_mj > 0:
+                                        self._inference_energy_measurement = {
+                                            "power_w": round((_delta_mj * 1e-3) / _dur_s, 3),
+                                            "energy_mj": round(_delta_mj, 3),
+                                            "duration_s": round(_dur_s, 6),
+                                            "method": "energy_counter",
+                                        }
+                                    else:
+                                        print(
+                                            "Warning: NVML energy counter returned zero delta"
+                                            " — counter may not be supported on this GPU or"
+                                            " the measurement window was too short."
+                                            " energy_balance will be null in power_report.json.",
+                                            file=sys.stderr,
+                                        )
 
                 if self._has_cuda and self.num_gpus == 1:
                     end_event.record()
@@ -1378,13 +1387,22 @@ class ModelTracer:
                             if _energy_end_mj is not None:
                                 _dur_s = _energy_wall_end - _energy_wall_start
                                 _delta_mj = _energy_end_mj - _energy_start_mj
-                                if _dur_s > 0.001 and _delta_mj >= 0.0:
-                                    self._inference_energy_measurement = {
-                                        "power_w": round((_delta_mj * 1e-3) / _dur_s, 3),
-                                        "energy_mj": round(_delta_mj, 3),
-                                        "duration_s": round(_dur_s, 6),
-                                        "method": "energy_counter",
-                                    }
+                                if _dur_s > 0.001:
+                                    if _delta_mj > 0:
+                                        self._inference_energy_measurement = {
+                                            "power_w": round((_delta_mj * 1e-3) / _dur_s, 3),
+                                            "energy_mj": round(_delta_mj, 3),
+                                            "duration_s": round(_dur_s, 6),
+                                            "method": "energy_counter",
+                                        }
+                                    else:
+                                        print(
+                                            "Warning: NVML energy counter returned zero delta"
+                                            " — counter may not be supported on this GPU or"
+                                            " the measurement window was too short."
+                                            " energy_balance will be null in power_report.json.",
+                                            file=sys.stderr,
+                                        )
 
                 if self._has_cuda and self.num_gpus == 1:
                     end_event.record()
@@ -1484,13 +1502,22 @@ class ModelTracer:
                             if _energy_end_mj is not None:
                                 _dur_s = _energy_wall_end - _energy_wall_start
                                 _delta_mj = _energy_end_mj - _energy_start_mj
-                                if _dur_s > 0.001 and _delta_mj >= 0.0:
-                                    self._inference_energy_measurement = {
-                                        "power_w": round((_delta_mj * 1e-3) / _dur_s, 3),
-                                        "energy_mj": round(_delta_mj, 3),
-                                        "duration_s": round(_dur_s, 6),
-                                        "method": "energy_counter",
-                                    }
+                                if _dur_s > 0.001:
+                                    if _delta_mj > 0:
+                                        self._inference_energy_measurement = {
+                                            "power_w": round((_delta_mj * 1e-3) / _dur_s, 3),
+                                            "energy_mj": round(_delta_mj, 3),
+                                            "duration_s": round(_dur_s, 6),
+                                            "method": "energy_counter",
+                                        }
+                                    else:
+                                        print(
+                                            "Warning: NVML energy counter returned zero delta"
+                                            " — counter may not be supported on this GPU or"
+                                            " the measurement window was too short."
+                                            " energy_balance will be null in power_report.json.",
+                                            file=sys.stderr,
+                                        )
 
                 if self._has_cuda and self.num_gpus == 1:
                     end_event.record()

@@ -106,6 +106,22 @@ class TaxBreakPipeline:
 
         print_utils.section_end(section)
 
+        # --- Step 1.5: Active-idle power (null-kernel tight-loop) ---
+        # Only measured when --power-replay is requested; stored in floor dict
+        # so generate_enhanced_report() can pass it to _write_power_report().
+        if getattr(self.args, "power_replay", False):
+            from soda.taxbreak.null_kernel import measure_active_idle_power
+            ai_result = measure_active_idle_power(
+                warmup_ms=getattr(self.args, "power_replay_warmup_ms", 1000),
+                num_windows=getattr(self.args, "power_replay_windows", 3),
+                window_ms=getattr(self.args, "power_replay_target_ms", 500),
+                interval_ms=getattr(self.args, "power_replay_interval", 50),
+            )
+            if ai_result is not None:
+                floor["active_idle_power_w"] = ai_result["active_idle_power_w"]
+                floor["active_idle_std_w"] = ai_result["std_w"]
+                floor["active_idle_method"] = ai_result["measurement_method"]
+
         # --- Step 2: Isolation replay (nsys) for each kernel ---
         section = "Isolation Replay (nsys)"
         print_utils.section_start(section)

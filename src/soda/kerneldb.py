@@ -265,6 +265,11 @@ def generate_kernel_database(
             "num_profiled_runs": num_runs,
             "last_run_sequences": len(last_run_seqs),
             "model_config": model_config_dict,
+            # Wall-clock inference time (ms) from Stage 1. Used by Stage 2 power
+            # report to compute T_overhead = T_total - T_kernel for energy balance.
+            "inference_time_ms": round(
+                getattr(tracer, "torch_measured_inference_time_us", 0.0) / 1000.0, 4
+            ),
             # Ground truth inference power measured via energy counter during
             # the last profiled inference pass. Used by Stage 2 power report
             # for validation against reconstructed per-kernel power.
