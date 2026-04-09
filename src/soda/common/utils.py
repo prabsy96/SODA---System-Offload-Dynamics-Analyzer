@@ -843,10 +843,11 @@ def get_args_parser() -> argparse.ArgumentParser:
         dest="num_gpus",
         type=int,
         default=1,
-        help="Number of GPUs to use for inference via model parallelism "
+        help="Number of GPUs to use for inference for desired model parallelism "
              "(device_map=\"balanced\"). Default: 1 (single GPU). "
              "Values > available GPUs are clamped to available count.",
     )
+    parser.add
     parser.add_argument(
         "--no-global-cache",
         dest="no_global_cache",
