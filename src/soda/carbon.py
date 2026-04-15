@@ -41,6 +41,7 @@ GPU_TDP_W: Dict[str, float] = {
 _TDP_PATTERNS = [
     # Blackwell — match before any generic H/A patterns
     (re.compile(r"RTX\s*6000.*Blackwell", re.IGNORECASE), "RTX 6000 Blackwell"),
+    (re.compile(r"RTX\s*PRO\s*6000.*_?B\b", re.IGNORECASE), "RTX 6000 Blackwell"),
     (re.compile(r"GB200.*NVL|NVL.*GB200", re.IGNORECASE), "GB200 NVL"),
     (re.compile(r"B200.*SXM|B200", re.IGNORECASE), "B200 SXM"),
     # Hopper
