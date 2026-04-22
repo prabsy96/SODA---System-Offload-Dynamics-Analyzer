@@ -881,6 +881,11 @@ def get_args_parser() -> argparse.ArgumentParser:
              "(device_map=\"balanced\"). Default: 1 (single GPU). "
              "Values > available GPUs are clamped to available count.",
     )
+    parser.add_argument( #new
+        "--vllm",
+        action="store_true",
+        help="Run inference using vLLM."
+    )
 
     return parser
 
