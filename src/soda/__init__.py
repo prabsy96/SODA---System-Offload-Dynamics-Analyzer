@@ -40,6 +40,44 @@ LOGGER = logging.getLogger("soda")
 # Public API
 __all__ = ['ModelTracer', 'SodaAnalyzer', 'SodaLogger', 'LOGGER']
 
+
+def _resolve_energy_measure_window(num_runs: int, requested_runs: int) -> Tuple[int, int]:
+    """Return (start_index, window_size) for trailing-run energy measurement."""
+    total_runs = max(1, int(num_runs))
+    window_size = max(1, int(requested_runs))
+    window_size = min(total_runs, window_size)
+    return total_runs - window_size, window_size
+
+
+def _build_inference_energy_measurement(
+    delta_mj_total: float,
+    duration_s_total: float,
+    measurement_runs: int,
+) -> Optional[Dict[str, Any]]:
+    """Build per-inference energy measurement dict from a multi-run window.
+
+    The energy counter and wall-clock duration can span multiple profiled runs
+    for stability. This helper normalizes totals to per-inference values while
+    preserving total-window metadata for diagnostics.
+    """
+    if duration_s_total <= 0.001 or delta_mj_total <= 0.0:
+        return None
+
+    runs = max(1, int(measurement_runs))
+    per_inf_energy_mj = delta_mj_total / runs
+    per_inf_duration_s = duration_s_total / runs
+    power_w = (delta_mj_total * 1e-3) / duration_s_total
+
+    return {
+        "power_w": round(power_w, 3),
+        "energy_mj": round(per_inf_energy_mj, 3),
+        "duration_s": round(per_inf_duration_s, 6),
+        "method": "energy_counter",
+        "measurement_runs": runs,
+        "total_energy_mj": round(delta_mj_total, 3),
+        "total_duration_s": round(duration_s_total, 6),
+    }
+
 class SodaAnalyzer:
     """
     Handles model tracing, profile data parsing, and metric generation.
@@ -217,12 +255,40 @@ class SodaAnalyzer:
                     gpu_tdp_w=gpu_tdp,
                     gpu_util_pct=gpu_utilization if gpu_utilization is not None else 50.0,
                     batch_size=getattr(self.args, "batch_size", 1),
-                    num_tokens=getattr(self.args, "seq_len", 0),
+                    num_tokens=output_tokens,
                     carbon_intensity_g_kwh=getattr(self.args, "carbon_intensity", 400.0),
                     pue=getattr(self.args, "pue", 1.1),
                 )
         except Exception:
             pass
+
+        # Power profile from NVML sampler (populated if --power-sample was set)
+        power_profile = getattr(self.tracer, "_power_results", {})
+        if power_profile.get("available"):
+            n = power_profile.get("sample_count", 0)
+            interval = power_profile.get("interval_ms", 50)
+            backend = power_profile.get("backend", "unknown")
+            if n == 0:
+                print(
+                    f"Warning: --power-sample: no power readings collected (backend={backend}, "
+                    f"interval={interval} ms). The inference may be shorter than the sampling "
+                    f"interval. Try --power-sample-interval {max(10, interval // 2)} to halve "
+                    "the interval, or check that the backend has access to the GPU."
+                )
+            elif n < 3:
+                print(
+                    f"Warning: --power-sample: only {n} sample(s) collected (backend={backend}, "
+                    f"interval={interval} ms). Power estimate may be inaccurate. "
+                    f"Try --power-sample-interval {max(10, interval // 2)} for more samples."
+                )
+            if n > 0 and carbon_metrics is not None:
+                # Augment carbon dict with measured (not TDP-estimated) power values
+                carbon_metrics["measured_power_w"] = round(power_profile["mean_power_w"], 2)
+                carbon_metrics["peak_power_w"] = round(power_profile["peak_power_w"], 2)
+                carbon_metrics["power_sample_count"] = n
+                carbon_metrics["power_backend"] = backend
+                # Override the TDP-estimated value with the measured one for accuracy
+                carbon_metrics["estimated_power_w"] = round(power_profile["mean_power_w"], 2)
 
         # Build metrics dictionary
         metrics = {
@@ -232,7 +298,7 @@ class SodaAnalyzer:
             "inference_time_breakdown": {
                 "torch_measured_inference_time_ms": utils.us_to_ms(self.tracer.torch_measured_inference_time_us),
                 #"trace_calculated_inference_time_ms": utils.us_to_ms(trace_calculated_inference_time),
-                "profiler_overhead_ms": utils.us_to_ms(trace_calculated_inference_time - self.tracer.torch_measured_inference_time_us),
+                "profiler_overhead_ms": utils.us_to_ms(trace_calculated_inference_time / num_runs - self.tracer.torch_measured_inference_time_us),
             },
             "active_streams": len(stream_info),
 
@@ -275,6 +341,12 @@ class SodaAnalyzer:
 
             # Carbon footprint
             "carbon_footprint": carbon_metrics,
+
+            # Power profile from NVML sampler (empty dict if --power-sample not used)
+            "power_profile": power_profile,
+
+            # Ground truth inference power from energy counter (always attempted)
+            "inference_energy": getattr(self.tracer, "_inference_energy_measurement", {}),
         }
         
         self.results = {
@@ -688,7 +760,79 @@ class ModelTracer:
         self._peak_allocated_bytes = 0
         self._peak_reserved_bytes = 0
         self._kv_cache_bytes = 0
-    
+
+        # Power sampling results (populated during trace if --power-sample is set)
+        self._power_results: dict = {}
+
+        # Ground truth inference power: measured via NVML energy counter during
+        # the last profiled inference pass.  Always attempted (no CLI flag needed).
+        # Dict with keys: power_w, energy_mj, duration_s, method.  Empty if unavailable.
+        self._inference_energy_measurement: dict = {}
+
+    def _read_energy_counter_mj(self) -> Optional[float]:
+        """Read cumulative GPU energy counter (mJ) via pynvml, or None."""
+        try:
+            import pynvml  # type: ignore[import]
+            pynvml.nvmlInit()
+            h = pynvml.nvmlDeviceGetHandleByIndex(0)
+            # nvmlDeviceGetTotalEnergyConsumption returns millijoules
+            val = float(pynvml.nvmlDeviceGetTotalEnergyConsumption(h))
+            return val
+        except Exception as e:
+            print(f"Warning: energy counter read failed: {e}", file=sys.stderr)
+            return None
+
+    def _make_power_sampler(self):
+        """Return a power sampler (NVMLPowerSampler or no-op) based on CLI args."""
+        from soda.power_sampler import make_power_sampler
+        enabled = getattr(self.args, "power_sample", False)
+        interval_ms = getattr(self.args, "power_sample_interval", 50)
+        gpu_ids = list(range(self.num_gpus))
+        return make_power_sampler(gpu_ids=gpu_ids, interval_ms=interval_ms, enabled=enabled)
+
+    def _capture_power_results(
+        self,
+        sampler,
+        profile_start_s: Optional[float],
+        profile_end_s: Optional[float],
+        sampling_start_s: Optional[float],
+        sampling_end_s: Optional[float],
+    ) -> None:
+        """Capture aggregated and raw power sampling data for Stage-2 reuse."""
+        results = sampler.get_results()
+
+        raw_samples = getattr(sampler, "_samples", None)
+        if isinstance(raw_samples, dict):
+            serialized = {}
+            for gpu_id, readings in raw_samples.items():
+                gpu_key = str(gpu_id)
+                gpu_readings = []
+                if isinstance(readings, list):
+                    for pair in readings:
+                        if not isinstance(pair, tuple) or len(pair) != 2:
+                            continue
+                        try:
+                            t_ms = float(pair[0])
+                            watts = float(pair[1])
+                        except Exception:
+                            continue
+                        gpu_readings.append([t_ms, watts])
+                serialized[gpu_key] = gpu_readings
+            results["samples_ms"] = serialized
+
+        if profile_start_s is not None and profile_end_s is not None and profile_end_s > profile_start_s:
+            results["profile_window_s"] = {
+                "start": float(profile_start_s),
+                "end": float(profile_end_s),
+            }
+        if sampling_start_s is not None and sampling_end_s is not None and sampling_end_s > sampling_start_s:
+            results["sampling_window_s"] = {
+                "start": float(sampling_start_s),
+                "end": float(sampling_end_s),
+            }
+
+        self._power_results = results
+
     def _get_profiler_activities(self) -> List:
         """Returns the appropriate profiler activities based on device availability."""
         activities = [ProfilerActivity.CPU]
@@ -1231,6 +1375,7 @@ class ModelTracer:
             utils.report_gpu_clocks(context="after warmup, before profiling")
 
         # Profiled runs
+        _profile_wall_start = time.perf_counter()
         with torch.no_grad():
             with profile(
                 activities=self._get_profiler_activities(),
@@ -1239,6 +1384,7 @@ class ModelTracer:
                 profile_memory=True,
                 record_shapes=True,
             ) as prof:
+                _sampler = self._make_power_sampler()
                 if self._has_cuda and self.num_gpus == 1:
                     start_event = torch.cuda.Event(enable_timing=True)
                     end_event = torch.cuda.Event(enable_timing=True)
@@ -1247,13 +1393,53 @@ class ModelTracer:
                     self._sync_device()
                     wall_start = time.perf_counter()
 
-                for _ in range(num_runs):
+                _energy_start_mj: Optional[float] = None
+                _energy_wall_start: Optional[float] = None
+                _sampling_wall_start: Optional[float] = None
+                _sampling_wall_end: Optional[float] = None
+                _energy_start_idx, _energy_measure_runs = _resolve_energy_measure_window(
+                    num_runs,
+                    getattr(self.args, "energy_measure_runs", 5),
+                )
+                for run_idx in range(num_runs):
+                    _is_last = (run_idx == num_runs - 1)
+                    _is_energy_start = (run_idx == _energy_start_idx)
+                    if _is_energy_start:
+                        _sampler.start()
+                        self._sync_device()
+                        _energy_start_mj = self._read_energy_counter_mj()
+                        _energy_wall_start = time.perf_counter()
+                        _sampling_wall_start = _energy_wall_start
                     self.model.generate(
                         **self.model_inputs,
                         max_new_tokens=self.max_new_tokens,
                         do_sample=False,
                     )
                     self._sync_device()
+                    if _is_last:
+                        _sampler.stop()
+                        _sampling_wall_end = time.perf_counter()
+                        if _energy_start_mj is not None and _energy_wall_start is not None:
+                            _energy_end_mj = self._read_energy_counter_mj()
+                            _energy_wall_end = time.perf_counter()
+                            if _energy_end_mj is not None:
+                                _dur_s_total = _energy_wall_end - _energy_wall_start
+                                _delta_mj_total = _energy_end_mj - _energy_start_mj
+                                _measurement = _build_inference_energy_measurement(
+                                    _delta_mj_total,
+                                    _dur_s_total,
+                                    _energy_measure_runs,
+                                )
+                                if _measurement is not None:
+                                    self._inference_energy_measurement = _measurement
+                                else:
+                                    print(
+                                        "Warning: NVML energy counter returned zero/invalid delta"
+                                        " — counter may not be supported on this GPU or"
+                                        " the measurement window was too short."
+                                        " energy_balance will be null in power_report.json.",
+                                        file=sys.stderr,
+                                    )
 
                 if self._has_cuda and self.num_gpus == 1:
                     end_event.record()
@@ -1265,6 +1451,15 @@ class ModelTracer:
                     total_time_us = (wall_end - wall_start) * 1e6  # seconds -> µs
 
                 self.torch_measured_inference_time_us = total_time_us / num_runs
+
+        _profile_wall_end = time.perf_counter()
+        self._capture_power_results(
+            sampler=_sampler,
+            profile_start_s=_profile_wall_start,
+            profile_end_s=_profile_wall_end,
+            sampling_start_s=_sampling_wall_start,
+            sampling_end_s=_sampling_wall_end,
+        )
 
         self.num_profiled_runs = num_runs
         print(f"Mean time per inference: {utils.us_to_ms(self.torch_measured_inference_time_us):.2f} ms")
@@ -1316,6 +1511,7 @@ class ModelTracer:
 
         # Profiled runs - run num_runs inferences within profiler
         # All runs are captured in a single trace; metrics are averaged by frequency
+        _profile_wall_start = time.perf_counter()
         with torch.no_grad():
             with profile(
                 activities=self._get_profiler_activities(),
@@ -1324,6 +1520,7 @@ class ModelTracer:
                 profile_memory=True,
                 record_shapes=True,
             ) as prof:
+                _sampler = self._make_power_sampler()
                 if self._has_cuda and self.num_gpus == 1:
                     start_event = torch.cuda.Event(enable_timing=True)
                     end_event = torch.cuda.Event(enable_timing=True)
@@ -1333,8 +1530,24 @@ class ModelTracer:
                     wall_start = time.perf_counter()
 
                 _last_kv_output = None
+                _energy_start_mj: Optional[float] = None
+                _energy_wall_start: Optional[float] = None
+                _sampling_wall_start: Optional[float] = None
+                _sampling_wall_end: Optional[float] = None
+                _energy_start_idx, _energy_measure_runs = _resolve_energy_measure_window(
+                    num_runs,
+                    getattr(self.args, "energy_measure_runs", 5),
+                )
                 for run_idx in range(num_runs):
                     _is_last = (run_idx == num_runs - 1)
+                    _is_energy_start = (run_idx == _energy_start_idx)
+                    if _is_energy_start:
+                        _sampler.start()
+                        # Ground truth: read energy counter at start of trailing window
+                        self._sync_device()
+                        _energy_start_mj = self._read_energy_counter_mj()
+                        _energy_wall_start = time.perf_counter()
+                        _sampling_wall_start = _energy_wall_start
                     # FIX: Use TE FP8 autocast if recipe is available
                     if self.is_fp8 and getattr(self, 'fp8_recipe', None):
                         import transformer_engine.pytorch as te
@@ -1362,6 +1575,31 @@ class ModelTracer:
 
                     # Sync between runs to ensure clean measurements
                     self._sync_device()
+                    if _is_last:
+                        _sampler.stop()
+                        _sampling_wall_end = time.perf_counter()
+                        # Ground truth: read energy counter at end of trailing window
+                        if _energy_start_mj is not None and _energy_wall_start is not None:
+                            _energy_end_mj = self._read_energy_counter_mj()
+                            _energy_wall_end = time.perf_counter()
+                            if _energy_end_mj is not None:
+                                _dur_s_total = _energy_wall_end - _energy_wall_start
+                                _delta_mj_total = _energy_end_mj - _energy_start_mj
+                                _measurement = _build_inference_energy_measurement(
+                                    _delta_mj_total,
+                                    _dur_s_total,
+                                    _energy_measure_runs,
+                                )
+                                if _measurement is not None:
+                                    self._inference_energy_measurement = _measurement
+                                else:
+                                    print(
+                                        "Warning: NVML energy counter returned zero/invalid delta"
+                                        " — counter may not be supported on this GPU or"
+                                        " the measurement window was too short."
+                                        " energy_balance will be null in power_report.json.",
+                                        file=sys.stderr,
+                                    )
 
                 if self._has_cuda and self.num_gpus == 1:
                     end_event.record()
@@ -1373,6 +1611,15 @@ class ModelTracer:
                     total_time_us = (wall_end - wall_start) * 1e6  # seconds -> µs
 
                 self.torch_measured_inference_time_us = total_time_us / num_runs
+
+        _profile_wall_end = time.perf_counter()
+        self._capture_power_results(
+            sampler=_sampler,
+            profile_start_s=_profile_wall_start,
+            profile_end_s=_profile_wall_end,
+            sampling_start_s=_sampling_wall_start,
+            sampling_end_s=_sampling_wall_end,
+        )
 
         # Store num_runs for downstream analysis
         self.num_profiled_runs = num_runs
@@ -1424,6 +1671,7 @@ class ModelTracer:
             utils.report_gpu_clocks(context="after warmup, before profiling")
 
         # Profiled runs
+        _profile_wall_start = time.perf_counter()
         with torch.no_grad():
             with profile(
                 activities=self._get_profiler_activities(),
@@ -1432,6 +1680,7 @@ class ModelTracer:
                 profile_memory=True,
                 record_shapes=True,
             ) as prof:
+                _sampler = self._make_power_sampler()
                 if self._has_cuda and self.num_gpus == 1:
                     start_event = torch.cuda.Event(enable_timing=True)
                     end_event = torch.cuda.Event(enable_timing=True)
@@ -1440,9 +1689,49 @@ class ModelTracer:
                     self._sync_device()
                     wall_start = time.perf_counter()
 
-                for _ in range(num_runs):
+                _energy_start_mj: Optional[float] = None
+                _energy_wall_start: Optional[float] = None
+                _sampling_wall_start: Optional[float] = None
+                _sampling_wall_end: Optional[float] = None
+                _energy_start_idx, _energy_measure_runs = _resolve_energy_measure_window(
+                    num_runs,
+                    getattr(self.args, "energy_measure_runs", 5),
+                )
+                for run_idx in range(num_runs):
+                    _is_last = (run_idx == num_runs - 1)
+                    _is_energy_start = (run_idx == _energy_start_idx)
+                    if _is_energy_start:
+                        _sampler.start()
+                        self._sync_device()
+                        _energy_start_mj = self._read_energy_counter_mj()
+                        _energy_wall_start = time.perf_counter()
+                        _sampling_wall_start = _energy_wall_start
                     self.model(**self.model_inputs)
                     self._sync_device()
+                    if _is_last:
+                        _sampler.stop()
+                        _sampling_wall_end = time.perf_counter()
+                        if _energy_start_mj is not None and _energy_wall_start is not None:
+                            _energy_end_mj = self._read_energy_counter_mj()
+                            _energy_wall_end = time.perf_counter()
+                            if _energy_end_mj is not None:
+                                _dur_s_total = _energy_wall_end - _energy_wall_start
+                                _delta_mj_total = _energy_end_mj - _energy_start_mj
+                                _measurement = _build_inference_energy_measurement(
+                                    _delta_mj_total,
+                                    _dur_s_total,
+                                    _energy_measure_runs,
+                                )
+                                if _measurement is not None:
+                                    self._inference_energy_measurement = _measurement
+                                else:
+                                    print(
+                                        "Warning: NVML energy counter returned zero/invalid delta"
+                                        " — counter may not be supported on this GPU or"
+                                        " the measurement window was too short."
+                                        " energy_balance will be null in power_report.json.",
+                                        file=sys.stderr,
+                                    )
 
                 if self._has_cuda and self.num_gpus == 1:
                     end_event.record()
@@ -1454,6 +1743,15 @@ class ModelTracer:
                     total_time_us = (wall_end - wall_start) * 1e6  # seconds -> µs
 
                 self.torch_measured_inference_time_us = total_time_us / num_runs
+
+        _profile_wall_end = time.perf_counter()
+        self._capture_power_results(
+            sampler=_sampler,
+            profile_start_s=_profile_wall_start,
+            profile_end_s=_profile_wall_end,
+            sampling_start_s=_sampling_wall_start,
+            sampling_end_s=_sampling_wall_end,
+        )
 
         self.num_profiled_runs = num_runs
         print(f"Mean time per inference: {utils.us_to_ms(self.torch_measured_inference_time_us):.2f} ms")

@@ -339,11 +339,18 @@ def _pick_best_launch(launches: List[Dict[str, Any]]) -> Dict[str, Any]:
     def _dram_reads(launch: Dict[str, Any]) -> float:
         m = launch.get("metrics", {})
         # Try Blackwell name first (CC 12.x+), then pre-Blackwell name.
-        val = m.get("dram__bytes_op_read.sum") or m.get("dram__bytes_read.sum", 0)
-        try:
-            return float(val or 0)
-        except (TypeError, ValueError):
-            return 0.0
+        # Must use explicit None check — on pre-Blackwell GPUs the Blackwell
+        # metric is present in the CSV as the string "n/a", which is truthy
+        # and would stop an `or`-chain before reaching the valid metric.
+        for key in ("dram__bytes_op_read.sum", "dram__bytes_read.sum"):
+            val = m.get(key)
+            if val is None:
+                continue
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                continue  # "n/a" or other non-numeric — try next key
+        return 0.0
 
     # Prefer compute kernels; fall back to all launches if none found.
     compute_launches = [l for l in launches if not _is_overhead(l)]

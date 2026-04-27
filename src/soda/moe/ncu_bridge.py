@@ -240,15 +240,30 @@ def run_ncu_on_profiler_events(
             except (TypeError, ValueError):
                 return 0.0
 
+        def _pick_numeric(m: dict, *keys: str) -> float:
+            """Return the first numerically valid value among keys.
+
+            Uses explicit None check so that "n/a" strings (present in the
+            CSV when a metric doesn't apply to the current GPU generation)
+            are skipped rather than stopping an `or`-chain prematurely.
+            """
+            for key in keys:
+                val = m.get(key)
+                if val is None:
+                    continue
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    continue  # "n/a" or empty — try next key
+            return 0.0
+
         metrics = ncu_result.get("metrics", {})
         # Try Blackwell metric names first (CC 12.x+), fall back to pre-Blackwell.
-        # On Blackwell the old counter names return 'n/a' (a string, not 0).
-        hbm_read = _safe_float(
-            metrics.get("dram__bytes_op_read.sum") or metrics.get("dram__bytes_read.sum")
-        )
-        hbm_write = _safe_float(
-            metrics.get("dram__bytes_op_write.sum") or metrics.get("dram__bytes_write.sum")
-        )
+        # Must use _pick_numeric (not `or`) — on pre-Blackwell GPUs the Blackwell
+        # metric is present as the string "n/a" which is truthy and would stop
+        # an `or`-chain before reaching the valid pre-Blackwell name.
+        hbm_read  = _pick_numeric(metrics, "dram__bytes_op_read.sum",  "dram__bytes_read.sum")
+        hbm_write = _pick_numeric(metrics, "dram__bytes_op_write.sum", "dram__bytes_write.sum")
         l2_bytes = _safe_float(metrics.get("lts__t_bytes.sum", 0.0))
 
         # Compute CTA count from the kernel's grid dimensions (parsed from NCU CSV).

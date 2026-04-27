@@ -760,6 +760,17 @@ def get_args_parser() -> argparse.ArgumentParser:
         help="Number of times to replay each kernel for microbenchmarking.",
     )
     parser.add_argument(
+        "--energy-measure-runs",
+        dest="energy_measure_runs",
+        type=int,
+        default=5,
+        help=(
+            "Number of trailing profiled runs used for NVML energy-counter "
+            "ground-truth averaging (default: 5). "
+            "Set to 1 to match legacy single-run behavior."
+        ),
+    )
+    parser.add_argument(
         "--warmup",
         type=int,
         default=50,
@@ -812,6 +823,37 @@ def get_args_parser() -> argparse.ArgumentParser:
         type=int,
         default=10,
         help="Number of top kernels (by duration) to profile with ncu (default: 10).",
+    )
+    parser.add_argument(
+        "--ncu-all-kernels",
+        dest="ncu_all_kernels",
+        action="store_true",
+        default=False,
+        help=(
+            "Profile all kernels with ncu in --taxbreak mode. Overrides --ncu-top-n. "
+            "Useful when DRAM/L2/compute channels are needed beyond top-duration kernels."
+        ),
+    )
+    parser.add_argument(
+        "--ncu-target-classes",
+        dest="ncu_target_classes",
+        nargs="*",
+        default=None,
+        help=(
+            "Optional duration classes for budgeted NCU coverage in --taxbreak mode. "
+            "Choices: ultra_short short medium long all. "
+            "When set, selects up to --ncu-per-class kernels per requested class."
+        ),
+    )
+    parser.add_argument(
+        "--ncu-per-class",
+        dest="ncu_per_class",
+        type=int,
+        default=5,
+        help=(
+            "Maximum kernels to profile per duration class when --ncu-target-classes is set "
+            "(default: 5)."
+        ),
     )
     parser.add_argument(
         "--verbose",
@@ -921,6 +963,149 @@ def get_args_parser() -> argparse.ArgumentParser:
              "prompts that exceed the limit.",
     )
 
+    parser.add_argument(
+        "--power-sample",
+        dest="power_sample",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable NVML-based GPU power sampling during inference profiling. "
+            "Requires pynvml (pip install pynvml) or nvidia-smi in PATH. "
+            "Reports mean/peak measured power alongside the TDP-based carbon estimate. "
+            "Sampling interval is controlled by --power-sample-interval."
+        ),
+    )
+    parser.add_argument(
+        "--power-sample-interval",
+        dest="power_sample_interval",
+        type=int,
+        default=50,
+        metavar="MS",
+        help=(
+            "GPU power sampling interval in milliseconds when --power-sample is active "
+            "(default: 50). Minimum 10 ms. The pynvml backend honours this interval "
+            "directly; the nvidia-smi fallback enforces a minimum of 200 ms."
+        ),
+    )
+
+    # ── Per-kernel power replay (Stage 2 / --taxbreak) ────────────────────
+    parser.add_argument(
+        "--power-replay",
+        dest="power_replay",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable per-kernel GPU power measurement via isolated tight-loop replay. "
+            "Requires --taxbreak and a kernel database. Each unique kernel is replayed "
+            "in isolation; GPU package power is sampled with NVML and averaged across "
+            "measurement windows. Reports raw_power_w, net_power_w (idle-subtracted), "
+            "thermal_variance_pct, and energy_nj per kernel. "
+            "Requires pynvml (pip install pynvml) or nvidia-smi in PATH."
+        ),
+    )
+    parser.add_argument(
+        "--power-replay-windows",
+        dest="power_replay_windows",
+        type=int,
+        default=3,
+        metavar="N",
+        help=(
+            "Number of measurement windows per kernel during power replay "
+            "(default: 3). More windows improve thermal stability detection "
+            "at the cost of longer runtime."
+        ),
+    )
+    parser.add_argument(
+        "--power-replay-warmup-ms",
+        dest="power_replay_warmup_ms",
+        type=int,
+        default=500,
+        metavar="MS",
+        help=(
+            "Warmup phase duration per kernel in milliseconds (default: 500). "
+            "The kernel runs in a tight loop for this long before NVML sampling "
+            "begins, warming L2 cache and GPU thermal state."
+        ),
+    )
+    parser.add_argument(
+        "--power-replay-target-ms",
+        dest="power_replay_target_ms",
+        type=int,
+        default=500,
+        metavar="MS",
+        help=(
+            "Target duration of each NVML measurement window per kernel in "
+            "milliseconds (default: 300). Longer windows yield more NVML samples "
+            "but increase total runtime."
+        ),
+    )
+    parser.add_argument(
+        "--power-replay-interval",
+        dest="power_replay_interval",
+        type=int,
+        default=50,
+        metavar="MS",
+        help=(
+            "NVML polling interval in milliseconds for per-kernel power replay "
+            "(default: 50). Minimum 10 ms."
+        ),
+    )
+    parser.add_argument(
+        "--power-replay-max-kernels",
+        dest="power_replay_max_kernels",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Cap the number of kernels profiled during power replay "
+            "(default: None = all unique kernels). Useful for time-limited runs."
+        ),
+    )
+    parser.add_argument(
+        "--power-replay-idle-settle-min-ms",
+        dest="power_replay_idle_settle_min_ms",
+        type=int,
+        default=1500,
+        metavar="MS",
+        help=(
+            "Minimum idle-settling time before accepting the baseline "
+            "(default: 1500)."
+        ),
+    )
+    parser.add_argument(
+        "--power-replay-idle-settle-max-ms",
+        dest="power_replay_idle_settle_max_ms",
+        type=int,
+        default=6000,
+        metavar="MS",
+        help=(
+            "Maximum idle-settling time before proceeding with the current baseline "
+            "(default: 6000)."
+        ),
+    )
+    parser.add_argument(
+        "--power-replay-idle-settle-step-ms",
+        dest="power_replay_idle_settle_step_ms",
+        type=int,
+        default=500,
+        metavar="MS",
+        help=(
+            "Step interval used while checking idle baseline convergence "
+            "(default: 500)."
+        ),
+    )
+    parser.add_argument(
+        "--power-replay-idle-std-threshold-pct",
+        dest="power_replay_idle_std_threshold_pct",
+        type=float,
+        default=3.0,
+        metavar="PCT",
+        help=(
+            "Relative std-dev threshold (percent) for accepting idle baseline "
+            "convergence (default: 3.0)."
+        ),
+    )
+
     return parser
 
 def parse_and_validate_args(args=None) -> argparse.Namespace:
@@ -935,6 +1120,53 @@ def parse_and_validate_args(args=None) -> argparse.Namespace:
     )
     if not _no_model_modes and not parsed_args.model:
         parser.error("the following arguments are required: -m/--model")
+
+    if getattr(parsed_args, "ncu_all_kernels", False) and not getattr(parsed_args, "ncu", False):
+        parser.error("--ncu-all-kernels requires --ncu")
+
+    if getattr(parsed_args, "ncu_target_classes", None) and not getattr(parsed_args, "ncu", False):
+        parser.error("--ncu-target-classes requires --ncu")
+
+    if getattr(parsed_args, "ncu_top_n", 10) < 1:
+        parser.error("--ncu-top-n must be >= 1")
+
+    if getattr(parsed_args, "ncu_per_class", 5) < 1:
+        parser.error("--ncu-per-class must be >= 1")
+
+    if getattr(parsed_args, "energy_measure_runs", 5) < 1:
+        parser.error("--energy-measure-runs must be >= 1")
+
+    if getattr(parsed_args, "power_replay_idle_settle_min_ms", 1500) < 0:
+        parser.error("--power-replay-idle-settle-min-ms must be >= 0")
+
+    if getattr(parsed_args, "power_replay_idle_settle_max_ms", 6000) < 1:
+        parser.error("--power-replay-idle-settle-max-ms must be >= 1")
+
+    if (
+        getattr(parsed_args, "power_replay_idle_settle_max_ms", 6000)
+        < getattr(parsed_args, "power_replay_idle_settle_min_ms", 1500)
+    ):
+        parser.error("--power-replay-idle-settle-max-ms must be >= --power-replay-idle-settle-min-ms")
+
+    if getattr(parsed_args, "power_replay_idle_settle_step_ms", 500) < 50:
+        parser.error("--power-replay-idle-settle-step-ms must be >= 50")
+
+    if getattr(parsed_args, "power_replay_idle_std_threshold_pct", 3.0) <= 0.0:
+        parser.error("--power-replay-idle-std-threshold-pct must be > 0")
+
+    target_classes = getattr(parsed_args, "ncu_target_classes", None)
+    if target_classes:
+        valid = {"ultra_short", "short", "medium", "long", "all"}
+        unknown = sorted({str(c).strip() for c in target_classes if str(c).strip() and str(c).strip() not in valid})
+        if unknown:
+            parser.error(
+                "--ncu-target-classes contains invalid value(s): "
+                + ", ".join(unknown)
+                + ". Valid: ultra_short, short, medium, long, all"
+            )
+
+    if getattr(parsed_args, "ncu_all_kernels", False) and target_classes:
+        parser.error("--ncu-all-kernels cannot be combined with --ncu-target-classes")
 
     if parsed_args.device == "cpu" and parsed_args.precision in ["float16", "float8_e4m3fn", "float8_e5m2", "bfloat16"]:
         print(f"Warning: {parsed_args.precision} is not supported on CPU. Forcing float32.")

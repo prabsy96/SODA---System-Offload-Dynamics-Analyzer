@@ -15,7 +15,7 @@ import json
 import statistics
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from soda.common import print_utils
 
@@ -167,6 +167,8 @@ def generate_enhanced_report(
     ncu_results: Dict[str, Dict[str, Any]],
     output_dir: Path,
     verbose: bool = False,
+    power_replay_results: Optional[Dict[str, Dict[str, Any]]] = None,
+    power_idle_baseline_w: float = 0.0,
 ) -> Path:
     """Build and write the enhanced TaxBreak report.
 
@@ -340,6 +342,9 @@ def generate_enhanced_report(
         ncu_entry = ncu_results.get(kid)
         ncu_data = _remap_ncu_metrics(ncu_entry["metrics"]) if ncu_entry else None
 
+        # power replay (optional)
+        power_data = (power_replay_results or {}).get(kid)
+
         per_kernel.append({
             "id": kid,
             "rank": entry["rank"],
@@ -362,6 +367,7 @@ def generate_enhanced_report(
             "i_lib_runtime": i_lib,
             "i_lib_source": i_lib_source,
             "ncu": ncu_data,
+            "power_replay": power_data,
             "replay_anomaly_reasons": replay_anomaly_reasons,
             # Temp field for roofline FLOPs derivation (stripped before JSON)
             "_aten_op_full": entry.get("aten_op", {}),
@@ -465,6 +471,11 @@ def generate_enhanced_report(
             "total_unique_kernels": len(kernels),
             "kernels_with_nsys": len(nsys_results),
             "kernels_with_ncu": len(ncu_results),
+            "kernels_with_power_replay": len(power_replay_results) if power_replay_results else 0,
+            "total_measured_energy_uj": round(
+                sum(r.get("energy_uj", 0.0) for r in (power_replay_results or {}).values()), 2
+            ),
+            "idle_baseline_w": round(power_idle_baseline_w, 2),
             "total_invocations": total_invocations,
             # Library-mediated (I_lib=1): cuBLAS/cuBLASLt/cutlass kernels
             "library_mediated_invocations": library_mediated_invocations,
@@ -517,6 +528,35 @@ def generate_enhanced_report(
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2)
 
+    # --- standalone power report (when power replay was run) ---
+    if power_replay_results:
+        # Ground truth inference power from Stage 1 energy counter measurement
+        ground_truth = metadata.get("inference_energy", {})
+        stage1_power_profile = metadata.get("power_profile", {})
+
+        # Wall-clock inference time from Stage 1. Provides T_total for energy_balance
+        # time decomposition even when NVML energy counter is unavailable.
+        inference_time_ms = metadata.get("inference_time_ms", 0.0)
+
+        # P_active_idle from null-kernel tight-loop measurement (Step 4).
+        # Stored in floor dict by pipeline.py when --power-replay is active.
+        active_idle_power_w = floor.get("active_idle_power_w", 0.0)
+
+        _, inference_power = _write_power_report(
+            power_replay_results=power_replay_results,
+            idle_baseline_w=power_idle_baseline_w,
+            per_kernel=per_kernel,
+            metadata=metadata,
+            output_dir=output_dir,
+            ground_truth=ground_truth,
+            inference_time_ms=inference_time_ms,
+            active_idle_power_w=active_idle_power_w,
+            stage1_power_profile=stage1_power_profile,
+        )
+        # Surface reconstructed inference power into the main report so that
+        # render_taxbreak_analysis can display it without reading a second file.
+        report["summary"]["inference_power"] = inference_power
+
     # --- layperson summary (always shown) ---
     from soda.common.summary_report import render_taxbreak_analysis
     render_taxbreak_analysis(report, _make_verbose_args(verbose), output_dir)
@@ -528,6 +568,854 @@ def generate_enhanced_report(
 
     print(f"\nSaved enhanced TaxBreak report to {report_path}")
     return report_path
+
+
+# ------------------------------------------------------------------
+# Power report
+# ------------------------------------------------------------------
+
+def _write_power_report(
+    power_replay_results: Dict[str, Dict[str, Any]],
+    idle_baseline_w: float,
+    per_kernel: List[Dict[str, Any]],
+    metadata: Dict[str, Any],
+    output_dir: Path,
+    ground_truth: Optional[Dict[str, Any]] = None,
+    inference_time_ms: float = 0.0,
+    active_idle_power_w: float = 0.0,
+    stage1_power_profile: Optional[Dict[str, Any]] = None,
+    stage1_trace_file: Optional[Path] = None,
+) -> "tuple[Path, Dict[str, Any]]":
+    """Write power_report.json and print a console power summary.
+
+    Includes per-kernel isolated power measurements, a reconstructed
+    full-inference power estimate, and an energy balance decomposition.
+
+    The kernel-only reconstruction (P_kernel_active_w) assigns idle_baseline_w
+    to all non-kernel time — a significant underestimate for host-bound workloads.
+    The energy_balance section derives the true overhead power from ground truth:
+
+      E_total = E_kernel + E_overhead          (energy conservation)
+      P_overhead = E_overhead / T_overhead     (derived, exact)
+
+    If active_idle_power_w is provided (from null-kernel tight-loop measurement),
+    a duty-cycle corrected prediction is also computed:
+
+      P_predicted = kernel_fraction × P_kernel + (1 - kernel_fraction) × P_active_idle
+
+    Returns the path to the written file.
+    """
+
+    def _merge_intervals(intervals: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+        if not intervals:
+            return []
+        sorted_intervals = sorted(intervals, key=lambda x: x[0])
+        merged: List[Tuple[float, float]] = []
+        cur_s, cur_e = sorted_intervals[0]
+        for s, e in sorted_intervals[1:]:
+            if s <= cur_e:
+                cur_e = max(cur_e, e)
+            else:
+                merged.append((cur_s, cur_e))
+                cur_s, cur_e = s, e
+        merged.append((cur_s, cur_e))
+        return merged
+
+    def _interval_overlap(s0: float, e0: float, s1: float, e1: float) -> float:
+        return max(0.0, min(e0, e1) - max(s0, s1))
+
+    def _build_observed_inter_kernel_gap(
+        power_profile: Dict[str, Any],
+        trace_file: Path,
+        num_gpus: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Estimate inter-kernel gap power from Stage-1 power samples + trace."""
+        if num_gpus != 1:
+            return {
+                "available": False,
+                "reason": "multi_gpu_not_supported",
+            }
+
+        samples = power_profile.get("samples_ms")
+        if not isinstance(samples, dict) or not samples:
+            return {
+                "available": False,
+                "reason": "missing_stage1_samples_ms",
+            }
+
+        gpu0_samples = samples.get("0")
+        if not isinstance(gpu0_samples, list) or len(gpu0_samples) < 2:
+            return {
+                "available": False,
+                "reason": "insufficient_stage1_samples",
+            }
+
+        profile_window = power_profile.get("profile_window_s")
+        sampling_window = power_profile.get("sampling_window_s")
+        if not isinstance(profile_window, dict) or not isinstance(sampling_window, dict):
+            return {
+                "available": False,
+                "reason": "missing_stage1_timing_windows",
+            }
+
+        try:
+            p_start = float(profile_window["start"])
+            p_end = float(profile_window["end"])
+            s_start = float(sampling_window["start"])
+            s_end = float(sampling_window["end"])
+        except Exception:
+            return {
+                "available": False,
+                "reason": "invalid_stage1_timing_windows",
+            }
+
+        if p_end <= p_start or s_end <= s_start:
+            return {
+                "available": False,
+                "reason": "non_positive_stage1_window",
+            }
+
+        if not trace_file.exists():
+            return {
+                "available": False,
+                "reason": "trace_file_missing",
+            }
+
+        try:
+            trace = json.loads(trace_file.read_text())
+        except Exception:
+            return {
+                "available": False,
+                "reason": "trace_read_failed",
+            }
+
+        from soda.common import utils as _utils
+
+        events = _utils.collect_events(trace)
+        kernels = events.get("gpu", {}).get("kernels", [])
+        if not kernels:
+            return {
+                "available": False,
+                "reason": "no_kernel_events_in_trace",
+            }
+
+        k_ts_min = min(float(k.get("ts", 0.0)) for k in kernels)
+        k_ts_max = max(float(k.get("ts", 0.0)) + float(k.get("dur", 0.0)) for k in kernels)
+        if k_ts_max <= k_ts_min:
+            return {
+                "available": False,
+                "reason": "degenerate_kernel_trace_span",
+            }
+
+        trace_span_us = k_ts_max - k_ts_min
+        profile_span_s = p_end - p_start
+
+        # Map kernel-active trace intervals into the Stage-1 monotonic clock domain.
+        active_intervals_s: List[Tuple[float, float]] = []
+        for k in kernels:
+            ts_us = float(k.get("ts", 0.0))
+            te_us = ts_us + float(k.get("dur", 0.0))
+            rs = (ts_us - k_ts_min) / trace_span_us
+            re = (te_us - k_ts_min) / trace_span_us
+            ks = p_start + rs * profile_span_s
+            ke = p_start + re * profile_span_s
+            cs = max(ks, s_start)
+            ce = min(ke, s_end)
+            if ce > cs:
+                active_intervals_s.append((cs, ce))
+
+        merged_active = _merge_intervals(active_intervals_s)
+        if not merged_active:
+            return {
+                "available": False,
+                "reason": "no_overlap_with_sampling_window",
+            }
+
+        samples_s: List[Tuple[float, float]] = []
+        for pair in gpu0_samples:
+            if not isinstance(pair, list) or len(pair) != 2:
+                continue
+            try:
+                t_s = float(pair[0]) / 1000.0
+                w = float(pair[1])
+            except Exception:
+                continue
+            if s_start <= t_s <= s_end:
+                samples_s.append((t_s, w))
+        samples_s.sort(key=lambda x: x[0])
+
+        if len(samples_s) < 2:
+            return {
+                "available": False,
+                "reason": "insufficient_samples_in_sampling_window",
+            }
+
+        active_energy_j = 0.0
+        gap_energy_j = 0.0
+        active_time_s = 0.0
+        gap_time_s = 0.0
+
+        # Piecewise-constant integration: interval [t_i, t_{i+1}) uses sample_i power.
+        for idx in range(len(samples_s) - 1):
+            t0, watts = samples_s[idx]
+            t1, _ = samples_s[idx + 1]
+            if t1 <= t0:
+                continue
+
+            seg_s = max(t0, s_start)
+            seg_e = min(t1, s_end)
+            if seg_e <= seg_s:
+                continue
+
+            active_dt = 0.0
+            for a0, a1 in merged_active:
+                if a0 >= seg_e:
+                    break
+                if a1 <= seg_s:
+                    continue
+                active_dt += _interval_overlap(seg_s, seg_e, a0, a1)
+
+            seg_dt = seg_e - seg_s
+            active_dt = min(active_dt, seg_dt)
+            gap_dt = max(0.0, seg_dt - active_dt)
+
+            active_energy_j += watts * active_dt
+            gap_energy_j += watts * gap_dt
+            active_time_s += active_dt
+            gap_time_s += gap_dt
+
+        if gap_time_s <= 0.0:
+            return {
+                "available": False,
+                "reason": "no_gap_time_after_intersection",
+            }
+
+        out: Dict[str, Any] = {
+            "available": True,
+            "P_inter_kernel_observed_w": gap_energy_j / gap_time_s,
+            "gap_time_s": gap_time_s,
+            "active_time_s": active_time_s,
+            "sample_intervals_used": len(samples_s) - 1,
+            "kernel_active_coverage_pct": (
+                (active_time_s / (active_time_s + gap_time_s)) * 100.0
+                if (active_time_s + gap_time_s) > 0
+                else 0.0
+            ),
+        }
+        if active_time_s > 0.0:
+            out["P_kernel_observed_w"] = active_energy_j / active_time_s
+        return out
+
+    # Build a lookup from kernel_id → per_kernel entry for name/freq/duration
+    pk_by_id = {k["id"]: k for k in per_kernel}
+
+    # Build per-kernel power rows (only kernels that have power data)
+    rows: List[Dict[str, Any]] = []
+    total_energy_uj = 0.0          # Σ energy_uj × freq (net, kernel-active only)
+    reliable_count = 0
+    energy_counter_count = 0
+    dual_consensus_count = 0
+    unknown_method_count = 0
+    kernels_retried = 0
+    kernels_with_ncu = 0
+    kernels_with_dram = 0
+    kernels_with_l2 = 0
+    kernels_with_compute = 0
+    known_methods = {"nvml_polling", "energy_counter", "dual_consensus"}
+
+    # Accumulators for reconstructed inference power
+    # raw = total GPU power per kernel (includes its own idle baseline);
+    # net = raw minus per-kernel idle (above-idle contribution only).
+    # Use raw for energy totals: avoids the per-kernel idle variation problem
+    # where a single global idle_baseline_w ≠ per-kernel idle_power_w values.
+    weighted_raw_power_sum = 0.0   # Σ raw_w × dur_us × freq  (W·µs = µJ)
+    weighted_net_power_sum = 0.0   # Σ net_w × dur_us × freq  (W·µs = µJ, above-idle only)
+    total_kernel_time_us = 0.0     # Σ dur_us × freq           (µs)
+    total_launches = 0             # Σ freq — for per-launch overhead attribution (Fix B)
+
+    for kid, pr in power_replay_results.items():
+        pk = pk_by_id.get(kid, {})
+        freq = pk.get("frequency", 1)
+        dur_us = pk.get("kernel_duration_us", 0.0)
+        net_w = pr.get("net_power_w", 0.0)
+        energy_uj = pr.get("energy_uj", 0.0)
+        is_reliable = pr.get("is_reliable", False)
+        method = pr.get("measurement_method", "unknown")
+        if method not in known_methods:
+            unknown_method_count += 1
+            method = "unknown"
+        ncu_data = pk.get("ncu") or {}
+        retry_attempts = int(pr.get("retry_attempts", 0) or 0)
+
+        raw_w = pr.get("raw_power_w", 0.0)
+        total_energy_uj += energy_uj * freq
+        weighted_raw_power_sum += raw_w * dur_us * freq
+        weighted_net_power_sum += net_w * dur_us * freq
+        total_kernel_time_us += dur_us * freq
+        total_launches += freq
+
+        if is_reliable:
+            reliable_count += 1
+        if method in ("energy_counter", "dual_consensus"):
+            energy_counter_count += 1
+        if method == "dual_consensus":
+            dual_consensus_count += 1
+        if retry_attempts > 0:
+            kernels_retried += 1
+        if ncu_data:
+            kernels_with_ncu += 1
+            if ncu_data.get("dram_throughput_bytes_per_sec") is not None or (
+                ncu_data.get("dram_bytes_read") is not None
+                and ncu_data.get("dram_bytes_write") is not None
+            ):
+                kernels_with_dram += 1
+            if ncu_data.get("l2_throughput_bytes_per_sec") is not None or ncu_data.get("l2_hit_rate_pct") is not None:
+                kernels_with_l2 += 1
+            if ncu_data.get("compute_throughput_pct") is not None:
+                kernels_with_compute += 1
+
+        rows.append({
+            "kernel_id": kid,
+            "kernel_name": pk.get("kernel_name", ""),
+            "aten_op": pk.get("aten_op", ""),
+            "frequency": freq,
+            "avg_duration_us": round(dur_us, 3),
+            "raw_power_w": round(pr.get("raw_power_w", 0.0), 3),
+            "idle_power_w": round(pr.get("idle_power_w", idle_baseline_w), 3),
+            "net_power_w": round(net_w, 3),
+            "std_power_w": round(pr.get("std_power_w", 0.0), 3),
+            "thermal_variance_pct": round(pr.get("thermal_variance_pct", 0.0), 2),
+            "energy_uj": round(energy_uj, 2),
+            "net_energy_uj_total": round(energy_uj * freq, 2),
+            "raw_energy_uj_total": round(raw_w * dur_us * freq, 2),
+            "is_reliable": is_reliable,
+            "measurement_method": method,
+            "num_windows": pr.get("num_windows", 0),
+            "initial_windows": pr.get("initial_windows"),
+            "final_windows": pr.get("final_windows"),
+            "retry_attempts": retry_attempts,
+            "consensus_windows_checked": pr.get("consensus_windows_checked"),
+            "consensus_windows_agree": pr.get("consensus_windows_agree"),
+            "consensus_windows_excluded": pr.get("consensus_windows_excluded"),
+            "consensus_tolerance_pct": pr.get("consensus_tolerance_pct"),
+            "ncu": ncu_data if ncu_data else None,
+        })
+
+    rows.sort(key=lambda r: r["net_power_w"], reverse=True)
+    n_kernels = len(rows)
+
+    # Kernel-active energy = Σ(raw_power_w × dur_us × freq) across all kernels.
+    # raw_power_w is the total GPU power measured per kernel (includes each kernel's
+    # own idle baseline, which varies due to thermal drift during the replay session).
+    # Using raw directly avoids the error from applying a single global idle_baseline_w
+    # to all kernels when per-kernel idle values differ.
+    kernel_active_energy_uj = weighted_raw_power_sum          # W × µs = µJ (total, incl. idle)
+    kernel_net_energy_uj = weighted_net_power_sum             # W × µs = µJ (above-idle only)
+
+    # Duration-weighted average power during kernel-active time (from raw measurements)
+    if total_kernel_time_us > 0:
+        reconstructed_inference_power_w = weighted_raw_power_sum / total_kernel_time_us
+        net_inference_power_w = weighted_net_power_sum / total_kernel_time_us
+    else:
+        reconstructed_inference_power_w = 0.0
+        net_inference_power_w = 0.0
+
+    # total_inference_energy_uj = E_kernel (raw, measured) — what flows into energy_balance.
+    # This is the correct quantity to subtract from E_NVML to derive E_overhead.
+    total_inference_energy_uj = kernel_active_energy_uj
+
+    # --- Energy balance decomposition ---
+    # Two tiers, in order of preference:
+    #   Tier 1 (energy_counter): NVML hardware counter → E_overhead exact via conservation
+    #   Tier 2 (time_decomposition_only): inference_time_ms from Stage 1 → timing only,
+    #                                     E_overhead absent (no energy ground truth)
+    # No estimation, no fallbacks. Each tier is clearly labeled by "method".
+    energy_balance: Optional[Dict[str, Any]] = None
+
+    if ground_truth and ground_truth.get("energy_mj", 0) > 0 and ground_truth.get("duration_s"):
+        # Tier 1: full ground truth — NVML energy counter available
+        # E_total = E_kernel + E_overhead  (energy conservation, exact)
+        # P_overhead = E_overhead / T_overhead  (derived, not an estimate)
+        E_total_uj = ground_truth["energy_mj"] * 1_000.0       # mJ → µJ
+        E_overhead_uj = E_total_uj - total_inference_energy_uj
+        T_total_us = ground_truth["duration_s"] * 1_000_000.0
+        T_overhead_us = max(0.0, T_total_us - total_kernel_time_us)
+        # µJ / µs = W (units cancel: µJ/µs = (1e-6 J)/(1e-6 s) = J/s = W)
+        P_overhead_derived_w = E_overhead_uj / T_overhead_us if T_overhead_us > 0 else 0.0
+        kernel_fraction = total_kernel_time_us / T_total_us if T_total_us > 0 else 0.0
+
+        energy_balance = {
+            "method": "energy_counter",
+            "E_total_uj": round(E_total_uj, 2),
+            "E_kernel_uj": round(total_inference_energy_uj, 2),
+            "E_overhead_uj": round(E_overhead_uj, 2),
+            "T_total_us": round(T_total_us, 1),
+            "T_kernel_active_us": round(total_kernel_time_us, 1),
+            "T_overhead_us": round(T_overhead_us, 1),
+            "P_kernel_active_w": round(reconstructed_inference_power_w, 3),
+            "P_overhead_derived_w": round(P_overhead_derived_w, 3),
+            "kernel_fraction": round(kernel_fraction, 6),
+        }
+
+        # Stage-1 macro measured system power from NVML energy counter.
+        # This is a measurement identity, not a predictive reconstruction.
+        P_measured_macro_w = (E_total_uj / T_total_us) if T_total_us > 0 else 0.0
+        energy_balance["P_measured_macro_w"] = round(P_measured_macro_w, 3)
+        energy_balance["workload_regime"] = (
+            "compute_bound" if kernel_fraction >= 0.80 else "host_bound"
+        )
+        energy_balance["system_reconstruction_available"] = False
+
+        gap_power_candidate = None
+        gap_power_source = None
+
+        trace_file = stage1_trace_file or (output_dir.parent / "trace.json")
+        observed_gap = _build_observed_inter_kernel_gap(
+            power_profile=stage1_power_profile or {},
+            trace_file=trace_file,
+            num_gpus=int(metadata.get("num_gpus", 1) or 1),
+        )
+        if observed_gap and observed_gap.get("available"):
+            gap_power_candidate = float(observed_gap["P_inter_kernel_observed_w"])
+            gap_power_source = "observed_from_stage1_power_samples"
+            energy_balance["P_inter_kernel_observed_w"] = round(gap_power_candidate, 3)
+            if "P_kernel_observed_w" in observed_gap:
+                energy_balance["P_kernel_observed_w"] = round(
+                    float(observed_gap["P_kernel_observed_w"]), 3
+                )
+            energy_balance["inter_kernel_observed_meta"] = {
+                "gap_time_s": round(float(observed_gap.get("gap_time_s", 0.0)), 6),
+                "active_time_s": round(float(observed_gap.get("active_time_s", 0.0)), 6),
+                "sample_intervals_used": int(observed_gap.get("sample_intervals_used", 0)),
+                "kernel_active_coverage_pct": round(
+                    float(observed_gap.get("kernel_active_coverage_pct", 0.0)), 2
+                ),
+            }
+        else:
+            energy_balance["inter_kernel_observed_unavailable_reason"] = (
+                (observed_gap or {}).get("reason", "stage1_power_profile_unavailable")
+            )
+
+        # Duty-cycle corrected prediction using independently measured P_active_idle.
+        # Note: substituting P_overhead_derived here would tautologically yield P_measured.
+        # P_active_idle (null-kernel tight-loop) is an independent calibration point.
+        if gap_power_candidate is None and active_idle_power_w > 0:
+            gap_power_candidate = active_idle_power_w
+            gap_power_source = "null_kernel_active_idle"
+            energy_balance["P_active_idle_measured_w"] = round(active_idle_power_w, 3)
+
+        if gap_power_candidate is not None:
+            P_duty_cycle_w = (
+                kernel_fraction * reconstructed_inference_power_w
+                + (1.0 - kernel_fraction) * gap_power_candidate
+            )
+            energy_balance["P_inter_kernel_gap_w"] = round(gap_power_candidate, 3)
+            energy_balance["inter_kernel_gap_source"] = gap_power_source
+            energy_balance["P_duty_cycle_predicted_w"] = round(P_duty_cycle_w, 3)
+
+            # --- Predictive energy estimator (Fix B) ---
+            # E_predicted = kernel_active_energy + P_gap × T_overhead
+            #             ≡ P_duty_cycle × T_total  (algebraically identical)
+            # Per-launch attribution: overhead energy uniformly distributed across
+            # total kernel launches (one dispatch gap per launch on avg).
+            E_gap_predicted_uj = gap_power_candidate * T_overhead_us  # W × µs = µJ
+            E_predicted_total_uj = total_inference_energy_uj + E_gap_predicted_uj
+            overhead_energy_per_launch_uj = (
+                E_gap_predicted_uj / total_launches if total_launches > 0 else 0.0
+            )
+            overhead_time_per_launch_us = (
+                T_overhead_us / total_launches if total_launches > 0 else 0.0
+            )
+            energy_balance["E_gap_predicted_uj"] = round(E_gap_predicted_uj, 2)
+            energy_balance["E_predicted_total_uj"] = round(E_predicted_total_uj, 2)
+            energy_balance["overhead_energy_per_launch_uj"] = round(overhead_energy_per_launch_uj, 4)
+            energy_balance["overhead_time_per_launch_us"] = round(overhead_time_per_launch_us, 4)
+            energy_balance["total_launches"] = total_launches
+            if E_total_uj > 0:
+                energy_balance["predicted_energy_error_pct"] = round(
+                    (E_predicted_total_uj - E_total_uj) / E_total_uj * 100.0, 2
+                )
+
+            # Always surface predictive reconstruction for sanity checking,
+            # even in host-bound workloads where macro measured power remains authoritative.
+            P_system_recon_w = P_duty_cycle_w
+            recon_method = "duty_cycle_prediction"
+            energy_balance["P_system_reconstructed_w"] = round(P_system_recon_w, 3)
+            energy_balance["system_reconstructed_method"] = recon_method
+            energy_balance["system_reconstruction_available"] = True
+
+            if kernel_fraction < 0.80:
+                energy_balance["P_host_bound_measured_w"] = round(P_measured_macro_w, 3)
+                energy_balance["host_bound_power_method"] = "macro_energy_balance"
+
+            if ground_truth.get("power_w") and ground_truth["power_w"] > 0:
+                energy_balance["duty_cycle_prediction_error_pct"] = round(
+                    (P_duty_cycle_w - ground_truth["power_w"])
+                    / ground_truth["power_w"] * 100.0, 2
+                )
+                energy_balance["system_reconstruction_error_pct"] = round(
+                    (P_system_recon_w - ground_truth["power_w"])
+                    / ground_truth["power_w"] * 100.0, 2
+                )
+        else:
+            energy_balance["system_reconstruction_unavailable_reason"] = (
+                "missing_inter_kernel_gap_power"
+            )
+
+    elif inference_time_ms > 0:
+        # Tier 2: timing ground truth only — inference_time_ms from Stage 1 kernel DB.
+        # E_overhead cannot be computed without NVML energy counter.
+        T_total_us = inference_time_ms * 1000.0
+        T_overhead_us = max(0.0, T_total_us - total_kernel_time_us)
+        kernel_fraction = total_kernel_time_us / T_total_us if T_total_us > 0 else 0.0
+        energy_balance = {
+            "method": "time_decomposition_only",
+            "note": (
+                "NVML energy counter unavailable — E_overhead cannot be computed. "
+                "Re-run Stage 1 with --power-sample to capture energy_mj ground truth."
+            ),
+            "T_total_us": round(T_total_us, 1),
+            "T_kernel_active_us": round(total_kernel_time_us, 1),
+            "T_overhead_us": round(T_overhead_us, 1),
+            "kernel_fraction": round(kernel_fraction, 6),
+            "E_kernel_uj": round(total_inference_energy_uj, 2),
+        }
+
+    # --- Validation: compare reconstructed power against ground truth ---
+    validation: Optional[Dict[str, Any]] = None
+    measured_power_w: Optional[float] = None
+    if ground_truth and ground_truth.get("power_w") and ground_truth["power_w"] > 0:
+        measured_power_w = ground_truth["power_w"]
+        error_w = reconstructed_inference_power_w - measured_power_w
+        error_pct = (error_w / measured_power_w * 100.0) if measured_power_w > 0 else 0.0
+        validation = {
+            "measured_inference_power_w": round(measured_power_w, 3),
+            "measured_energy_mj": ground_truth.get("energy_mj"),
+            "measured_duration_s": ground_truth.get("duration_s"),
+            "measured_method": ground_truth.get("method", "unknown"),
+            "reconstructed_inference_power_w": round(reconstructed_inference_power_w, 3),
+            "error_w": round(error_w, 3),
+            "error_pct": round(error_pct, 2),
+        }
+
+    # --- Build ATen op → kernels dispatch map ---
+    # Groups all kernels by their parent ATen op, with per-kernel power/energy data.
+    # One ATen op may dispatch multiple kernel variants (different grid/block configs).
+    #
+    # Energy accounting uses raw_power_w × dur_us × freq (W·µs = µJ) — the same formula
+    # as kernel_active_energy_uj in inference_power — so that:
+    #   Σ(op.total_raw_energy_uj across all ops) == kernel_active_energy_uj
+    # energy_uj (net, above-idle) is also stored per-kernel for informational purposes.
+    op_kernel_map: Dict[str, Any] = {}
+    for pk in per_kernel:
+        op_name = pk.get("aten_op", "") or "unknown"
+        kid = pk.get("id", "")
+        dur_us = pk.get("kernel_duration_us", 0.0)
+        freq = pk.get("frequency", 1)
+        # Prefer per-kernel embedded replay data; fall back to the primary replay map
+        # so op-level totals remain consistent even if per_kernel lacks power_replay.
+        pr = pk.get("power_replay") or power_replay_results.get(kid) or {}
+        # raw energy is consistent with kernel_active_energy_uj in inference_power
+        raw_energy_uj_k = pr.get("raw_power_w", 0.0) * dur_us * freq if pr else 0.0
+        net_energy_uj_k = pr.get("energy_uj", 0.0) * freq if pr else 0.0
+
+        if op_name not in op_kernel_map:
+            op_kernel_map[op_name] = {
+                "aten_op": op_name,
+                "total_raw_energy_uj": 0.0,   # Σ(raw_power_w × dur × freq) — matches kernel_active_energy_uj
+                "total_net_energy_uj": 0.0,   # Σ(net_power_w × dur × freq) — above-idle only
+                "total_duration_us": 0.0,
+                "kernels": [],
+            }
+
+        op_kernel_map[op_name]["total_raw_energy_uj"] += raw_energy_uj_k
+        op_kernel_map[op_name]["total_net_energy_uj"] += net_energy_uj_k
+        op_kernel_map[op_name]["total_duration_us"] += dur_us * freq
+        op_kernel_map[op_name]["kernels"].append({
+            "kernel_id": kid,
+            "kernel_name": pk.get("kernel_name", ""),
+            "frequency": freq,
+            "avg_duration_us": round(dur_us, 3),
+            "raw_power_w": round(pr.get("raw_power_w", 0.0), 3) if pr else None,
+            "net_power_w": round(pr.get("net_power_w", 0.0), 3) if pr else None,
+            # energy_uj: net, per single invocation (net_power_w × avg_dur_us)
+            "energy_uj": round(pr.get("energy_uj", 0.0), 2) if pr else None,
+            # raw_energy_uj_total: raw × dur × freq — sums consistently with kernel_active_energy_uj
+            "raw_energy_uj_total": round(raw_energy_uj_k, 2),
+            "is_reliable": pr.get("is_reliable") if pr else None,
+        })
+
+    # Sort ops by total raw energy descending; round accumulated totals
+    op_kernel_list = sorted(
+        op_kernel_map.values(),
+        key=lambda x: x["total_raw_energy_uj"],
+        reverse=True,
+    )
+    for entry in op_kernel_list:
+        entry["total_raw_energy_uj"] = round(entry["total_raw_energy_uj"], 2)
+        entry["total_net_energy_uj"] = round(entry["total_net_energy_uj"], 2)
+        entry["total_duration_us"] = round(entry["total_duration_us"], 1)
+        # Sort kernels within each op by raw energy descending
+        entry["kernels"].sort(key=lambda k: k["raw_energy_uj_total"], reverse=True)
+
+    # --- Fix B: per-launch overhead attribution ---
+    # When the predictive estimator is available (gap power + NVML ground truth),
+    # distribute E_overhead across all kernel launches uniformly (one dispatch gap
+    # per launch on average). This makes per-kernel energy aggregates sum to
+    # E_predicted_total_uj (≈ E_NVML_total) rather than kernel-active-only.
+    oepl = None
+    otpl = None
+    if isinstance(energy_balance, dict):
+        oepl = energy_balance.get("overhead_energy_per_launch_uj")
+        otpl = energy_balance.get("overhead_time_per_launch_us")
+    total_attributed_energy_uj = 0.0
+    if oepl is not None and otpl is not None:
+        for r in rows:
+            freq = r["frequency"]
+            dur_us = r["avg_duration_us"]
+            attributed_overhead = oepl * freq
+            r["attributed_overhead_energy_uj"] = round(attributed_overhead, 2)
+            r["attributed_energy_uj_total"] = round(
+                r["raw_energy_uj_total"] + attributed_overhead, 2
+            )
+            r["attributed_energy_per_inv_uj"] = round(
+                (r["raw_energy_uj_total"] + attributed_overhead) / freq if freq > 0 else 0.0,
+                4,
+            )
+            total_time_us = (dur_us + otpl) * freq
+            r["effective_power_w"] = round(
+                r["attributed_energy_uj_total"] / total_time_us, 3
+            ) if total_time_us > 0 else 0.0
+            total_attributed_energy_uj += r["attributed_energy_uj_total"]
+
+        # Propagate into op_kernel_map: per-kernel attribution + op rollups
+        for entry in op_kernel_list:
+            op_total_attrib = 0.0
+            op_total_overhead = 0.0
+            for k in entry["kernels"]:
+                freq = k["frequency"]
+                dur_us = k["avg_duration_us"]
+                attrib_oh = oepl * freq
+                attrib_total = k["raw_energy_uj_total"] + attrib_oh
+                k["attributed_overhead_energy_uj"] = round(attrib_oh, 2)
+                k["attributed_energy_uj_total"] = round(attrib_total, 2)
+                total_time_us = (dur_us + otpl) * freq
+                k["effective_power_w"] = round(
+                    attrib_total / total_time_us, 3
+                ) if total_time_us > 0 else 0.0
+                op_total_attrib += attrib_total
+                op_total_overhead += attrib_oh
+            entry["total_attributed_energy_uj"] = round(op_total_attrib, 2)
+            entry["total_attributed_overhead_energy_uj"] = round(op_total_overhead, 2)
+
+        energy_balance["total_attributed_energy_uj"] = round(total_attributed_energy_uj, 2)
+        # Reconciliation: Σ attributed (rows) ≡ E_predicted_total_uj by construction.
+        # Report residual for sanity (should be ~0 modulo rounding).
+        E_pred = energy_balance.get("E_predicted_total_uj", 0.0)
+        energy_balance["attribution_reconciliation_residual_uj"] = round(
+            total_attributed_energy_uj - E_pred, 4
+        )
+
+    power_report = {
+        "version": "1.1",
+        "timestamp": datetime.now().isoformat(),
+        "metadata": {
+            "model": metadata.get("model", "unknown"),
+            "gpu_name": metadata.get("gpu_name", "unknown"),
+        },
+        "inference_power": {
+            # Duration-weighted average raw GPU power during kernel-active time.
+            # = Σ(raw_power_w × dur × freq) / Σ(dur × freq) — uses per-kernel raw
+            # (not global idle_baseline_w) to avoid thermal-drift artifacts.
+            "reconstructed_inference_power_w": round(reconstructed_inference_power_w, 3),
+            "net_kernel_power_w": round(net_inference_power_w, 3),
+            "idle_baseline_w": round(idle_baseline_w, 3),
+            # Energy per inference (kernel-active portion only, excludes host-overhead gaps)
+            # E_kernel = Σ(raw_power_w × dur_us × freq) — correct quantity for energy balance.
+            "kernel_active_time_us": round(total_kernel_time_us, 1),
+            "kernel_active_energy_uj": round(kernel_active_energy_uj, 2),
+            "kernel_net_energy_uj": round(kernel_net_energy_uj, 2),
+            "total_inference_energy_uj": round(total_inference_energy_uj, 2),
+            # Predictive estimator output (present only when gap power + NVML
+            # ground truth available). Mirrors energy_balance fields for consumers
+            # that read inference_power directly.
+            "predicted_inference_energy_uj": (
+                energy_balance.get("E_predicted_total_uj")
+                if isinstance(energy_balance, dict) else None
+            ),
+            "predicted_inference_power_w": (
+                energy_balance.get("P_duty_cycle_predicted_w")
+                if isinstance(energy_balance, dict) else None
+            ),
+            "predicted_energy_error_pct": (
+                energy_balance.get("predicted_energy_error_pct")
+                if isinstance(energy_balance, dict) else None
+            ),
+            "note": (
+                "kernel_active_energy_uj = Σ(raw_power_w × dur_us × freq) — total GPU "
+                "energy during kernel-active time only (excludes host-overhead). "
+                "E_overhead = E_NVML_total − kernel_active_energy_uj (see energy_balance). "
+                "predicted_inference_energy_uj = kernel_active_energy_uj + P_gap × T_overhead "
+                "(predictive estimator; closes the loop to E_NVML via P_gap calibration)."
+            ),
+        },
+        "energy_balance": energy_balance,
+        "validation": validation,
+        "per_kernel_summary": {
+            "kernels_profiled": n_kernels,
+            "kernels_reliable": reliable_count,
+            "kernels_energy_counter": energy_counter_count,
+            "kernels_dual_consensus": dual_consensus_count,
+            "kernels_unknown_method": unknown_method_count,
+            "kernels_retried": kernels_retried,
+            "kernels_with_ncu": kernels_with_ncu,
+            "kernels_with_dram_metrics": kernels_with_dram,
+            "kernels_with_l2_metrics": kernels_with_l2,
+            "kernels_with_compute_metrics": kernels_with_compute,
+            "total_kernel_energy_uj": round(total_energy_uj, 2),
+        },
+        "kernels": rows,
+        "op_kernel_map": op_kernel_list,
+    }
+
+    report_path = output_dir / "power_report.json"
+    with open(report_path, "w") as f:
+        json.dump(power_report, f, indent=2)
+
+    # Console summary
+    print()
+    print("=== Per-Kernel Power Replay ===")
+    print(f"  Idle baseline              : {idle_baseline_w:.2f} W")
+    print(f"  Avg raw kernel power       : {reconstructed_inference_power_w:.2f} W  "
+          f"[Σ(raw_power × dur × freq) / Σ(dur × freq)]")
+    print(f"  Avg net kernel power       : {net_inference_power_w:.2f} W  "
+          f"[above-idle only]")
+    if validation:
+        print(f"  Measured infer power (GT)  : {measured_power_w:.2f} W  "
+              f"[energy counter during live inference]")
+        err_sign = "+" if validation["error_w"] >= 0 else ""
+        print(f"  Validation error           : {err_sign}{validation['error_w']:.2f} W  "
+              f"({err_sign}{validation['error_pct']:.1f}%)")
+    else:
+        print(f"  Measured infer power (GT)  : N/A  [re-run Stage 1 to capture ground truth]")
+    print(f"  Kernel active time         : {total_kernel_time_us:.1f} µs  "
+          f"[Σ avg_dur × freq across {n_kernels} kernels]")
+    print(f"  Kernel energy (raw total)  : {kernel_active_energy_uj / 1e3:.4f} mJ  "
+          f"[Σ(raw_power × dur × freq) — kernel-active only, excludes host-overhead]")
+    if energy_balance:
+        eb = energy_balance
+        method = eb.get("method", "")
+        T_tot = eb.get("T_total_us", 0.0)
+        T_k = eb.get("T_kernel_active_us", total_kernel_time_us)
+        T_oh = eb.get("T_overhead_us", 0.0)
+        kf = eb.get("kernel_fraction", 0.0)
+        print()
+        print("=== Energy Balance / Time Decomposition ===")
+        print(f"  Inference wall time        : {T_tot:.1f} µs  [Stage 1 ground truth]")
+        print(f"  Kernel active time         : {T_k:.1f} µs  ({kf*100:.2f}% duty cycle)")
+        print(f"  Host-overhead time         : {T_oh:.1f} µs  ({(1-kf)*100:.2f}% — GPU idle / CPU dispatch)")
+        if method == "energy_counter":
+            E_tot_mj = eb["E_total_uj"] / 1_000.0
+            E_k_mj = eb["E_kernel_uj"] / 1_000.0
+            E_oh_mj = eb["E_overhead_uj"] / 1_000.0
+            E_k_pct = eb["E_kernel_uj"] / eb["E_total_uj"] * 100.0 if eb["E_total_uj"] > 0 else 0.0
+            print(f"  E_total (NVML counter)     : {E_tot_mj:.2f} mJ  [hardware ground truth]")
+            print(f"  E_kernel (from replay)     : {E_k_mj:.3f} mJ  ({E_k_pct:.2f}% of total)")
+            print(f"  E_overhead (derived)       : {E_oh_mj:.2f} mJ  ({100-E_k_pct:.2f}%)")
+            print(f"  P_overhead (derived)       : {eb['P_overhead_derived_w']:.1f} W  "
+                  f"[GPU power during host-overhead phases]")
+            print(f"  Regime classification      : {eb.get('workload_regime', 'unknown')}")
+            print(f"  P_macro_measured (E/T)     : {eb.get('P_measured_macro_w', 0):.1f} W  "
+                f"[macro energy balance identity]")
+            if "P_inter_kernel_gap_w" in eb:
+                print(
+                    f"  P_inter_kernel_gap         : {eb.get('P_inter_kernel_gap_w', 0):.1f} W  "
+                    f"[{eb.get('inter_kernel_gap_source', 'unknown')}]"
+                )
+            if "P_inter_kernel_observed_w" in eb:
+                print(
+                    f"  P_inter_kernel_observed    : {eb.get('P_inter_kernel_observed_w', 0):.1f} W  "
+                    f"[from Stage 1 samples + trace intersection]"
+                )
+            if "P_active_idle_measured_w" in eb:
+                print(f"  P_active_idle (measured)   : {eb.get('P_active_idle_measured_w', 0):.1f} W  "
+                    f"[null-kernel tight loop]")
+                print(f"  P_duty_cycle_predicted     : {eb.get('P_duty_cycle_predicted_w', 0):.1f} W  "
+                    f"[kernel_frac×P_kernel + overhead_frac×P_active_idle]")
+            elif "P_duty_cycle_predicted_w" in eb:
+                print(f"  P_duty_cycle_predicted     : {eb.get('P_duty_cycle_predicted_w', 0):.1f} W  "
+                    f"[kernel_frac×P_kernel + overhead_frac×P_inter_kernel_gap]")
+                if "duty_cycle_prediction_error_pct" in eb:
+                  err = eb["duty_cycle_prediction_error_pct"]
+                  err_sign = "+" if err >= 0 else ""
+                  print(f"  Duty-cycle error vs GT     : {err_sign}{err:.1f}%")
+            if "P_system_reconstructed_w" in eb:
+                recon_method = eb.get("system_reconstructed_method", "unknown")
+                print(f"  P_system_reconstructed     : {eb['P_system_reconstructed_w']:.1f} W  "
+                    f"[{recon_method}]")
+                if "system_reconstruction_error_pct" in eb:
+                  err = eb["system_reconstruction_error_pct"]
+                  err_sign = "+" if err >= 0 else ""
+                  print(f"  System recon error vs GT   : {err_sign}{err:.1f}%")
+            elif "P_host_bound_measured_w" in eb:
+                print(f"  P_host_bound_measured      : {eb['P_host_bound_measured_w']:.1f} W  "
+                    f"[{eb.get('host_bound_power_method', 'macro_energy_balance')}]")
+            if "E_predicted_total_uj" in eb:
+                E_pred_mj = eb["E_predicted_total_uj"] / 1_000.0
+                E_gap_pred_mj = eb.get("E_gap_predicted_uj", 0.0) / 1_000.0
+                print(f"  E_predicted (estimator)    : {E_pred_mj:.2f} mJ  "
+                      f"[kernel + P_gap × T_gap, gap={E_gap_pred_mj:.2f} mJ]")
+                if "predicted_energy_error_pct" in eb:
+                    err = eb["predicted_energy_error_pct"]
+                    err_sign = "+" if err >= 0 else ""
+                    print(f"  Predicted energy error     : {err_sign}{err:.1f}%  "
+                          f"[vs E_NVML ground truth]")
+                if "overhead_energy_per_launch_uj" in eb:
+                    print(f"  Overhead per launch        : "
+                          f"{eb['overhead_energy_per_launch_uj']:.3f} µJ  "
+                          f"[attributed to each of {eb.get('total_launches', 0)} kernel launches]")
+        else:
+            print("  E_overhead                 : N/A  [NVML counter unavailable — re-run Stage 1]")
+        print(f"  Kernels profiled           : {n_kernels}  ({reliable_count} reliable, "
+              f"{energy_counter_count} via energy counter/consensus, "
+              f"{dual_consensus_count} dual-consensus, {kernels_retried} retried)")
+        if unknown_method_count > 0:
+            print(f"  Unknown method rows        : {unknown_method_count}  [schema/version mismatch]")
+        if kernels_with_ncu > 0:
+            print(f"  NCU channel coverage       : {kernels_with_ncu}/{n_kernels} kernels "
+                  f"(DRAM {kernels_with_dram}, L2 {kernels_with_l2}, compute {kernels_with_compute})")
+    print()
+    top_n = min(10, len(rows))
+    if top_n:
+        print(f"  Top {top_n} kernels by net power draw:")
+        fmt = "    {:>4}  {:>8.2f} W  {:>7.1f} µJ  {:>5}  {:<30}  {}"
+        print(f"    {'ID':>4}  {'Net(W)':>8}  {'Energy':>7}  {'Freq':>5}  {'ATen Op':<30}  Kernel")
+        for r in rows[:top_n]:
+            print(fmt.format(
+                r["kernel_id"],
+                r["net_power_w"],
+                r["energy_uj"],
+                r["frequency"],
+                (r["aten_op"] or "")[:30],
+                (r["kernel_name"] or "")[:40],
+            ))
+    # Op → kernels dispatch summary (top ops by total energy)
+    top_ops = min(10, len(op_kernel_list))
+    if top_ops:
+        print()
+        print(f"  ATen op → kernel dispatch map (top {top_ops} ops by energy):")
+        print(f"    {'ATen Op':<35}  {'#Kernels':>8}  {'TotalDur':>10}  {'TotalEnergy':>12}")
+        for op_entry in op_kernel_list[:top_ops]:
+            n_k = len(op_entry["kernels"])
+            print(f"    {op_entry['aten_op']:<35}  {n_k:>8}  "
+                  f"{op_entry['total_duration_us']:>8.1f}µs  "
+                  f"{op_entry['total_raw_energy_uj']:>10.1f}µJ")
+            for k in op_entry["kernels"]:
+                net_str = f"{k['net_power_w']:.2f}W" if k["net_power_w"] is not None else "  N/A "
+                print(f"      {k['kernel_id']:>4}  ×{k['frequency']:<5}  {net_str:>7}  "
+                      f"{k['avg_duration_us']:>7.1f}µs  {k['kernel_name'][:50]}")
+    print(f"\nSaved power report to {report_path}")
+    return report_path, power_report["inference_power"]
 
 
 # ------------------------------------------------------------------

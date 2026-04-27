@@ -250,6 +250,17 @@ def _build_carbon_table(carbon: Dict[str, Any]) -> Table:
                 tbl.add_row(label, f"{v:.0f} gCO2/kWh")
             elif fmt == "tdp":
                 tbl.add_row(label, f"{v:.0f} W")
+    # Measured power rows (only present when --power-sample was used)
+    measured = carbon.get("measured_power_w")
+    if measured is not None:
+        tbl.add_row("Measured Mean Power", f"{measured:.1f} W [measured]")
+        peak = carbon.get("peak_power_w")
+        if peak is not None:
+            tbl.add_row("Measured Peak Power", f"{peak:.1f} W [measured]")
+        n = carbon.get("power_sample_count")
+        backend = carbon.get("power_backend", "")
+        if n is not None:
+            tbl.add_row("Power Samples", f"{n} ({backend})")
     return tbl
 
 
@@ -789,7 +800,90 @@ def render_taxbreak_analysis(report: dict, args, output_dir: Path) -> str:
     total_k = summary.get("total_unique_kernels", 0)
     nsys_k = summary.get("kernels_with_nsys", 0)
     ncu_k = summary.get("kernels_with_ncu", 0)
-    _console.print(f"  [dim]Coverage: {nsys_k}/{total_k} nsys, {ncu_k}/{total_k} ncu[/dim]")
+    power_k = summary.get("kernels_with_power_replay", 0)
+    _console.print(f"  [dim]Coverage: {nsys_k}/{total_k} nsys, {ncu_k}/{total_k} ncu"
+                   + (f", {power_k}/{total_k} power" if power_k else "") + "[/dim]")
+
+    # Power replay summary (only when --power-replay was used)
+    if power_k:
+        idle_w = summary.get("idle_baseline_w", 0.0)
+        total_nj = summary.get("total_measured_energy_nj", 0.0)
+        infer_pwr = summary.get("inference_power", {})
+        recon_w = infer_pwr.get("reconstructed_inference_power_w")
+        total_energy_uj = infer_pwr.get("total_inference_energy_uj")
+
+        pw_tbl = Table(
+            title="⚡ Per-Kernel Power Replay",
+            box=box.SIMPLE_HEAVY, show_edge=False, pad_edge=False,
+            title_style="bold", expand=False, show_header=False,
+        )
+        pw_tbl.add_column("Metric", style="cyan", no_wrap=True, min_width=30)
+        pw_tbl.add_column("Value", justify="right", min_width=18)
+        if recon_w is not None:
+            pw_tbl.add_row(
+                "Inference power (reconstructed)",
+                f"[bold]{recon_w:.2f} W[/bold]",
+            )
+        # Validation: ground truth from Stage 1 energy counter
+        v = summary.get("inference_power", {})
+        # validation is in the top-level report, not nested in inference_power
+        v_block = None
+        # Check the report-level validation field (set by _write_power_report via inference_power dict)
+        for _vkey in ("validation",):
+            _vdata = report.get(_vkey)
+            if _vdata and _vdata.get("measured_inference_power_w"):
+                v_block = _vdata
+                break
+        if v_block is None:
+            # Also check inside inference_power (where it's surfaced in summary)
+            _vdata = infer_pwr.get("validation") or summary.get("validation")
+            if _vdata and _vdata.get("measured_inference_power_w"):
+                v_block = _vdata
+        if v_block:
+            gt_w = v_block["measured_inference_power_w"]
+            err_pct = v_block.get("error_pct", 0.0)
+            err_color = "green" if abs(err_pct) < 10 else ("yellow" if abs(err_pct) < 25 else "red")
+            pw_tbl.add_row(
+                "Inference power (measured)",
+                f"[bold]{gt_w:.2f} W[/bold]",
+            )
+            sign = "+" if err_pct >= 0 else ""
+            pw_tbl.add_row(
+                "  Validation error",
+                f"[{err_color}]{sign}{err_pct:.1f}%[/{err_color}]",
+            )
+        pw_tbl.add_row("  Idle baseline", f"{idle_w:.2f} W")
+        net_w = infer_pwr.get("net_kernel_power_w")
+        if net_w is not None:
+            pw_tbl.add_row("  Net kernel power (avg)", f"{net_w:.2f} W")
+        if total_energy_uj is not None:
+            pw_tbl.add_row(
+                "Inference energy (kernel-active)",
+                f"{total_energy_uj / 1e3:.4f} mJ",
+            )
+        pw_tbl.add_row("Kernels profiled", str(power_k))
+
+        # Top-3 kernels by net power (read from per_kernel list)
+        pw_kernels = [
+            k for k in report.get("per_kernel", [])
+            if k.get("power_replay") is not None
+        ]
+        pw_kernels.sort(
+            key=lambda k: k["power_replay"].get("net_power_w", 0.0), reverse=True
+        )
+        if pw_kernels:
+            pw_tbl.add_row("Top kernels by net power", "")
+        for k in pw_kernels[:3]:
+            pr = k["power_replay"]
+            label = (k.get("aten_op") or k.get("kernel_name") or k.get("id", ""))[:28]
+            reliable = "" if pr.get("is_reliable", True) else " [yellow]![/yellow]"
+            pw_tbl.add_row(
+                f"  {label}",
+                f"{pr.get('net_power_w', 0.0):.2f} W{reliable}",
+            )
+        _console.print(pw_tbl)
+        _console.print(f"  [dim]Full breakdown: taxbreak/power_report.json[/dim]")
+
     _console.print()
 
     # ── HTML report ──
