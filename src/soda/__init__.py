@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 import time
+import shutil
 from datetime import datetime
 import traceback
 import numpy as np
@@ -18,6 +19,8 @@ from collections import defaultdict, deque
 from pathlib import Path
 from torch.profiler import ProfilerActivity, profile
 from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple
+from vllm import LLM, SamplingParams # new
+from vllm.profiler.layerwise_profile import layerwise_profile # new
 
 # for fp8 e4m3 format support
 try:
@@ -583,6 +586,9 @@ class ModelTracer:
         """
         self.args = args
         self.model_name = args.model
+
+        # Inference Mode
+        self.use_vllm = getattr(args, "vllm", False) # new
         
         # Detect CUDA availability once and store for use throughout
         self._has_cuda = torch.cuda.is_available()
@@ -611,7 +617,7 @@ class ModelTracer:
         self.is_fp8 = args.precision == "float8_e4m3fn"
         
         self.precision = utils.parse_dtype_to_torch(args.precision)
-        self.load_precision = torch.bfloat16 if self.is_fp8 else self.precision
+        self.load_precision = torch.float16 if self.is_fp8 else self.precision
         # Set random seeds
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
@@ -726,6 +732,11 @@ class ModelTracer:
                 torch.cuda.max_memory_reserved(i) for i in range(self.num_gpus)
             )
 
+    def make_synthetic_prompt(self, seq_len):
+        tokenizer = self.llm.get_tokenizer()
+        vocab = list(range(100, 100 + seq_len))
+        return tokenizer.decode(vocab, skip_special_tokens=True)
+
     def setup(self) -> None:
         """
         Loads the model/tokenizer and prepares synthetic inputs.
@@ -737,6 +748,20 @@ class ModelTracer:
             # FIX: Generate audio inputs for Whisper, not text inputs
             print(f"Generating synthetic audio input: batch_size={self.batch_size}, seq_len={self.seq_len}")
             self.model_inputs = self.generate_audio_inputs()
+        elif self.use_vllm:
+            self.llm = LLM(
+                model=self.model_name,
+                enforce_eager=True,  # Disable cudagraph
+                tensor_parallel_size=self.num_gpus,
+                # dtype=self.args.precision,
+                dtype=self.args.precision if not self.is_fp8 else "float16",
+                quantization= "fp8" if self.is_fp8 else None
+            )
+            self.sampling_params = SamplingParams(
+                temperature=0.0,
+                max_tokens=self.max_new_tokens
+            )
+            self.model_inputs = [self.make_synthetic_prompt(self.seq_len)] * self.batch_size
         elif self.is_decoder:
             self.model, self.tokenizer = self.load_decoder()
             # print(f"Generating synthetic input: batch_size={self.batch_size}, seq_len={self.seq_len}")
@@ -1135,15 +1160,18 @@ class ModelTracer:
         self.process()
     
     def trace(self) -> None:
-        """
-        Profiles the forward pass of the model (encoder or decoder).
-        """
-        if self.is_whisper:
-            self.trace_forward_pass_for_whisper()
-        elif self.is_decoder:
-            self.trace_forward_pass_for_decoder()
+        if self.use_vllm: # new
+                self.trace_with_vllm()
         else:
-            self.trace_forward_pass_for_encoder()
+            """
+            Profiles the forward pass of the model (encoder or decoder).
+            """
+            if self.is_whisper:
+                self.trace_forward_pass_for_whisper()
+            elif self.is_decoder:
+                self.trace_forward_pass_for_decoder()
+            else:
+                self.trace_forward_pass_for_encoder()
         
         # Load trace data into memory immediately
         self.trace_data = utils.load_json(self.trace_file)
@@ -1166,6 +1194,7 @@ class ModelTracer:
         Parses the trace to collect events and build linked event sequences.
         """
         self.events = utils.collect_events(self.trace_data)
+        print(f"Collected {len(self.events.get('cpu', []))} cpu events, {len(self.events.get('cuda', []))} cuda events.")
         self.sequences = utils.link_sequences(self.events)
         print(f"Collected {len(self.sequences)} event sequences.")
 
@@ -1433,6 +1462,46 @@ class ModelTracer:
         self._capture_peak_memory()
 
         prof.export_chrome_trace(str(self.trace_file))
+
+    def trace_with_vllm(self) -> None:
+            """
+            Profiles model inference using vLLM.
+            """
+            print("=== Profiling with vLLM ===")
+            
+            prompts = self.model_inputs
+
+            # Initialization
+            self.sampling_params = SamplingParams(max_tokens=32)
+            
+            # Warmup
+            for _ in range(max(1, self.args.warmup)):
+                self.llm.generate(prompts, self.sampling_params)
+            torch.cuda.synchronize()
+
+            # Reset memory stats
+            self._reset_memory_stats()
+            self._capture_pre_inference_memory()
+
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+                
+            start_event.record()
+            outputs = self.llm.generate(prompts, self.sampling_params)
+            torch.cuda.synchronize()
+            end_event.record()
+            torch.cuda.synchronize()
+            total_ms = start_event.elapsed_time(end_event)
+            self.torch_measured_inference_time_us = utils.ms_to_us(total_ms / self.args.runs)
+            
+            self._capture_peak_memory()
+            
+            print(f"Mean time per inference: {utils.us_to_ms(self.torch_measured_inference_time_us):.2f} ms")
+            print("vLLM profiling complete, exporting trace...")
+            with open(f"/tmp/trace.json") as f:
+                prof = json.load(f) 
+            # print(prof)
+            shutil.copy("/tmp/trace.json", self.trace_file)
 
 def main() -> int:
     """Main entry point for the SODA CLI."""
