@@ -760,6 +760,17 @@ def get_args_parser() -> argparse.ArgumentParser:
         help="Number of times to replay each kernel for microbenchmarking.",
     )
     parser.add_argument(
+        "--energy-measure-runs",
+        dest="energy_measure_runs",
+        type=int,
+        default=5,
+        help=(
+            "Number of trailing profiled runs used for NVML energy-counter "
+            "ground-truth averaging (default: 5). "
+            "Set to 1 to match legacy single-run behavior."
+        ),
+    )
+    parser.add_argument(
         "--warmup",
         type=int,
         default=50,
@@ -812,6 +823,37 @@ def get_args_parser() -> argparse.ArgumentParser:
         type=int,
         default=10,
         help="Number of top kernels (by duration) to profile with ncu (default: 10).",
+    )
+    parser.add_argument(
+        "--ncu-all-kernels",
+        dest="ncu_all_kernels",
+        action="store_true",
+        default=False,
+        help=(
+            "Profile all kernels with ncu in --taxbreak mode. Overrides --ncu-top-n. "
+            "Useful when DRAM/L2/compute channels are needed beyond top-duration kernels."
+        ),
+    )
+    parser.add_argument(
+        "--ncu-target-classes",
+        dest="ncu_target_classes",
+        nargs="*",
+        default=None,
+        help=(
+            "Optional duration classes for budgeted NCU coverage in --taxbreak mode. "
+            "Choices: ultra_short short medium long all. "
+            "When set, selects up to --ncu-per-class kernels per requested class."
+        ),
+    )
+    parser.add_argument(
+        "--ncu-per-class",
+        dest="ncu_per_class",
+        type=int,
+        default=5,
+        help=(
+            "Maximum kernels to profile per duration class when --ncu-target-classes is set "
+            "(default: 5)."
+        ),
     )
     parser.add_argument(
         "--verbose",
@@ -1006,6 +1048,50 @@ def get_args_parser() -> argparse.ArgumentParser:
             "(default: None = all unique kernels). Useful for time-limited runs."
         ),
     )
+    parser.add_argument(
+        "--power-replay-idle-settle-min-ms",
+        dest="power_replay_idle_settle_min_ms",
+        type=int,
+        default=1500,
+        metavar="MS",
+        help=(
+            "Minimum idle-settling time before accepting the baseline "
+            "(default: 1500)."
+        ),
+    )
+    parser.add_argument(
+        "--power-replay-idle-settle-max-ms",
+        dest="power_replay_idle_settle_max_ms",
+        type=int,
+        default=6000,
+        metavar="MS",
+        help=(
+            "Maximum idle-settling time before proceeding with the current baseline "
+            "(default: 6000)."
+        ),
+    )
+    parser.add_argument(
+        "--power-replay-idle-settle-step-ms",
+        dest="power_replay_idle_settle_step_ms",
+        type=int,
+        default=500,
+        metavar="MS",
+        help=(
+            "Step interval used while checking idle baseline convergence "
+            "(default: 500)."
+        ),
+    )
+    parser.add_argument(
+        "--power-replay-idle-std-threshold-pct",
+        dest="power_replay_idle_std_threshold_pct",
+        type=float,
+        default=3.0,
+        metavar="PCT",
+        help=(
+            "Relative std-dev threshold (percent) for accepting idle baseline "
+            "convergence (default: 3.0)."
+        ),
+    )
 
     return parser
 
@@ -1021,6 +1107,53 @@ def parse_and_validate_args(args=None) -> argparse.Namespace:
     )
     if not _no_model_modes and not parsed_args.model:
         parser.error("the following arguments are required: -m/--model")
+
+    if getattr(parsed_args, "ncu_all_kernels", False) and not getattr(parsed_args, "ncu", False):
+        parser.error("--ncu-all-kernels requires --ncu")
+
+    if getattr(parsed_args, "ncu_target_classes", None) and not getattr(parsed_args, "ncu", False):
+        parser.error("--ncu-target-classes requires --ncu")
+
+    if getattr(parsed_args, "ncu_top_n", 10) < 1:
+        parser.error("--ncu-top-n must be >= 1")
+
+    if getattr(parsed_args, "ncu_per_class", 5) < 1:
+        parser.error("--ncu-per-class must be >= 1")
+
+    if getattr(parsed_args, "energy_measure_runs", 5) < 1:
+        parser.error("--energy-measure-runs must be >= 1")
+
+    if getattr(parsed_args, "power_replay_idle_settle_min_ms", 1500) < 0:
+        parser.error("--power-replay-idle-settle-min-ms must be >= 0")
+
+    if getattr(parsed_args, "power_replay_idle_settle_max_ms", 6000) < 1:
+        parser.error("--power-replay-idle-settle-max-ms must be >= 1")
+
+    if (
+        getattr(parsed_args, "power_replay_idle_settle_max_ms", 6000)
+        < getattr(parsed_args, "power_replay_idle_settle_min_ms", 1500)
+    ):
+        parser.error("--power-replay-idle-settle-max-ms must be >= --power-replay-idle-settle-min-ms")
+
+    if getattr(parsed_args, "power_replay_idle_settle_step_ms", 500) < 50:
+        parser.error("--power-replay-idle-settle-step-ms must be >= 50")
+
+    if getattr(parsed_args, "power_replay_idle_std_threshold_pct", 3.0) <= 0.0:
+        parser.error("--power-replay-idle-std-threshold-pct must be > 0")
+
+    target_classes = getattr(parsed_args, "ncu_target_classes", None)
+    if target_classes:
+        valid = {"ultra_short", "short", "medium", "long", "all"}
+        unknown = sorted({str(c).strip() for c in target_classes if str(c).strip() and str(c).strip() not in valid})
+        if unknown:
+            parser.error(
+                "--ncu-target-classes contains invalid value(s): "
+                + ", ".join(unknown)
+                + ". Valid: ultra_short, short, medium, long, all"
+            )
+
+    if getattr(parsed_args, "ncu_all_kernels", False) and target_classes:
+        parser.error("--ncu-all-kernels cannot be combined with --ncu-target-classes")
 
     if parsed_args.device == "cpu" and parsed_args.precision in ["float16", "float8_e4m3fn", "float8_e5m2", "bfloat16"]:
         print(f"Warning: {parsed_args.precision} is not supported on CPU. Forcing float32.")

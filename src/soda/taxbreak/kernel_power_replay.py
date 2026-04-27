@@ -48,6 +48,136 @@ from soda.power_sampler import make_power_sampler, _NoOpSampler
 
 
 # ---------------------------------------------------------------------------
+# Duration grouping helpers
+# ---------------------------------------------------------------------------
+
+_DURATION_CLASS_ORDER = ("ultra_short", "short", "medium", "long")
+
+
+def _duration_class(avg_dur_us: float) -> str:
+    """Return a duration class label for replay scheduling.
+
+    Classes are intentionally coarse and measurement-oriented:
+      - ultra_short: < 1 us
+      - short:       1 to < 50 us
+      - medium:      50 to < 500 us
+      - long:        >= 500 us
+    """
+    if avg_dur_us <= 0.0:
+        avg_dur_us = 10.0
+
+    if avg_dur_us < 1.0:
+        return "ultra_short"
+    if avg_dur_us < 50.0:
+        return "short"
+    if avg_dur_us < 500.0:
+        return "medium"
+    return "long"
+
+
+def _group_entries_by_duration_class(
+    entries: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Group entries by duration class, preserving in-class input order."""
+    buckets: Dict[str, List[Dict[str, Any]]] = {k: [] for k in _DURATION_CLASS_ORDER}
+    for entry in entries:
+        avg_dur_us = entry.get("statistics", {}).get("avg_duration_us", 10.0) or 10.0
+        buckets[_duration_class(avg_dur_us)].append(entry)
+
+    ordered: List[Dict[str, Any]] = []
+    for klass in _DURATION_CLASS_ORDER:
+        ordered.extend(buckets[klass])
+    return ordered
+
+
+def _flatten_sampler_watts(sampler: Any) -> List[float]:
+    """Return flattened power samples (W) from a sampler's internal buffers."""
+    samples = getattr(sampler, "_samples", None)
+    if not isinstance(samples, dict):
+        return []
+
+    watts: List[float] = []
+    for gpu_samples in samples.values():
+        if not isinstance(gpu_samples, list):
+            continue
+        for pair in gpu_samples:
+            if not isinstance(pair, tuple) or len(pair) != 2:
+                continue
+            _, w = pair
+            try:
+                watts.append(float(w))
+            except (TypeError, ValueError):
+                continue
+    return watts
+
+
+def _measure_idle_baseline(
+    gpu_ids: List[int],
+    interval_ms: int,
+    min_settle_ms: int = 1500,
+    max_settle_ms: int = 6000,
+    settle_step_ms: int = 500,
+    settle_std_threshold_pct: float = 3.0,
+) -> Tuple[float, float, int, bool]:
+    """Measure idle baseline with convergence-based thermal settling.
+
+    The sampler runs for at least ``min_settle_ms`` and then keeps extending
+    (up to ``max_settle_ms``) until recent idle samples stabilize under the
+    relative standard-deviation threshold.
+
+    Returns:
+        (idle_mean_w, rel_std_pct, settle_ms, settled)
+    """
+    sampler = make_power_sampler(gpu_ids=gpu_ids, interval_ms=interval_ms, enabled=True)
+    if isinstance(sampler, _NoOpSampler):
+        return 0.0, 0.0, 0, False
+
+    step_ms = max(100, int(settle_step_ms))
+    min_settle_ms = max(0, int(min_settle_ms))
+    max_settle_ms = max(min_settle_ms, int(max_settle_ms))
+    settle_std_threshold_pct = max(0.0, float(settle_std_threshold_pct))
+
+    min_steps = max(1, math.ceil(min_settle_ms / step_ms))
+    max_steps = max(min_steps, math.ceil(max_settle_ms / step_ms))
+    recent_samples_target = max(3, int(math.ceil(1000.0 / max(interval_ms, 1))))
+
+    settle_ms = 0
+    rel_std_pct = 0.0
+    settled = False
+
+    sampler.start()
+    try:
+        for step in range(1, max_steps + 1):
+            time.sleep(step_ms / 1000.0)
+            settle_ms = step * step_ms
+
+            watts = _flatten_sampler_watts(sampler)
+            if len(watts) < 2:
+                continue
+
+            recent = watts[-recent_samples_target:]
+            if len(recent) < 2:
+                continue
+
+            mean_w = statistics.mean(recent)
+            if mean_w <= 0.0:
+                continue
+
+            std_w = statistics.stdev(recent)
+            rel_std_pct = (std_w / mean_w) * 100.0
+
+            if step >= min_steps and rel_std_pct <= settle_std_threshold_pct:
+                settled = True
+                break
+    finally:
+        sampler.stop()
+
+    idle_r = sampler.get_results()
+    idle_mean_w = float(idle_r.get("mean_power_w", 0.0) or 0.0)
+    return idle_mean_w, rel_std_pct, settle_ms, settled
+
+
+# ---------------------------------------------------------------------------
 # Iteration-count formula
 # ---------------------------------------------------------------------------
 
@@ -76,13 +206,18 @@ def _compute_replay_iters(
     if avg_dur_us <= 0.0:
         avg_dur_us = 10.0  # safe fallback for unknown/zero-duration entries
 
-    # Batch size: more syncs for long kernels (queue depth OK), fewer for short
+    # Batch size: amortize synchronize() overhead most aggressively for ultra-short
+    # kernels where per-iter sync would dominate runtime and collapse duty cycle.
     if avg_dur_us >= 500.0:
         sync_batch = 1
     elif avg_dur_us >= 50.0:
         sync_batch = 10
-    else:
+    elif avg_dur_us >= 10.0:
         sync_batch = 1000
+    elif avg_dur_us >= 1.0:
+        sync_batch = 2000
+    else:
+        sync_batch = 5000
 
     # Effective duration per sync-batch interval (kernel time + one sync)
     effective_batch_us = avg_dur_us * sync_batch + 15.0
@@ -234,18 +369,34 @@ def _slice_samples_by_windows(
         List of mean watt readings, one per window that had ≥1 NVML sample.
         Windows with no samples are silently skipped.
     """
+    aligned = _slice_samples_by_windows_aligned(sampler_samples, windows)
+    return [w for w in aligned if w is not None]
+
+
+def _slice_samples_by_windows_aligned(
+    sampler_samples: Dict[int, List[Tuple[float, float]]],
+    windows: List[Tuple[float, float]],
+) -> List[Optional[float]]:
+    """Return per-window mean power aligned to replay windows.
+
+    The returned list has exactly ``len(windows)`` elements where each element
+    is either a mean watt value for that window or ``None`` when no NVML sample
+    fell inside the window.
+    """
     # Flatten all GPU readings into a single list (power replay is single-GPU serial)
     all_readings: List[Tuple[float, float]] = []
     for gpu_readings in sampler_samples.values():
         all_readings.extend(gpu_readings)
 
-    per_window_means: List[float] = []
+    per_window_means: List[Optional[float]] = []
     for (ws, we) in windows:
         ws_ms = ws * 1_000.0
         we_ms = we * 1_000.0
         watts = [w for (t_ms, w) in all_readings if ws_ms <= t_ms <= we_ms]
         if watts:
             per_window_means.append(statistics.mean(watts))
+        else:
+            per_window_means.append(None)
 
     return per_window_means
 
@@ -263,6 +414,8 @@ def power_profile_kernel(
     num_windows: int = 3,
     interval_ms: int = 50,
     extra_env: Optional[Dict[str, str]] = None,
+    reliability_threshold_pct: float = 5.0,
+    consensus_tolerance_pct: float = 15.0,
 ) -> Optional[Dict[str, Any]]:
     """Measure GPU power for a single kernel via isolated tight-loop replay.
 
@@ -271,13 +424,13 @@ def power_profile_kernel(
     hardware-integrated energy counters (preferred) or slices NVML polling
     samples (fallback) for each window.
 
-    Measurement method priority:
-      1. Energy counter (``nvmlDeviceGetTotalEnergyConsumption``): hardware-
-         integrated, no sampling uncertainty.  Used when ≥ half the windows
-         yield a non-zero counter increment.
-      2. NVML polling (``nvmlDeviceGetPowerUsage``): background thread at
-         ``interval_ms``.  Used when energy counter is unavailable or all
-         windows yield zero increment (very short windows).
+    Measurement method policy:
+        1. Dual-channel consensus (strict): windows where energy counter and
+           NVML polling agree within ``consensus_tolerance_pct`` are accepted.
+        2. If the energy counter is available but consensus does not pass a
+           strict majority threshold, the kernel is rejected (fail-closed).
+        3. Polling-only fallback is used only when the energy counter is not
+           available on the platform.
 
     H200 hardware note: NVML power readings update every ~100 ms (25 ms
     averaging window).  At 50 ms polling, every other poll returns a stale
@@ -295,6 +448,11 @@ def power_profile_kernel(
         interval_ms:     NVML polling interval (ms).
         extra_env:       Environment for the child process (defaults to
                          ``os.environ``).
+        reliability_threshold_pct: Thermal-variance threshold used to set
+                 ``is_reliable``.
+        consensus_tolerance_pct: Max allowed percent difference between
+             energy-counter and polling per-window means for high-confidence
+             consensus windows.
 
     Returns:
         Dict with keys:
@@ -347,7 +505,7 @@ def power_profile_kernel(
     windows: List[Tuple[float, float]] = []
     t_start: Optional[float] = None
     # Energy counter tracking (one entry per completed window)
-    energy_counter_windows: List[float] = []  # per-window power in W
+    energy_counter_windows: List[Optional[float]] = []  # aligned per-window power in W
     e_start: Optional[float] = None
     parent_t_start: Optional[float] = None
     proc_returncode: Optional[int] = None
@@ -398,6 +556,7 @@ def power_profile_kernel(
                     try:
                         t_end = float(parts[1])
                         windows.append((t_start, t_end))
+                        window_power_w: Optional[float] = None
                         # Energy counter: read immediately on WINDOW_END
                         if _use_energy_counter and e_start is not None and parent_t_start is not None:
                             e_end = sampler.get_energy_counter_mj(0)
@@ -407,9 +566,7 @@ def power_profile_kernel(
                                 dur_s = parent_t_end - parent_t_start
                                 if delta_mj >= 0.01 and dur_s > 0.001:
                                     # W = J/s; convert mJ → J with ×1e-3
-                                    energy_counter_windows.append(
-                                        (delta_mj * 1e-3) / dur_s
-                                    )
+                                    window_power_w = (delta_mj * 1e-3) / dur_s
                                 else:
                                     print(
                                         f"  Power replay {kid}: energy counter did not "
@@ -417,6 +574,7 @@ def power_profile_kernel(
                                         f"dur={dur_s*1000:.1f} ms) — using polling for window",
                                         file=sys.stderr,
                                     )
+                        energy_counter_windows.append(window_power_w)
                         t_start = None
                         e_start = None
                         parent_t_start = None
@@ -466,18 +624,53 @@ def power_profile_kernel(
         print(f"  Power replay: no measurement windows received for {kid}")
         return None
 
-    # Select measurement source: prefer energy counter when ≥ half windows valid
-    if len(energy_counter_windows) >= max(1, len(windows) // 2):
-        per_window_means = energy_counter_windows
-        measurement_method = "energy_counter"
-    else:
-        per_window_means = _slice_samples_by_windows(sampler._samples, windows)
-        measurement_method = "nvml_polling"
-        if _use_energy_counter and energy_counter_windows:
+    # Build aligned polling and energy-counter vectors per window.
+    polling_windows = _slice_samples_by_windows_aligned(sampler._samples, windows)
+    # Defensive alignment in case an older path produced a shorter list.
+    if len(energy_counter_windows) < len(windows):
+        energy_counter_windows.extend([None] * (len(windows) - len(energy_counter_windows)))
+
+    valid_energy_windows = [w for w in energy_counter_windows if w is not None]
+    valid_polling_windows = [w for w in polling_windows if w is not None]
+
+    # Dual-channel consensus windows: both channels present and within tolerance.
+    consensus_windows: List[float] = []
+    consensus_windows_checked = 0
+    consensus_windows_agree = 0
+    consensus_windows_excluded = 0
+    for ec_w, poll_w in zip(energy_counter_windows, polling_windows):
+        if ec_w is None or poll_w is None:
+            continue
+        consensus_windows_checked += 1
+        denom = max((abs(ec_w) + abs(poll_w)) / 2.0, 1e-9)
+        diff_pct = abs(ec_w - poll_w) / denom * 100.0
+        if diff_pct <= consensus_tolerance_pct:
+            consensus_windows_agree += 1
+            consensus_windows.append((ec_w + poll_w) / 2.0)
+        else:
+            consensus_windows_excluded += 1
+
+    # Strict majority of all configured windows (e.g., 2/3, 2/2, 3/4).
+    consensus_min_windows = max(1, (len(windows) // 2) + 1)
+    # Select measurement source with strong validation policy. No single-channel fallbacks allowed
+    # when the hardware supports dual-channel measurement.
+    if _use_energy_counter:
+        if (
+            consensus_windows_checked >= consensus_min_windows
+            and consensus_windows_agree >= consensus_min_windows
+        ):
+            per_window_means = consensus_windows
+            measurement_method = "dual_consensus"
+        else:
             print(
-                f"  Power replay {kid}: only {len(energy_counter_windows)}/"
-                f"{len(windows)} energy counter windows valid — using polling fallback"
+                f"  Error: {kid} failed dual-consensus validation ({consensus_windows_agree}/{consensus_windows_checked} "
+                f"agreed, min={consensus_min_windows}). Single-channel fallbacks are disabled."
             )
+            return None
+    else:
+        # Legacy hardware fallback (only when energy counter is fundamentally unavailable).
+        per_window_means = valid_polling_windows
+        measurement_method = "nvml_polling"
 
     if not per_window_means:
         print(
@@ -491,14 +684,26 @@ def power_profile_kernel(
     thermal_variance_pct = (
         (std_power_w / raw_power_w * 100.0) if raw_power_w > 0.0 else 0.0
     )
-    is_reliable = thermal_variance_pct <= 5.0
+    effective_windows = len(per_window_means)
+    # A single effective window cannot establish stability; require >= 2 windows.
+    is_reliable = (
+        effective_windows >= 2
+        and thermal_variance_pct <= reliability_threshold_pct
+    )
     net_power_w = max(0.0, raw_power_w - idle_baseline_w)
 
     if not is_reliable:
-        print(
-            f"  Warning: {kid} thermal variance {thermal_variance_pct:.1f}% > 5%"
-            " — GPU may not be at thermal steady state (is_reliable=False)"
-        )
+        if effective_windows < 2:
+            print(
+                f"  Warning: {kid} has only {effective_windows} effective window(s) "
+                "— cannot assess thermal stability (is_reliable=False)"
+            )
+        else:
+            print(
+                f"  Warning: {kid} thermal variance {thermal_variance_pct:.1f}% > "
+                f"{reliability_threshold_pct:.1f}%"
+                " — GPU may not be at thermal steady state (is_reliable=False)"
+            )
 
     # energy = net power × avg kernel duration; W × µs = µJ (direct, no scaling)
     energy_uj = net_power_w * avg_dur_us
@@ -525,6 +730,10 @@ def power_profile_kernel(
         "backend": sampler._backend,
         "measurement_method": measurement_method,
         "is_reliable": is_reliable,
+        "consensus_windows_checked": consensus_windows_checked,
+        "consensus_windows_agree": consensus_windows_agree,
+        "consensus_windows_excluded": consensus_windows_excluded,
+        "consensus_tolerance_pct": round(consensus_tolerance_pct, 2),
     }
 
 
@@ -542,12 +751,23 @@ def power_profile_all_kernels(
     interval_ms: int = 50,
     max_kernels: Optional[int] = None,
     extra_env: Optional[Dict[str, str]] = None,
+    adaptive_retry: bool = True,
+    variance_threshold_pct: float = 5.0,
+    max_retry_windows: int = 9,
+    idle_settle_min_ms: int = 1500,
+    idle_settle_max_ms: int = 6000,
+    idle_settle_step_ms: int = 500,
+    idle_settle_std_threshold_pct: float = 3.0,
 ) -> Tuple[Dict[str, Dict[str, Any]], float]:
     """Profile power for all (or up to max_kernels) unique kernels.
 
     Measures an idle-power baseline once before iterating kernels.
     Power replay is always serial (single-GPU) — running kernels in parallel
     on separate GPUs would contaminate per-GPU NVML readings.
+
+    Entries are grouped by duration class to reduce thermal mixing between
+    ultra-short and long kernels; idle baseline is re-checked on class
+    transitions and periodically every 10 kernels.
 
     Args:
         kernel_db_entries: List of kernel DB entry dicts.
@@ -559,6 +779,13 @@ def power_profile_all_kernels(
         interval_ms:       NVML polling interval (ms).
         max_kernels:       If set, cap the number of kernels profiled.
         extra_env:         Environment for replay subprocesses.
+        adaptive_retry:    Retry unstable kernels with more windows.
+        variance_threshold_pct: Thermal variance threshold for retry.
+        max_retry_windows: Upper bound on retry window count.
+        idle_settle_min_ms: Minimum idle-settling duration before convergence check.
+        idle_settle_max_ms: Maximum idle-settling duration before proceeding.
+        idle_settle_step_ms: Sampling interval for convergence checks.
+        idle_settle_std_threshold_pct: Relative std-dev threshold for idle convergence.
 
     Returns:
         Tuple of (results_dict, idle_baseline_w) where results_dict maps
@@ -571,41 +798,77 @@ def power_profile_all_kernels(
     entries = kernel_db_entries
     if max_kernels is not None:
         entries = entries[:max_kernels]
+    entries = _group_entries_by_duration_class(entries)
 
     # ── Idle baseline measurement ──────────────────────────────────────────
     idle_baseline_w = 0.0
     _idle_sampler = make_power_sampler(gpu_ids=gpu_ids, interval_ms=interval_ms, enabled=True)
-    if not isinstance(_idle_sampler, _NoOpSampler):
-        print("  Measuring GPU idle power baseline (1 s)...")
-        _idle_sampler.start()
-        time.sleep(1.0)
-        _idle_sampler.stop()
-        idle_r = _idle_sampler.get_results()
-        idle_baseline_w = idle_r.get("mean_power_w", 0.0)
-        print(f"  Idle baseline: {idle_baseline_w:.1f} W")
+    sampler_available = not isinstance(_idle_sampler, _NoOpSampler)
+    if sampler_available:
+        print(
+            "  Measuring GPU idle power baseline "
+            f"(settle {idle_settle_min_ms}-{idle_settle_max_ms} ms)..."
+        )
+        idle_baseline_w, settle_rel_std_pct, settle_ms, settled = _measure_idle_baseline(
+            gpu_ids=gpu_ids,
+            interval_ms=interval_ms,
+            min_settle_ms=idle_settle_min_ms,
+            max_settle_ms=idle_settle_max_ms,
+            settle_step_ms=idle_settle_step_ms,
+            settle_std_threshold_pct=idle_settle_std_threshold_pct,
+        )
+        if settled:
+            print(
+                f"  Idle baseline: {idle_baseline_w:.1f} W "
+                f"(settled in {settle_ms} ms, rel std {settle_rel_std_pct:.2f}%)"
+            )
+        else:
+            print(
+                f"  Warning: idle baseline did not settle within {settle_ms} ms "
+                f"(rel std {settle_rel_std_pct:.2f}% > {idle_settle_std_threshold_pct:.2f}%)"
+            )
+            print(f"  Idle baseline: {idle_baseline_w:.1f} W")
     else:
         print(
             "  Warning: NVML unavailable — power replay will return no results. "
             "Install pynvml (pip install pynvml) or ensure nvidia-smi is in PATH."
         )
 
+    def _remeasure_idle(duration_s: float) -> float:
+        """Best-effort idle baseline refresh."""
+        sampler = make_power_sampler(gpu_ids=gpu_ids, interval_ms=interval_ms, enabled=True)
+        if isinstance(sampler, _NoOpSampler):
+            return idle_baseline_w
+        sampler.start()
+        time.sleep(duration_s)
+        sampler.stop()
+        return sampler.get_results().get("mean_power_w", idle_baseline_w)
+
     # ── Per-kernel replay ──────────────────────────────────────────────────
     replay_dir = output_dir / "power_replay_scripts"
     results: Dict[str, Dict[str, Any]] = {}
     total = len(entries)
+    prev_class: Optional[str] = None
 
     for i, entry in enumerate(entries, 1):
+        avg_dur_us = entry.get("statistics", {}).get("avg_duration_us", 10.0) or 10.0
+        klass = _duration_class(avg_dur_us)
+
+        if prev_class is None:
+            prev_class = klass
+        elif sampler_available and klass != prev_class:
+            new_baseline = _remeasure_idle(duration_s=0.5)
+            print(
+                f"  Duration-class transition ({prev_class} -> {klass}): "
+                f"idle baseline {idle_baseline_w:.1f} W -> {new_baseline:.1f} W"
+            )
+            idle_baseline_w = new_baseline
+            prev_class = klass
+
         # Periodically re-measure idle baseline to track GPU thermal drift.
         # A drift > 5 W over 10 kernels (~14 s) indicates warm-up effects.
-        if i > 1 and (i - 1) % 10 == 0 and not isinstance(
-            make_power_sampler(gpu_ids=gpu_ids, interval_ms=interval_ms, enabled=True),
-            _NoOpSampler,
-        ):
-            _re_idle = make_power_sampler(gpu_ids=gpu_ids, interval_ms=interval_ms, enabled=True)
-            _re_idle.start()
-            time.sleep(0.5)
-            _re_idle.stop()
-            new_baseline = _re_idle.get_results().get("mean_power_w", idle_baseline_w)
+        if i > 1 and (i - 1) % 10 == 0 and sampler_available:
+            new_baseline = _remeasure_idle(duration_s=0.5)
             if abs(new_baseline - idle_baseline_w) > 5.0:
                 print(
                     f"  Idle baseline drift detected: {idle_baseline_w:.1f} W → "
@@ -616,19 +879,56 @@ def power_profile_all_kernels(
         kid = entry["id"]
         kname = entry.get("kernel", {}).get("name", "?")
         op = entry.get("aten_op", {}).get("name", "?")
-        print(f"  Power replay [{i}/{total}] {kid}: {op} → {kname[:50]}")
+        print(f"  Power replay [{i}/{total}] {kid} ({klass}): {op} → {kname[:50]}")
 
+        current_windows = num_windows
+        retry_attempts = 0
         result = power_profile_kernel(
             entry=entry,
             output_dir=replay_dir,
             idle_baseline_w=idle_baseline_w,
             target_warmup_ms=target_warmup_ms,
             target_meas_ms=target_meas_ms,
-            num_windows=num_windows,
+            num_windows=current_windows,
             interval_ms=interval_ms,
             extra_env=extra_env,
+            reliability_threshold_pct=variance_threshold_pct,
         )
+
+        while (
+            adaptive_retry
+            and result is not None
+            and result.get("thermal_variance_pct", 0.0) > variance_threshold_pct
+            and current_windows < max_retry_windows
+        ):
+            retry_windows = min(max_retry_windows, max(current_windows * 2, current_windows + 1))
+            if retry_windows <= current_windows:
+                break
+            print(
+                f"  {kid}: variance {result['thermal_variance_pct']:.1f}% > "
+                f"{variance_threshold_pct:.1f}% — retrying with {retry_windows} windows"
+            )
+            retried = power_profile_kernel(
+                entry=entry,
+                output_dir=replay_dir,
+                idle_baseline_w=idle_baseline_w,
+                target_warmup_ms=target_warmup_ms,
+                target_meas_ms=target_meas_ms,
+                num_windows=retry_windows,
+                interval_ms=interval_ms,
+                extra_env=extra_env,
+                reliability_threshold_pct=variance_threshold_pct,
+            )
+            if retried is None:
+                break
+            result = retried
+            current_windows = retry_windows
+            retry_attempts += 1
+
         if result is not None:
+            result["initial_windows"] = num_windows
+            result["final_windows"] = current_windows
+            result["retry_attempts"] = retry_attempts
             results[kid] = result
 
     print(

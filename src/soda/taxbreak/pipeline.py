@@ -7,7 +7,7 @@ profiles top-N kernels with ncu (Phase 4), and writes an enhanced report
 (Phase 6).
 
 Usage (Stage 2 — no model loading required):
-    soda-cli --taxbreak --kernel-db-path <path> [--ncu] [--ncu-top-n 10]
+    soda-cli --taxbreak --kernel-db-path <path> [--ncu] [--ncu-top-n 10] [--ncu-all-kernels]
 """
 
 import copy
@@ -30,6 +30,23 @@ from soda.taxbreak.replay_cache_tools import (
 )
 from soda.taxbreak.global_cache import GlobalKernelCache, NullGlobalCache
 from soda.taxbreak.report import generate_enhanced_report
+
+
+def _duration_class_from_entry(entry: Dict[str, Any]) -> str:
+    """Return coarse kernel duration class for selection and replay policy."""
+    avg_dur_us = entry.get("statistics", {}).get("avg_duration_us")
+    if avg_dur_us is None:
+        avg_dur_us = entry.get("statistics", {}).get("total_duration_us", 10.0)
+    if avg_dur_us is None:
+        avg_dur_us = 10.0
+
+    if avg_dur_us < 1.0:
+        return "ultra_short"
+    if avg_dur_us < 50.0:
+        return "short"
+    if avg_dur_us < 500.0:
+        return "medium"
+    return "long"
 
 
 class TaxBreakPipeline:
@@ -465,10 +482,15 @@ class TaxBreakPipeline:
     def _run_ncu(
         self, kernels: List[Dict[str, Any]]
     ) -> Dict[str, Dict[str, Any]]:
-        """Run ncu on the top-N kernels by total duration.
+        """Run ncu on selected kernels.
 
         Applies the same single-GPU serial / multi-GPU parallel split as
         ``_run_nsys_replay``.
+
+        Selection modes:
+          - default: top-N kernels by total duration (``--ncu-top-n``)
+          - all-kernels: enabled by ``--ncu-all-kernels``
+                    - class-targeted: ``--ncu-target-classes`` (budgeted per class)
         """
         from soda.ncu import ncu_check_available, ncu_profile_kernel
 
@@ -476,22 +498,67 @@ class TaxBreakPipeline:
             print("Skipping ncu profiling (ncu not available).")
             return {}
 
-        top_n = getattr(self.args, "ncu_top_n", 10)
+        profile_all = getattr(self.args, "ncu_all_kernels", False)
         ranked = sorted(
             kernels,
             key=lambda k: k["statistics"]["total_duration_us"],
             reverse=True,
-        )[:top_n]
+        )
+        target_classes = getattr(self.args, "ncu_target_classes", None)
+        per_class_n = getattr(self.args, "ncu_per_class", 5)
+        if profile_all:
+            selected = ranked
+            print(f"  NCU scope: all kernels ({len(selected)})")
+        elif target_classes:
+            allowed = {c.strip() for c in target_classes if c.strip()}
+            if "all" in allowed:
+                allowed = {"ultra_short", "short", "medium", "long"}
+
+            buckets: Dict[str, List[Dict[str, Any]]] = {
+                "ultra_short": [],
+                "short": [],
+                "medium": [],
+                "long": [],
+            }
+            for entry in ranked:
+                klass = _duration_class_from_entry(entry)
+                if klass in buckets:
+                    buckets[klass].append(entry)
+
+            selected = []
+            for klass in ("ultra_short", "short", "medium", "long"):
+                if klass not in allowed:
+                    continue
+                selected.extend(buckets[klass][:per_class_n])
+
+            # De-duplicate in case of malformed class overlap and preserve order.
+            seen = set()
+            deduped = []
+            for entry in selected:
+                kid = entry["id"]
+                if kid in seen:
+                    continue
+                seen.add(kid)
+                deduped.append(entry)
+            selected = deduped
+            print(
+                "  NCU scope: class-targeted "
+                f"(classes={sorted(allowed)}, per_class={per_class_n}, total={len(selected)})"
+            )
+        else:
+            top_n = getattr(self.args, "ncu_top_n", 10)
+            selected = ranked[:top_n]
+            print(f"  NCU scope: top-{top_n} by duration ({len(selected)})")
 
         ncu_dir = self.output_dir / "ncu"
         ncu_dir.mkdir(parents=True, exist_ok=True)
 
         results: Dict[str, Dict[str, Any]] = {}
-        total = len(ranked)
+        total = len(selected)
 
         if self.num_gpus <= 1:
             # ── serial path ──────────────────────────────────────────────
-            for i, entry in enumerate(ranked, 1):
+            for i, entry in enumerate(selected, 1):
                 kid   = entry["id"]
                 op    = entry["aten_op"].get("name", "?")
                 kname = entry["kernel"]["name"]
@@ -526,7 +593,7 @@ class TaxBreakPipeline:
                 gpu_queue.put(gpu_id)
 
         with ThreadPoolExecutor(max_workers=self.num_gpus) as pool:
-            futures = [pool.submit(_ncu, entry) for entry in ranked]
+            futures = [pool.submit(_ncu, entry) for entry in selected]
             for future in as_completed(futures):
                 try:
                     kid, result = future.result()
@@ -562,7 +629,9 @@ class TaxBreakPipeline:
             f"{'s' if total != 1 else ''} "
             f"(warmup={getattr(self.args, 'power_replay_warmup_ms', 500)} ms, "
             f"windows={getattr(self.args, 'power_replay_windows', 3)}×"
-            f"{getattr(self.args, 'power_replay_target_ms', 300)} ms)"
+            f"{getattr(self.args, 'power_replay_target_ms', 300)} ms, "
+            f"idle_settle={getattr(self.args, 'power_replay_idle_settle_min_ms', 1500)}-"
+            f"{getattr(self.args, 'power_replay_idle_settle_max_ms', 6000)} ms)"
         )
 
         gpu_ids = list(range(self.num_gpus))
@@ -575,6 +644,14 @@ class TaxBreakPipeline:
             num_windows=getattr(self.args, "power_replay_windows", 3),
             interval_ms=getattr(self.args, "power_replay_interval", 50),
             max_kernels=None,  # already sliced above
+            idle_settle_min_ms=getattr(self.args, "power_replay_idle_settle_min_ms", 1500),
+            idle_settle_max_ms=getattr(self.args, "power_replay_idle_settle_max_ms", 6000),
+            idle_settle_step_ms=getattr(self.args, "power_replay_idle_settle_step_ms", 500),
+            idle_settle_std_threshold_pct=getattr(
+                self.args,
+                "power_replay_idle_std_threshold_pct",
+                3.0,
+            ),
         )
         return results, idle_w
 

@@ -274,6 +274,9 @@ def generate_kernel_database(
             # the last profiled inference pass. Used by Stage 2 power report
             # for validation against reconstructed per-kernel power.
             "inference_energy": getattr(tracer, "_inference_energy_measurement", {}),
+            # Stage 1 power sampler payload (when --power-sample is enabled).
+            # Includes aggregated stats and, when available, timestamped samples.
+            "power_profile": getattr(tracer, "_power_results", {}),
         },
         "summary": {
             "total_unique_kernels": total_unique,
