@@ -24,7 +24,7 @@ GPU_TDP_W: Dict[str, float] = {
     "H100 SXM":  700.0,
     "H100 PCIe": 350.0,
     "H200 SXM":  700.0,
-    "H200 NVL":  700.0,   # PCIe form-factor, 96 GB HBM3e; same per-card TDP as SXM
+    "H200 NVL":  700.0,   # NVLink 2-GPU baseboard, 141 GB HBM3e per card
     "A100 SXM":  400.0,
     "A100 PCIe": 300.0,
     "V100 SXM2": 300.0,
@@ -107,35 +107,47 @@ def compute_carbon_footprint(
     num_tokens: int,
     carbon_intensity_g_kwh: float = DEFAULT_CARBON_INTENSITY_G_KWH,
     pue: float = DEFAULT_PUE,
+    num_gpus: int = 1,
+    measured_power_w: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Estimate carbon footprint for a single inference pass.
 
     Methodology:
-        estimated_power_W  = gpu_tdp_w × (gpu_util_pct / 100)
+        estimated_power_W  = measured_power_w (if provided)
+                           OR gpu_tdp_w × num_gpus × (gpu_util_pct / 100)
         gpu_energy_Wh      = estimated_power_W × inference_time_s / 3600
         total_energy_Wh    = gpu_energy_Wh × pue           (system + cooling)
         carbon_gCO2eq      = total_energy_Wh × carbon_intensity_g_kwh / 1000
 
     Args:
         inference_time_s:       Wall time for one inference pass (seconds).
-        gpu_tdp_w:              GPU thermal design power (watts).
-        gpu_util_pct:           Observed GPU utilization (0–100).
+        gpu_tdp_w:              GPU thermal design power (watts) per device.
+        gpu_util_pct:           Observed GPU utilization (0–100), average per device.
         batch_size:             Number of sequences in the batch.
         num_tokens:             Tokens generated/processed per batch element.
         carbon_intensity_g_kwh: Grid carbon intensity (gCO2eq/kWh).
         pue:                    Power Usage Effectiveness (≥ 1.0).
+        num_gpus:               Number of GPUs used (for multi-GPU system power).
+        measured_power_w:       Directly measured GPU power (W); overrides TDP estimate
+                                when provided and > 0.
 
     Returns:
         Dict with keys:
-            gpu_tdp_w, estimated_power_w, gpu_util_pct, pue,
-            carbon_intensity_g_kwh, inference_time_s,
+            gpu_tdp_w, num_gpus, estimated_power_w, power_source,
+            gpu_util_pct, pue, carbon_intensity_g_kwh, inference_time_s,
             energy_per_inference_mwh, carbon_per_inference_mgco2eq,
             (when num_tokens > 0):
                 total_tokens_per_inference, energy_per_token_mwh,
                 carbon_per_token_mgco2eq, carbon_per_million_tokens_gco2eq,
                 energy_per_million_tokens_kwh.
     """
-    estimated_power_w = gpu_tdp_w * (gpu_util_pct / 100.0)
+    n_gpus = max(1, int(num_gpus))
+    if measured_power_w is not None and measured_power_w > 0:
+        estimated_power_w = float(measured_power_w)
+        power_source = "measured"
+    else:
+        estimated_power_w = gpu_tdp_w * n_gpus * (gpu_util_pct / 100.0)
+        power_source = "tdp_estimate"
     gpu_energy_wh = estimated_power_w * inference_time_s / 3600.0
     total_energy_wh = gpu_energy_wh * pue
     total_energy_mwh = total_energy_wh * 1000.0
@@ -145,7 +157,9 @@ def compute_carbon_footprint(
 
     result: Dict[str, Any] = {
         "gpu_tdp_w": gpu_tdp_w,
+        "num_gpus": n_gpus,
         "estimated_power_w": round(estimated_power_w, 2),
+        "power_source": power_source,
         "gpu_util_pct": gpu_util_pct,
         "pue": pue,
         "carbon_intensity_g_kwh": carbon_intensity_g_kwh,
@@ -166,7 +180,7 @@ def compute_carbon_footprint(
             carbon_mgco2eq_per_token * 1e6 / 1000.0, 4
         )
         result["energy_per_million_tokens_kwh"] = round(
-            energy_mwh_per_token * 1e6 / 1e6, 6
+            energy_mwh_per_token, 6  # mWh/token * 1M tokens / 1M mWh/kWh
         )
 
     return result

@@ -4,12 +4,10 @@ SODA: System Offload Dynamics Analyzer
 """
 
 import argparse
-import json
 import logging
 import os
 import sys
 import time
-import shutil
 from datetime import datetime
 import traceback
 import numpy as np
@@ -19,8 +17,13 @@ from collections import defaultdict, deque
 from pathlib import Path
 from torch.profiler import ProfilerActivity, profile
 from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple
-from vllm import LLM, SamplingParams # new
-from vllm.profiler.layerwise_profile import layerwise_profile # new
+try:
+    from vllm import LLM, SamplingParams
+    from vllm.profiler.layerwise_profile import layerwise_profile
+except ImportError:
+    LLM = None
+    SamplingParams = None
+    layerwise_profile = None
 
 # for fp8 e4m3 format support
 try:
@@ -77,6 +80,132 @@ def _build_inference_energy_measurement(
         "total_energy_mj": round(delta_mj_total, 3),
         "total_duration_s": round(duration_s_total, 6),
     }
+
+def _compute_efficiency_metrics(
+    inference_energy: Dict[str, Any],
+    power_profile: Dict[str, Any],
+    carbon_metrics: Optional[Dict[str, Any]],
+    throughput_tok_s: Optional[float],
+) -> Dict[str, Any]:
+    """Compute tokens/joule and related efficiency metrics from the best available power source.
+
+    Priority: energy_counter (hardware mJ counter) > nvml_polling > tdp_estimate.
+    Returns empty dict if neither power nor throughput is available.
+    """
+    _ie = inference_energy or {}
+    _pp = power_profile if power_profile.get("available") else {}
+    measured_power_w = _ie.get("power_w") or _pp.get("mean_power_w") or None
+    power_source = (
+        "energy_counter" if _ie.get("power_w") else
+        "nvml_polling"   if _pp.get("mean_power_w") else
+        "tdp_estimate"
+    )
+
+    if measured_power_w and measured_power_w > 0 and throughput_tok_s and throughput_tok_s > 0:
+        tokens_per_joule = throughput_tok_s / measured_power_w
+        eff: Dict[str, Any] = {
+            "measured_power_w": round(measured_power_w, 2),
+            "power_source": power_source,
+            "tokens_per_joule": round(tokens_per_joule, 4),
+            "joules_per_token": round(1.0 / tokens_per_joule, 6),
+            "mj_per_token": round(1000.0 / tokens_per_joule, 4),
+            "throughput_tok_s": throughput_tok_s,
+        }
+        energy_mj = _ie.get("energy_mj")
+        if energy_mj:
+            eff["energy_per_inference_mj"] = round(energy_mj, 3)
+        peak_w = _pp.get("peak_power_w")
+        if peak_w:
+            eff["peak_power_w"] = round(peak_w, 2)
+        return eff
+
+    if carbon_metrics:
+        est_power = carbon_metrics.get("estimated_power_w") or 0.0
+        if est_power > 0 and throughput_tok_s and throughput_tok_s > 0:
+            tokens_per_joule = throughput_tok_s / est_power
+            eff = {
+                "measured_power_w": None,
+                "estimated_power_w": round(est_power, 2),
+                "power_source": "tdp_estimate",
+                "tokens_per_joule": round(tokens_per_joule, 4),
+                "joules_per_token": round(1.0 / tokens_per_joule, 6),
+                "mj_per_token": round(1000.0 / tokens_per_joule, 4),
+                "throughput_tok_s": throughput_tok_s,
+            }
+            energy_mwh = carbon_metrics.get("energy_per_inference_mwh") or 0.0
+            if energy_mwh > 0:
+                eff["energy_per_inference_mj"] = round(energy_mwh * 3600.0, 3)
+            return eff
+
+    return {}
+
+
+def _build_per_gpu_metrics(
+    per_device_gpu: Dict[int, Dict[str, float]],
+    gpu_kernel_counts: Dict[int, int],
+    per_gpu_memory: Dict[int, Dict[str, float]],
+    power_profile: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build per-GPU Stage 1 diagnostics for straggler and bottleneck analysis."""
+    gpu_ids = sorted(
+        set(per_device_gpu)
+        | set(gpu_kernel_counts)
+        | set(per_gpu_memory)
+        | {int(k) for k in (power_profile.get("per_gpu", {}) or {}).keys() if str(k).isdigit()}
+    )
+    if not gpu_ids:
+        return {"gpus": []}
+
+    power_by_gpu = power_profile.get("per_gpu", {}) or {}
+    rows: List[Dict[str, Any]] = []
+    for gpu_id in gpu_ids:
+        timing = per_device_gpu.get(gpu_id, {})
+        span_us = float(timing.get("span_us", 0.0) or 0.0)
+        busy_us = float(timing.get("busy_us", 0.0) or 0.0)
+        util_pct = float(timing.get("utilization_pct", 0.0) or 0.0)
+        mem = per_gpu_memory.get(gpu_id, {})
+        pwr = power_by_gpu.get(str(gpu_id), {})
+
+        row: Dict[str, Any] = {
+            "gpu_id": gpu_id,
+            "span_ms": round(span_us / 1000.0, 4),
+            "busy_ms": round(busy_us / 1000.0, 4),
+            "idle_ms": round(max(0.0, span_us - busy_us) / 1000.0, 4),
+            "utilization_percent": round(util_pct, 2),
+            "kernel_count": int(gpu_kernel_counts.get(gpu_id, 0)),
+        }
+        for key in (
+            "model_memory_mb",
+            "model_memory_reserved_mb",
+            "pre_inference_memory_mb",
+            "peak_memory_allocated_mb",
+            "peak_memory_reserved_mb",
+            "memory_delta_mb",
+        ):
+            if key in mem:
+                row[key] = mem[key]
+        if pwr:
+            row["mean_power_w"] = pwr.get("mean_w")
+            row["peak_power_w"] = pwr.get("peak_w")
+            row["power_sample_count"] = pwr.get("sample_count")
+        rows.append(row)
+
+    bottleneck = max(rows, key=lambda r: (r["busy_ms"], r["utilization_percent"]))
+    least_busy = min(rows, key=lambda r: r["busy_ms"])
+    max_busy = float(bottleneck["busy_ms"])
+    min_busy = float(least_busy["busy_ms"])
+    max_util = max(float(r["utilization_percent"]) for r in rows)
+    min_util = min(float(r["utilization_percent"]) for r in rows)
+
+    return {
+        "gpus": rows,
+        "bottleneck_gpu_id": bottleneck["gpu_id"],
+        "least_busy_gpu_id": least_busy["gpu_id"],
+        "busy_time_gap_ms": round(max_busy - min_busy, 4),
+        "busy_time_gap_percent": round(((max_busy - min_busy) / max_busy) * 100.0, 2) if max_busy > 0 else 0.0,
+        "utilization_gap_percent": round(max_util - min_util, 2),
+    }
+
 
 class SodaAnalyzer:
     """
@@ -243,27 +372,36 @@ class SodaAnalyzer:
             sum(e["dur"] for e in gpu_mem_events) / 1000.0 / num_runs, 4
         )
 
+        # Resolve best available hardware power measurement before carbon estimation.
+        # Priority: energy_counter (hardware mJ counter) > nvml_polling > None (TDP fallback).
+        _ie_meas = getattr(self.tracer, "_inference_energy_measurement", {}) or {}
+        _pp_raw = getattr(self.tracer, "_power_results", {})
+        _pp_avail = _pp_raw if _pp_raw.get("available") else {}
+        measured_power_w: Optional[float] = _ie_meas.get("power_w") or _pp_avail.get("mean_power_w") or None
+
         # Carbon footprint estimation
         carbon_metrics = None
         try:
             from soda.carbon import compute_carbon_footprint, get_gpu_tdp
             device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else ""
             gpu_tdp = get_gpu_tdp(device_name)
-            if gpu_tdp is not None and inference_time > 0:
+            if gpu_tdp is not None and inference_time > 0 and gpu_utilization is not None:
                 carbon_metrics = compute_carbon_footprint(
                     inference_time_s=inference_time / 1_000_000.0,
                     gpu_tdp_w=gpu_tdp,
-                    gpu_util_pct=gpu_utilization if gpu_utilization is not None else 50.0,
+                    gpu_util_pct=gpu_utilization,
                     batch_size=getattr(self.args, "batch_size", 1),
                     num_tokens=output_tokens,
                     carbon_intensity_g_kwh=getattr(self.args, "carbon_intensity", 400.0),
                     pue=getattr(self.args, "pue", 1.1),
+                    num_gpus=getattr(self.tracer, "num_gpus", 1),
+                    measured_power_w=measured_power_w,
                 )
         except Exception:
             pass
 
         # Power profile from NVML sampler (populated if --power-sample was set)
-        power_profile = getattr(self.tracer, "_power_results", {})
+        power_profile = _pp_raw
         if power_profile.get("available"):
             n = power_profile.get("sample_count", 0)
             interval = power_profile.get("interval_ms", 50)
@@ -282,13 +420,35 @@ class SodaAnalyzer:
                     f"Try --power-sample-interval {max(10, interval // 2)} for more samples."
                 )
             if n > 0 and carbon_metrics is not None:
-                # Augment carbon dict with measured (not TDP-estimated) power values
-                carbon_metrics["measured_power_w"] = round(power_profile["mean_power_w"], 2)
-                carbon_metrics["peak_power_w"] = round(power_profile["peak_power_w"], 2)
+                # Store sampler metadata in carbon dict for diagnostics
                 carbon_metrics["power_sample_count"] = n
                 carbon_metrics["power_backend"] = backend
-                # Override the TDP-estimated value with the measured one for accuracy
-                carbon_metrics["estimated_power_w"] = round(power_profile["mean_power_w"], 2)
+                peak_w = power_profile.get("peak_power_w")
+                if peak_w is not None:
+                    carbon_metrics["peak_power_w"] = round(peak_w, 2)
+
+        # Efficiency metrics: tokens/joule derived from best available power source
+        efficiency_metrics = _compute_efficiency_metrics(
+            inference_energy=_ie_meas,
+            power_profile=power_profile,
+            carbon_metrics=carbon_metrics,
+            throughput_tok_s=throughput_tok_s,
+        )
+
+        # Per-GPU diagnostics for multi-GPU straggler and bottleneck analysis.
+        gpu_kernel_counts: Dict[int, int] = defaultdict(int)
+        for kernel in self.events.get("gpu", {}).get("kernels", []):
+            dev = int(kernel.get("device")) if kernel.get("device") is not None else 0
+            gpu_kernel_counts[dev] += 1
+        gpu_kernel_counts = {
+            dev: int(round(count / num_runs)) for dev, count in gpu_kernel_counts.items()
+        }
+        per_gpu_metrics = _build_per_gpu_metrics(
+            per_device_gpu=per_device_gpu,
+            gpu_kernel_counts=gpu_kernel_counts,
+            per_gpu_memory=getattr(self.tracer, "_per_gpu_memory_metrics", {}) or {},
+            power_profile=power_profile,
+        )
 
         # Build metrics dictionary
         metrics = {
@@ -309,6 +469,7 @@ class SodaAnalyzer:
             "gpu_idle_time_ms": utils.us_to_ms(max(0.0, total_gpu_time_span - true_gpu_busy_time)),
             "gpu_utilization_percent": gpu_utilization,
             "per_device_gpu_metrics": per_device_gpu,   # {dev_id: {span_us, busy_us, utilization_pct}}
+            "per_gpu_metrics": per_gpu_metrics,
 
             # Kernel metrics
             "total_kernel_exec_time_ms": utils.us_to_ms(kernel_exec_time["total"]),
@@ -346,7 +507,10 @@ class SodaAnalyzer:
             "power_profile": power_profile,
 
             # Ground truth inference power from energy counter (always attempted)
-            "inference_energy": getattr(self.tracer, "_inference_energy_measurement", {}),
+            "inference_energy": _ie_meas,
+
+            # Power-efficiency derived metrics (tokens/joule, mJ/token, etc.)
+            "efficiency_metrics": efficiency_metrics,
         }
         
         self.results = {
@@ -660,7 +824,7 @@ class ModelTracer:
         self.model_name = args.model
 
         # Inference Mode
-        self.use_vllm = getattr(args, "vllm", False) # new
+        self.use_vllm = getattr(args, "vllm", False)
         
         # Detect CUDA availability once and store for use throughout
         self._has_cuda = torch.cuda.is_available()
@@ -760,6 +924,7 @@ class ModelTracer:
         self._peak_allocated_bytes = 0
         self._peak_reserved_bytes = 0
         self._kv_cache_bytes = 0
+        self._per_gpu_memory_metrics: Dict[int, Dict[str, float]] = {}
 
         # Power sampling results (populated during trace if --power-sample is set)
         self._power_results: dict = {}
@@ -770,14 +935,16 @@ class ModelTracer:
         self._inference_energy_measurement: dict = {}
 
     def _read_energy_counter_mj(self) -> Optional[float]:
-        """Read cumulative GPU energy counter (mJ) via pynvml, or None."""
+        """Read cumulative GPU energy counter total (mJ) across active GPUs."""
         try:
             import pynvml  # type: ignore[import]
             pynvml.nvmlInit()
-            h = pynvml.nvmlDeviceGetHandleByIndex(0)
-            # nvmlDeviceGetTotalEnergyConsumption returns millijoules
-            val = float(pynvml.nvmlDeviceGetTotalEnergyConsumption(h))
-            return val
+            total_mj = 0.0
+            for gpu_id in range(self.num_gpus):
+                h = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
+                # nvmlDeviceGetTotalEnergyConsumption returns millijoules.
+                total_mj += float(pynvml.nvmlDeviceGetTotalEnergyConsumption(h))
+            return total_mj
         except Exception as e:
             print(f"Warning: energy counter read failed: {e}", file=sys.stderr)
             return None
@@ -863,6 +1030,10 @@ class ModelTracer:
             self._pre_inference_bytes = sum(
                 torch.cuda.memory_allocated(i) for i in range(self.num_gpus)
             )
+            for i in range(self.num_gpus):
+                self._per_gpu_memory_metrics.setdefault(i, {})["pre_inference_memory_mb"] = round(
+                    torch.cuda.memory_allocated(i) / (1024**2), 2
+                )
 
     def _capture_peak_memory(self) -> None:
         """Capture peak memory after profiled inference completes."""
@@ -875,6 +1046,14 @@ class ModelTracer:
             self._peak_reserved_bytes = sum(
                 torch.cuda.max_memory_reserved(i) for i in range(self.num_gpus)
             )
+            for i in range(self.num_gpus):
+                pre_mb = self._per_gpu_memory_metrics.setdefault(i, {}).get("pre_inference_memory_mb", 0.0)
+                peak_alloc_mb = round(torch.cuda.max_memory_allocated(i) / (1024**2), 2)
+                self._per_gpu_memory_metrics[i].update({
+                    "peak_memory_allocated_mb": peak_alloc_mb,
+                    "peak_memory_reserved_mb": round(torch.cuda.max_memory_reserved(i) / (1024**2), 2),
+                    "memory_delta_mb": round(peak_alloc_mb - pre_mb, 2),
+                })
 
     def make_synthetic_prompt(self, seq_len):
         tokenizer = self.llm.get_tokenizer()
@@ -893,6 +1072,10 @@ class ModelTracer:
             print(f"Generating synthetic audio input: batch_size={self.batch_size}, seq_len={self.seq_len}")
             self.model_inputs = self.generate_audio_inputs()
         elif self.use_vllm:
+            if LLM is None or SamplingParams is None:
+                raise RuntimeError("vLLM requested with --vllm, but the vllm package is not installed.")
+            if not self._has_cuda:
+                raise RuntimeError("vLLM requested with --vllm, but CUDA is not available.")
             self.llm = LLM(
                 model=self.model_name,
                 enforce_eager=True,  # Disable cudagraph
@@ -920,7 +1103,7 @@ class ModelTracer:
             )
 
         # --- Multi-GPU Parallelism Wrappers ---
-        if self.num_gpus > 1:
+        if self.num_gpus > 1 and not self.use_vllm:
             if self.parallelism == "dp":
                 print("Parallelism: Wrapping model in torch.nn.DataParallel")
                 self.model = torch.nn.DataParallel(self.model)
@@ -975,6 +1158,11 @@ class ModelTracer:
             self._model_memory_reserved_bytes = sum(
                 torch.cuda.memory_reserved(i) for i in range(self.num_gpus)
             )
+            for i in range(self.num_gpus):
+                self._per_gpu_memory_metrics.setdefault(i, {}).update({
+                    "model_memory_mb": round(torch.cuda.memory_allocated(i) / (1024**2), 2),
+                    "model_memory_reserved_mb": round(torch.cuda.memory_reserved(i) / (1024**2), 2),
+                })
 
     def get_kwargs(self) -> Dict[str, Any]:
         """Returns common kwargs for model loading."""
@@ -1304,8 +1492,8 @@ class ModelTracer:
         self.process()
     
     def trace(self) -> None:
-        if self.use_vllm: # new
-                self.trace_with_vllm()
+        if self.use_vllm:
+            self.trace_with_vllm()
         else:
             """
             Profiles the forward pass of the model (encoder or decoder).
@@ -1762,44 +1950,109 @@ class ModelTracer:
         prof.export_chrome_trace(str(self.trace_file))
 
     def trace_with_vllm(self) -> None:
-            """
-            Profiles model inference using vLLM.
-            """
-            print("=== Profiling with vLLM ===")
-            
-            prompts = self.model_inputs
+        """Profile model inference using vLLM."""
+        if layerwise_profile is None:
+            raise RuntimeError("vLLM profiling requested, but vLLM profiler support is unavailable.")
 
-            # Initialization
-            self.sampling_params = SamplingParams(max_tokens=32)
-            
-            # Warmup
-            for _ in range(max(1, self.args.warmup)):
-                self.llm.generate(prompts, self.sampling_params)
-            torch.cuda.synchronize()
+        print("=== Profiling with vLLM ===")
+        prompts = self.model_inputs
+        num_runs = getattr(self.args, "runs", 1)
 
-            # Reset memory stats
-            self._reset_memory_stats()
-            self._capture_pre_inference_memory()
+        # Warmup
+        for _ in range(max(0, self.args.warmup)):
+            self.llm.generate(prompts, self.sampling_params)
+        self._sync_device()
 
+        # Reset memory stats and capture baseline after warmup.
+        self._reset_memory_stats()
+        self._capture_pre_inference_memory()
+
+        if self._has_cuda:
+            utils.report_gpu_clocks(context="after vLLM warmup, before profiling")
+
+        _profile_wall_start = time.perf_counter()
+        _sampler = self._make_power_sampler()
+        _energy_start_mj: Optional[float] = None
+        _energy_wall_start: Optional[float] = None
+        _sampling_wall_start: Optional[float] = None
+        _sampling_wall_end: Optional[float] = None
+        _energy_start_idx, _energy_measure_runs = _resolve_energy_measure_window(
+            num_runs,
+            getattr(self.args, "energy_measure_runs", 5),
+        )
+
+        if self._has_cuda and self.num_gpus == 1:
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
-                
             start_event.record()
-            outputs = self.llm.generate(prompts, self.sampling_params)
-            torch.cuda.synchronize()
+        else:
+            self._sync_device()
+            wall_start = time.perf_counter()
+
+        with layerwise_profile(num_running_seqs=len(prompts)) as prof:
+            for run_idx in range(num_runs):
+                _is_last = (run_idx == num_runs - 1)
+                _is_energy_start = (run_idx == _energy_start_idx)
+                if _is_energy_start:
+                    _sampler.start()
+                    self._sync_device()
+                    _energy_start_mj = self._read_energy_counter_mj()
+                    _energy_wall_start = time.perf_counter()
+                    _sampling_wall_start = _energy_wall_start
+
+                self.llm.generate(prompts, self.sampling_params)
+                self._sync_device()
+
+                if _is_last:
+                    _sampler.stop()
+                    _sampling_wall_end = time.perf_counter()
+                    if _energy_start_mj is not None and _energy_wall_start is not None:
+                        _energy_end_mj = self._read_energy_counter_mj()
+                        _energy_wall_end = time.perf_counter()
+                        if _energy_end_mj is not None:
+                            _dur_s_total = _energy_wall_end - _energy_wall_start
+                            _delta_mj_total = _energy_end_mj - _energy_start_mj
+                            _measurement = _build_inference_energy_measurement(
+                                _delta_mj_total,
+                                _dur_s_total,
+                                _energy_measure_runs,
+                            )
+                            if _measurement is not None:
+                                self._inference_energy_measurement = _measurement
+                            else:
+                                print(
+                                    "Warning: NVML energy counter returned zero/invalid delta"
+                                    " — counter may not be supported on this GPU or"
+                                    " the measurement window was too short."
+                                    " energy_balance will be null in power_report.json.",
+                                    file=sys.stderr,
+                                )
+
+        if self._has_cuda and self.num_gpus == 1:
             end_event.record()
             torch.cuda.synchronize()
-            total_ms = start_event.elapsed_time(end_event)
-            self.torch_measured_inference_time_us = utils.ms_to_us(total_ms / self.args.runs)
-            
-            self._capture_peak_memory()
-            
-            print(f"Mean time per inference: {utils.us_to_ms(self.torch_measured_inference_time_us):.2f} ms")
-            print("vLLM profiling complete, exporting trace...")
-            with open(f"/tmp/trace.json") as f:
-                prof = json.load(f) 
-            # print(prof)
-            shutil.copy("/tmp/trace.json", self.trace_file)
+            total_time_us = utils.ms_to_us(start_event.elapsed_time(end_event))
+        else:
+            self._sync_device()
+            wall_end = time.perf_counter()
+            total_time_us = (wall_end - wall_start) * 1e6
+
+        self.torch_measured_inference_time_us = total_time_us / num_runs
+        _profile_wall_end = time.perf_counter()
+        self._capture_power_results(
+            sampler=_sampler,
+            profile_start_s=_profile_wall_start,
+            profile_end_s=_profile_wall_end,
+            sampling_start_s=_sampling_wall_start,
+            sampling_end_s=_sampling_wall_end,
+        )
+
+        self.num_profiled_runs = num_runs
+        self._capture_peak_memory()
+
+        print(f"Mean time per inference: {utils.us_to_ms(self.torch_measured_inference_time_us):.2f} ms")
+        print("vLLM profiling complete, exporting trace...")
+        prof.export_chrome_trace(str(self.trace_file))
 
 def main() -> int:
     """Main entry point for the SODA CLI."""

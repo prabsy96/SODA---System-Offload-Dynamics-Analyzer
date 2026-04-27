@@ -15,11 +15,32 @@ LLM inference on GPUs wastes significant time between kernel launches — in Pyt
 
 SODA operates in three progressive stages, each building on the last:
 
+```mermaid
+flowchart LR
+    A["Model + prompt"] --> B["Stage 1<br/>Full-model trace"]
+    B --> C["Kernel database<br/>latency, utilization, memory, carbon"]
+    C --> D["Stage 2<br/>TaxBreak decomposition"]
+    D --> E["Per-op overhead map<br/>Python, ATen, CUDA library, launch floor"]
+    D --> F["Stage 3<br/>Per-kernel power/energy replay"]
+    F --> G["Power report<br/>raw/net watts, energy, balance"]
+    C --> H["Stage 4<br/>MoE expert profiling"]
+    H --> I["Expert hardware map<br/>HBM bytes, FLOPs, shared vs. routed experts"]
+```
+
+| Phase | Depends on | Main question answered | Primary output |
+| --- | --- | --- | --- |
+| Stage 1: full-model trace | Model run | Is inference host-bound, fragmented, memory-heavy, or energy-heavy? | Full-run metrics and kernel database |
+| Stage 2: TaxBreak decomposition | Stage 1 kernel database | Which software layer creates launch overhead per operation? | Python / ATen / CUDA library / launch-floor breakdown |
+| Stage 3: per-kernel power/energy replay | Stage 2 TaxBreak replay | Which kernels consume power and energy, and how does kernel-active energy compare to full-inference energy? | `taxbreak/power_report.json` with per-kernel watts, µJ, and energy balance |
+| Stage 4: MoE expert profiling | Live MoE inference pass | Which expert paths drive memory traffic and compute? | Shared-vs-routed expert HBM/FLOP attribution |
+
 **Stage 1 — Full-model trace** runs 150 profiled inference passes under PyTorch Profiler and extracts per-kernel timing sequences from the Chrome trace. This gives you GPU utilization, TTFT/TPOT latency, throughput, memory footprint, kernel fragmentation, and carbon footprint — with no additional tooling.
 
-**Stage 2 — TaxBreak decomposition** replays each unique kernel in isolation under Nsight Systems and subtracts a measured null-kernel floor, exposing the purely software-attributable launch overhead. This separates framework translation time (Python + ATen), vendor library front-end cost (cuBLAS/cuDNN), and the irreducible hardware launch floor per kernel. An optional NVML power replay measures the GPU power draw of each kernel individually via hardware-integrated energy counters. Roofline plots are generated when NCU profiling is enabled.
+**Stage 2 — TaxBreak decomposition** replays each unique kernel in isolation under Nsight Systems and subtracts a measured null-kernel floor, exposing the purely software-attributable launch overhead. This separates framework translation time (Python + ATen), vendor library front-end cost (cuBLAS/cuDNN), and the irreducible hardware launch floor per kernel. Roofline plots are generated when NCU profiling is enabled.
 
-**Stage 3 — MoE expert profiling** uses CUPTI hardware counters inside a live inference pass to attribute HBM bytes and compute FLOPs per expert type (shared vs. routed), exposing the memory access patterns that aggregate HDBI scores hide.
+**Stage 3 — Per-kernel power/energy replay** uses NVML power sampling and hardware energy counters during isolated kernel replays to report raw power, idle-subtracted net power, kernel-active energy, and an energy balance against Stage 1 inference-level energy.
+
+**Stage 4 — MoE expert profiling** uses CUPTI hardware counters inside a live inference pass to attribute HBM bytes and compute FLOPs per expert type (shared vs. routed), exposing the memory access patterns that aggregate HDBI scores hide.
 
 ## Installation
 
@@ -43,7 +64,7 @@ soda-cli -m gpt2 --output-dir output/ --seq-len 512 --batch-size 1
 soda-cli -m gpt2 --output-dir output/ --kernel-db
 soda-cli --taxbreak --kernel-db-path output/gpt2_.../kernel_database.json
 
-# Stage 2 + per-kernel power measurement
+# Stage 3: per-kernel power/energy replay
 soda-cli --taxbreak --kernel-db-path output/gpt2_.../kernel_database.json --power-replay
 ```
 

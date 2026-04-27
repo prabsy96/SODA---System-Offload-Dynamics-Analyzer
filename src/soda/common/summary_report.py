@@ -197,6 +197,51 @@ def _build_gpu_table(metrics: Dict[str, Any], args=None) -> Table:
     return tbl
 
 
+def _build_per_gpu_table(metrics: Dict[str, Any]) -> Optional[Table]:
+    """Build per-GPU bottleneck table for multi-GPU Stage 1 runs."""
+    per_gpu = metrics.get("per_gpu_metrics", {}) or {}
+    rows = per_gpu.get("gpus", [])
+    if len(rows) <= 1:
+        return None
+
+    bottleneck_id = per_gpu.get("bottleneck_gpu_id")
+    tbl = Table(
+        title="Per-GPU Bottleneck View", box=box.SIMPLE_HEAVY, show_edge=False,
+        pad_edge=False, title_style="bold", expand=False,
+    )
+    tbl.add_column("GPU", style="cyan", no_wrap=True, min_width=6)
+    tbl.add_column("Util", justify="right", min_width=7)
+    tbl.add_column("Busy", justify="right", min_width=10)
+    tbl.add_column("Idle", justify="right", min_width=10)
+    tbl.add_column("Kernels", justify="right", min_width=8)
+    tbl.add_column("Peak Mem", justify="right", min_width=10)
+    tbl.add_column("Mean Pwr", justify="right", min_width=10)
+
+    for row in sorted(rows, key=lambda r: r.get("gpu_id", 0)):
+        gpu_id = row.get("gpu_id")
+        marker = " *" if gpu_id == bottleneck_id else ""
+        peak_mem = row.get("peak_memory_allocated_mb")
+        mean_power = row.get("mean_power_w")
+        tbl.add_row(
+            f"GPU {gpu_id}{marker}",
+            f"{row.get('utilization_percent', 0.0):.1f}%",
+            _fmt_ms(row.get("busy_ms", 0.0)),
+            _fmt_ms(row.get("idle_ms", 0.0)),
+            f"{row.get('kernel_count', 0):,}",
+            _fmt_mb(peak_mem) if peak_mem is not None else "--",
+            f"{mean_power:.1f} W" if mean_power is not None else "--",
+        )
+
+    gap = per_gpu.get("busy_time_gap_percent")
+    util_gap = per_gpu.get("utilization_gap_percent")
+    if gap is not None and util_gap is not None:
+        tbl.caption = (
+            f"* bottleneck GPU by busy time; busy gap {gap:.1f}%, "
+            f"utilization gap {util_gap:.1f} pp"
+        )
+    return tbl
+
+
 def _build_memory_table(metrics: Dict[str, Any]) -> Table:
     tbl = Table(
         title="Memory", box=box.SIMPLE_HEAVY, show_edge=False, pad_edge=False,
@@ -261,6 +306,43 @@ def _build_carbon_table(carbon: Dict[str, Any]) -> Table:
         backend = carbon.get("power_backend", "")
         if n is not None:
             tbl.add_row("Power Samples", f"{n} ({backend})")
+    return tbl
+
+
+def _build_efficiency_table(efficiency: Dict[str, Any]) -> Optional[Table]:
+    """Build ⚡ Power & Efficiency table. Returns None if efficiency dict is empty."""
+    if not efficiency:
+        return None
+    tbl = Table(
+        title="Power & Efficiency", box=box.SIMPLE_HEAVY, show_edge=False, pad_edge=False,
+        title_style="bold", expand=False, show_header=False,
+    )
+    tbl.add_column("Metric", style="cyan", no_wrap=True, min_width=22)
+    tbl.add_column("Value", justify="right", min_width=16)
+    tbl.add_column("", min_width=8)
+
+    source = efficiency.get("power_source", "tdp_estimate")
+    est_label = " (est.)" if source == "tdp_estimate" else ""
+    source_label = {"energy_counter": "[green]measured[/green]",
+                    "nvml_polling": "[yellow]sampled[/yellow]",
+                    "tdp_estimate": "[dim]TDP estimate[/dim]"}.get(source, source)
+
+    power_w = efficiency.get("measured_power_w") or efficiency.get("estimated_power_w")
+    if power_w is not None:
+        tbl.add_row(f"Active Power{est_label}", f"{power_w:.1f} W", "")
+    peak_w = efficiency.get("peak_power_w")
+    if peak_w is not None:
+        tbl.add_row("Peak Power", f"{peak_w:.1f} W", "")
+    energy_mj = efficiency.get("energy_per_inference_mj")
+    if energy_mj is not None:
+        tbl.add_row(f"Energy/Inference{est_label}", f"{energy_mj:.2f} mJ", "")
+    tok_per_j = efficiency.get("tokens_per_joule")
+    if tok_per_j is not None:
+        tbl.add_row(f"Tokens/Joule{est_label}", f"{tok_per_j:.4f}", "tok/J")
+    mj_per_tok = efficiency.get("mj_per_token")
+    if mj_per_tok is not None:
+        tbl.add_row(f"mJ/Token{est_label}", f"{mj_per_tok:.4f}", "mJ/tok")
+    tbl.add_row("Power Source", source_label, "")
     return tbl
 
 
@@ -355,7 +437,10 @@ def _html_col_table(
     """Render a multi-column table section."""
     lines = [f'<div class="section"><h2>{title}</h2><table><tr>']
     for h in headers:
-        align = 'style="text-align:right"' if h in ("Time", "%", "Count", "Total", "Launch Tax", "L1 Hit") else ""
+        align = 'style="text-align:right"' if h in (
+            "Time", "%", "Count", "Total", "Launch Tax", "L1 Hit",
+            "Util", "Busy", "Idle", "Kernels", "Peak Mem", "Mean Pwr",
+        ) else ""
         lines.append(f"<th {align}>{h}</th>")
     lines.append("</tr>")
     for row in rows:
@@ -410,6 +495,34 @@ def _to_html_main(
     if inf_rows:
         parts.append(_html_kv_table(inf_rows, "Inference"))
 
+    # Power & Efficiency
+    eff = metrics.get("efficiency_metrics", {})
+    if eff:
+        eff_rows: List[Dict[str, Any]] = []
+        source = eff.get("power_source", "tdp_estimate")
+        est_label = " (est.)" if source == "tdp_estimate" else ""
+        source_labels = {"energy_counter": "measured (energy counter)",
+                         "nvml_polling": "sampled (NVML)",
+                         "tdp_estimate": "TDP estimate"}
+        power_w = eff.get("measured_power_w") or eff.get("estimated_power_w")
+        if power_w is not None:
+            eff_rows.append({"label": f"Active Power{est_label}", "value": f"{power_w:.1f} W"})
+        peak_w = eff.get("peak_power_w")
+        if peak_w is not None:
+            eff_rows.append({"label": "Peak Power", "value": f"{peak_w:.1f} W"})
+        energy_mj = eff.get("energy_per_inference_mj")
+        if energy_mj is not None:
+            eff_rows.append({"label": f"Energy/Inference{est_label}", "value": f"{energy_mj:.2f} mJ"})
+        tok_per_j = eff.get("tokens_per_joule")
+        if tok_per_j is not None:
+            eff_rows.append({"label": f"Tokens/Joule{est_label}", "value": f"{tok_per_j:.4f} tok/J"})
+        mj_per_tok = eff.get("mj_per_token")
+        if mj_per_tok is not None:
+            eff_rows.append({"label": f"mJ/Token{est_label}", "value": f"{mj_per_tok:.4f} mJ/tok"})
+        eff_rows.append({"label": "Power Source", "value": source_labels.get(source, source)})
+        if eff_rows:
+            parts.append(_html_kv_table(eff_rows, "Power &amp; Efficiency"))
+
     # GPU
     gpu_rows: List[Dict[str, Any]] = []
     gpu_util = metrics.get("gpu_utilization_percent")
@@ -427,6 +540,37 @@ def _to_html_main(
         gpu_rows.append({"label": "Active Streams", "value": str(streams)})
     if gpu_rows:
         parts.append(_html_kv_table(gpu_rows, "GPU"))
+
+    per_gpu = metrics.get("per_gpu_metrics", {}) or {}
+    per_gpu_rows = per_gpu.get("gpus", [])
+    if len(per_gpu_rows) > 1:
+        bottleneck_id = per_gpu.get("bottleneck_gpu_id")
+        pg_rows: List[List[str]] = []
+        for row in sorted(per_gpu_rows, key=lambda r: r.get("gpu_id", 0)):
+            gpu_id = row.get("gpu_id")
+            marker = " *" if gpu_id == bottleneck_id else ""
+            peak_mem = row.get("peak_memory_allocated_mb")
+            mean_power = row.get("mean_power_w")
+            pg_rows.append([
+                f"GPU {gpu_id}{marker}",
+                f"{row.get('utilization_percent', 0.0):.1f}%",
+                _fmt_ms(row.get("busy_ms", 0.0)),
+                _fmt_ms(row.get("idle_ms", 0.0)),
+                f"{row.get('kernel_count', 0):,}",
+                _fmt_mb(peak_mem) if peak_mem is not None else "--",
+                f"{mean_power:.1f} W" if mean_power is not None else "--",
+            ])
+        note = (
+            f"* bottleneck GPU by busy time; busy gap "
+            f"{per_gpu.get('busy_time_gap_percent', 0.0):.1f}%, utilization gap "
+            f"{per_gpu.get('utilization_gap_percent', 0.0):.1f} pp"
+        )
+        parts.append(_html_col_table(
+            ["GPU", "Util", "Busy", "Idle", "Kernels", "Peak Mem", "Mean Pwr"],
+            pg_rows,
+            "Per-GPU Bottleneck View",
+            note=note,
+        ))
 
     # Memory
     mem = metrics.get("memory_metrics", {})
@@ -636,9 +780,17 @@ def render_main_analysis(results: dict, args, output_dir: Path) -> str:
     if tbl_speed.row_count > 0:
         _console.print(tbl_speed)
 
+    tbl_eff = _build_efficiency_table(metrics.get("efficiency_metrics", {}))
+    if tbl_eff is not None:
+        _console.print(tbl_eff)
+
     tbl_gpu = _build_gpu_table(metrics, args=args)
     if tbl_gpu.row_count > 0:
         _console.print(tbl_gpu)
+
+    tbl_per_gpu = _build_per_gpu_table(metrics)
+    if tbl_per_gpu is not None and tbl_per_gpu.row_count > 0:
+        _console.print(tbl_per_gpu)
 
     tbl_mem = _build_memory_table(metrics)
     if tbl_mem.row_count > 0:

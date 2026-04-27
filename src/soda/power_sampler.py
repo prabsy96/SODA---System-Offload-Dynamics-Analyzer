@@ -226,7 +226,11 @@ class NVMLPowerSampler:
                 available (bool), backend (str), interval_ms (int),
                 sample_count (int), mean_power_w (float), peak_power_w (float),
                 min_power_w (float), std_power_w (float),
-                per_gpu (dict[str, {mean_w, peak_w}]).
+                per_gpu (dict[str, {mean_w, peak_w, min_w, std_w, sample_count}]).
+
+            For multi-GPU runs, mean/peak/min power are total active GPU power
+            estimates derived from per-GPU statistics. The per_gpu block is the
+            authoritative bottleneck view.
         """
         all_watts: List[float] = []
         per_gpu: Dict[str, Dict[str, float]] = {}
@@ -234,9 +238,13 @@ class NVMLPowerSampler:
         for g, readings in self._samples.items():
             watts = [w for _, w in readings]
             if watts:
+                std = statistics.stdev(watts) if len(watts) > 1 else 0.0
                 per_gpu[str(g)] = {
                     "mean_w": round(statistics.mean(watts), 2),
                     "peak_w": round(max(watts), 2),
+                    "min_w": round(min(watts), 2),
+                    "std_w": round(std, 2),
+                    "sample_count": len(watts),
                 }
                 all_watts.extend(watts)
 
@@ -253,16 +261,19 @@ class NVMLPowerSampler:
                 "per_gpu": per_gpu,
             }
 
-        std = statistics.stdev(all_watts) if len(all_watts) > 1 else 0.0
+        total_mean_w = sum(g["mean_w"] for g in per_gpu.values())
+        total_peak_w = sum(g["peak_w"] for g in per_gpu.values())
+        total_min_w = sum(g["min_w"] for g in per_gpu.values())
+        total_std_w = sum(g["std_w"] ** 2 for g in per_gpu.values()) ** 0.5
         return {
             "available": True,
             "backend": self._backend,
             "interval_ms": self._interval_ms,
             "sample_count": len(all_watts),
-            "mean_power_w": round(statistics.mean(all_watts), 2),
-            "peak_power_w": round(max(all_watts), 2),
-            "min_power_w": round(min(all_watts), 2),
-            "std_power_w": round(std, 2),
+            "mean_power_w": round(total_mean_w, 2),
+            "peak_power_w": round(total_peak_w, 2),
+            "min_power_w": round(total_min_w, 2),
+            "std_power_w": round(total_std_w, 2),
             "per_gpu": per_gpu,
         }
 

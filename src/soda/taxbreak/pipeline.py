@@ -1,10 +1,9 @@
 """
 Enhanced TaxBreak pipeline orchestrator.
 
-Reads a kernel database (from Phase 1), measures the dynamic system floor
-(Phase 2), replays each kernel in isolation under nsys (Phase 3), optionally
-profiles top-N kernels with ncu (Phase 4), and writes an enhanced report
-(Phase 6).
+Reads a kernel database (from Phase 1), runs TaxBreak timing decomposition
+(Phase 2), optionally runs per-kernel power/energy replay (Phase 3), optionally
+profiles top-N kernels with ncu, and writes an enhanced report.
 
 Usage (Stage 2 — no model loading required):
     soda-cli --taxbreak --kernel-db-path <path> [--ncu] [--ncu-top-n 10] [--ncu-all-kernels]
@@ -171,7 +170,7 @@ class TaxBreakPipeline:
             print(f"\nCompleted ncu: {len(ncu_results)} kernels")
             print_utils.section_end(section)
 
-        # --- Step 3.5: Optional per-kernel power replay ---
+        # --- Phase 3: Optional per-kernel power/energy replay ---
         power_replay_results: Dict[str, Any] = {}
         power_idle_baseline_w: float = 0.0
         if getattr(self.args, "power_replay", False):
@@ -206,11 +205,15 @@ class TaxBreakPipeline:
         """Infer the shared output root that should own the global cache.
 
         Preference order:
-        1. Explicit ``SODA_OUTPUT`` override
-        2. Repository root output dir from ``SODA_ROOT``
-        3. Nearest ancestor named ``output`` in ``kernel_db_path``
+        1. Nearest ancestor named ``output`` in ``kernel_db_path`` (most specific)
+        2. Explicit ``SODA_OUTPUT`` override
+        3. Repository root output dir from ``SODA_ROOT``
         4. Fallback to the kernel DB's great-grandparent directory
         """
+        for parent in self.kernel_db_path.parents:
+            if parent.name == "output":
+                return parent.resolve()
+
         configured_output = os.environ.get("SODA_OUTPUT")
         if configured_output:
             return Path(configured_output).expanduser().resolve()
@@ -218,10 +221,6 @@ class TaxBreakPipeline:
         soda_root = os.environ.get("SODA_ROOT")
         if soda_root:
             return (Path(soda_root).expanduser().resolve() / "output")
-
-        for parent in self.kernel_db_path.parents:
-            if parent.name == "output":
-                return parent.resolve()
 
         try:
             return self.kernel_db_path.parents[3].resolve()

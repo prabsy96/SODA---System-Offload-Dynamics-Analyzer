@@ -889,10 +889,11 @@ def get_args_parser() -> argparse.ArgumentParser:
              "(device_map=\"balanced\"). Default: 1 (single GPU). "
              "Values > available GPUs are clamped to available count.",
     )
-    parser.add_argument( #new
+    parser.add_argument(
         "--vllm",
         action="store_true",
-        help="Run inference using vLLM."
+        help="Run inference using vLLM.",
+    )
     parser.add_argument(
         "--parallelism",
         dest="parallelism",
@@ -988,7 +989,7 @@ def get_args_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    # ── Per-kernel power replay (Stage 2 / --taxbreak) ────────────────────
+    # ── Per-kernel power/energy replay (Stage 3 / --taxbreak) ─────────────
     parser.add_argument(
         "--power-replay",
         dest="power_replay",
@@ -1136,6 +1137,13 @@ def parse_and_validate_args(args=None) -> argparse.Namespace:
     if getattr(parsed_args, "energy_measure_runs", 5) < 1:
         parser.error("--energy-measure-runs must be >= 1")
 
+    if getattr(parsed_args, "vllm", False) and getattr(parsed_args, "parallelism", "tp") != "tp":
+        parser.error(
+            "--vllm cannot be combined with --parallelism dp/fsdp/ep. "
+            "vLLM manages distributed execution through its own parallelism mechanisms; "
+            "use the default --parallelism tp or omit --parallelism."
+        )
+
     if getattr(parsed_args, "power_replay_idle_settle_min_ms", 1500) < 0:
         parser.error("--power-replay-idle-settle-min-ms must be >= 0")
 
@@ -1262,13 +1270,21 @@ def collect_env_metadata():
     }
     
     if torch.cuda.is_available():
-        metadata.update({
-            "device_name": torch.cuda.get_device_name(0),
-            "sm_capability": torch.cuda.get_device_capability(0),
-        })
-        n = torch.cuda.device_count()
-        metadata["num_gpus"] = n
-        metadata["all_gpu_names"] = [torch.cuda.get_device_name(i) for i in range(n)]
+        try:
+            n = torch.cuda.device_count()
+            metadata.update({
+                "device_name": torch.cuda.get_device_name(0) if n else None,
+                "sm_capability": torch.cuda.get_device_capability(0) if n else None,
+                "num_gpus": n,
+                "all_gpu_names": [torch.cuda.get_device_name(i) for i in range(n)],
+            })
+        except RuntimeError:
+            metadata.update({
+                "device_name": None,
+                "sm_capability": None,
+                "num_gpus": 0,
+                "all_gpu_names": [],
+            })
         # Driver/runtime versions can affect JIT/PTX compilation
         try:
             metadata["driver_version"] = torch.cuda.driver_version()
@@ -2469,11 +2485,15 @@ def generate_synthetic_inputs(
     if model_config is not None:
         # Different models use different attribute names
         if hasattr(model_config, 'max_position_embeddings'):
-            max_pos = model_config.max_position_embeddings
+            candidate_max_pos = model_config.max_position_embeddings
         elif hasattr(model_config, 'n_positions'):
-            max_pos = model_config.n_positions
+            candidate_max_pos = model_config.n_positions
         elif hasattr(model_config, 'n_ctx'):
-            max_pos = model_config.n_ctx
+            candidate_max_pos = model_config.n_ctx
+        else:
+            candidate_max_pos = None
+        if isinstance(candidate_max_pos, int):
+            max_pos = candidate_max_pos
     
     # Clamp seq_len to model's max position embeddings
     if seq_len > max_pos:
