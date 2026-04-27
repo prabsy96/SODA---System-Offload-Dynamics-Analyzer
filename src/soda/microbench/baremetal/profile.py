@@ -152,7 +152,7 @@ def replay_all_sequences_from_aten_ops(
     warmup: int,
     runs: int
 ) -> List[Dict[str, Any]]:
-    """Replay all event sequences (GEMM and non-GEMM)."""
+    """Replay all event sequences (library-mediated and framework-native)."""
     kernel_traces_dir = utils.get_path("PYTORCH_TRACES")
     utils.ensure_dir(kernel_traces_dir)
 
@@ -168,7 +168,7 @@ def replay_all_sequences_from_aten_ops(
         aten_op_name = aten_op["name"]
         expected_kernel = clean_kernel_name(kernel["name"])
         seq_idx = i + 1
-        is_gemm = event_sequence.get("is_gemm", False)
+        is_gemm = event_sequence.get("is_library_mediated", event_sequence.get("is_gemm", False))
         
         # Check if operation is supported
         if not is_op_supported(aten_op_name):
@@ -176,7 +176,7 @@ def replay_all_sequences_from_aten_ops(
             skipped_count += 1
             continue
         
-        kernel_type = "GEMM" if is_gemm else "other"
+        kernel_type = "lib-mediated" if is_gemm else "fw-native"
         print(f"[{seq_idx}/{len(sequences)}] [{kernel_type}] {aten_op_name} -> {expected_kernel}")
         
         # Generate trace filename
@@ -217,9 +217,10 @@ def replay_all_sequences_from_aten_ops(
                 event_types=["kernel", "aten_op", "cuda_launch", "torch_op"],
             )
             
-            # Mark GEMM status
+            # Mark classification
             for seq in agg_sequence:
-                seq["is_gemm"] = is_gemm
+                seq["is_library_mediated"] = is_gemm
+                seq["is_gemm"] = is_gemm  # backward compat
             
             sequence_by_idx[i] = agg_sequence
             supported_count += 1
@@ -247,7 +248,7 @@ def profile_pytorch_all_sequences(
     warmup: int,
     runs: int
 ) -> Dict[str, Any]:
-    """Profile all PyTorch kernel sequences (GEMM and non-GEMM)."""
+    """Profile all PyTorch kernel sequences (library-mediated and framework-native)."""
     kernel_traces_dir = utils.get_path("PYTORCH_TRACES")
     utils.ensure_dir(kernel_traces_dir, cleanup=True)
     
@@ -263,23 +264,26 @@ def profile_pytorch_all_sequences(
         if i < len(target_seqs):
             replayed_seq["freq"] = target_seqs[i].get("count", 1)
 
-    # Count GEMM vs non-GEMM
-    gemm_count = sum(1 for s in replayed_sequences if s.get("is_gemm", False))
-    non_gemm_count = len(replayed_sequences) - gemm_count
+    # Count library-mediated vs framework-native
+    lib_med_count = sum(1 for s in replayed_sequences if s.get("is_library_mediated", s.get("is_gemm", False)))
+    fw_native_count = len(replayed_sequences) - lib_med_count
 
     pytorch_all_sequences_file = utils.get_path("PYTORCH_ALL_SEQUENCES")
     pytorch_all_sequences_data = {
         "summary": {
             "count": len(replayed_sequences),
-            "gemm_count": gemm_count,
-            "non_gemm_count": non_gemm_count,
+            "library_mediated_count": lib_med_count,
+            "framework_native_count": fw_native_count,
+            # backward compat
+            "gemm_count": lib_med_count,
+            "non_gemm_count": fw_native_count,
         },
         "sequences": replayed_sequences
     }
     utils.save_json(pytorch_all_sequences_file, pytorch_all_sequences_data)
     print(f"Saved {len(replayed_sequences)} PyTorch sequences to {pytorch_all_sequences_file}")
-    print(f"  - {gemm_count} GEMM sequences")
-    print(f"  - {non_gemm_count} non-GEMM sequences")
+    print(f"  - {lib_med_count} library-mediated sequences")
+    print(f"  - {fw_native_count} framework-native sequences")
     
     return pytorch_all_sequences_data
 
@@ -484,7 +488,7 @@ def profile_baremetal_gemm_kernels(
     skip_offline_cublas_algo_search: bool = False,
 ) -> Dict[str, Any]:
     """
-    Profile baremetal GEMM kernels for all jobs using matched algorithms.
+    Profile baremetal library-mediated kernels for all jobs using matched algorithms.
     
     Args:
         warmup: Number of warmup iterations to skip per job.
@@ -495,7 +499,7 @@ def profile_baremetal_gemm_kernels(
             algorithm selection instead of matched heur_idx.
     
     Returns:
-        Dictionary with profiled baremetal GEMM sequences data (same format as saved JSON).
+        Dictionary with profiled baremetal library-mediated sequences data (same format as saved JSON).
     """ 
     
     # Load jobs
@@ -582,7 +586,7 @@ def profile_baremetal_gemm_kernels(
         "sequences": valid_sequences,
     }
     utils.save_json(baremetal_gemm_sequences_file, baremetal_gemm_sequences_data)
-    print(f"Saved {baremetal_gemm_sequences_data['summary']['count']} baremetal GEMM sequences to {baremetal_gemm_sequences_file}")
+    print(f"Saved {baremetal_gemm_sequences_data['summary']['count']} baremetal library-mediated sequences to {baremetal_gemm_sequences_file}")
     
     # Print a summary table with % delta over null kernel 
     print_summary(valid_sequences)

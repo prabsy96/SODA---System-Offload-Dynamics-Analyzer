@@ -26,16 +26,33 @@ GPU_SPECS: Dict[str, Dict[str, float]] = {
     "H100 SXM": {"peak_tflops_fp16": 989.5, "peak_bw_tb_s": 3.35},
     "H100 PCIe": {"peak_tflops_fp16": 756.5, "peak_bw_tb_s": 2.0},
     "H200 SXM": {"peak_tflops_fp16": 989.5, "peak_bw_tb_s": 4.8},
+    "H200 NVL": {"peak_tflops_fp16": 989.5, "peak_bw_tb_s": 3.35},  # PCIe form-factor, 96 GB HBM3e
     "A100 SXM": {"peak_tflops_fp16": 312.0, "peak_bw_tb_s": 2.0},
     "A100 PCIe": {"peak_tflops_fp16": 312.0, "peak_bw_tb_s": 1.555},
     "V100 SXM2": {"peak_tflops_fp16": 125.0, "peak_bw_tb_s": 0.9},
     "A6000": {"peak_tflops_fp16": 155.0, "peak_bw_tb_s": 0.768},
     "L40S": {"peak_tflops_fp16": 362.0, "peak_bw_tb_s": 0.864},
+    # Blackwell workstation — RTX 6000 Blackwell (96 GB GDDR7, 600 W TDP)
+    # FP16 Tensor (dense) = 2× FP32 CUDA (125 TFLOPS); same multiplier as RTX 6000 Ada.
+    "RTX 6000 Blackwell": {"peak_tflops_fp16": 250.0, "peak_bw_tb_s": 1.792},
+    # Blackwell data-center — B200 SXM5 (192 GB HBM3e, 8.0 TB/s, 1000 W TDP)
+    "B200 SXM": {"peak_tflops_fp16": 2250.0, "peak_bw_tb_s": 8.0},
+    # GB200 NVL — per-GPU spec in NVLink fabric (same die as B200 SXM)
+    "GB200 NVL": {"peak_tflops_fp16": 2250.0, "peak_bw_tb_s": 8.0},
 }
 
 # Patterns for fuzzy-matching torch.cuda.get_device_name() strings
 _GPU_PATTERNS: List[Tuple[re.Pattern, str]] = [
-    (re.compile(r"H200.*SXM|H200", re.IGNORECASE), "H200 SXM"),
+    # Blackwell — match before any generic H/A patterns
+    (re.compile(r"RTX\s*6000.*Blackwell", re.IGNORECASE), "RTX 6000 Blackwell"),
+    (re.compile(r"RTX\s*PRO\s*6000.*_?B\b", re.IGNORECASE), "RTX 6000 Blackwell"),
+    (re.compile(r"GB200.*NVL|NVL.*GB200", re.IGNORECASE), "GB200 NVL"),
+    (re.compile(r"B200.*SXM|B200", re.IGNORECASE), "B200 SXM"),
+    # Hopper
+    (re.compile(r"H200.*NVL", re.IGNORECASE), "H200 NVL"),
+    (re.compile(r"H200.*SXM", re.IGNORECASE), "H200 SXM"),
+    # H200 without variant qualifier — default to SXM (most common data-centre config)
+    (re.compile(r"H200", re.IGNORECASE), "H200 SXM"),
     (re.compile(r"H100.*SXM", re.IGNORECASE), "H100 SXM"),
     (re.compile(r"H100.*PCIe|H100.*PCI", re.IGNORECASE), "H100 PCIe"),
     (re.compile(r"A100.*SXM", re.IGNORECASE), "A100 SXM"),
@@ -43,7 +60,7 @@ _GPU_PATTERNS: List[Tuple[re.Pattern, str]] = [
     (re.compile(r"V100.*SXM", re.IGNORECASE), "V100 SXM2"),
     (re.compile(r"A6000", re.IGNORECASE), "A6000"),
     (re.compile(r"L40S", re.IGNORECASE), "L40S"),
-    # Fallback: H100 without variant → assume SXM
+    # Fallback: H100/A100 without variant → assume SXM
     (re.compile(r"H100", re.IGNORECASE), "H100 SXM"),
     (re.compile(r"A100", re.IGNORECASE), "A100 SXM"),
 ]
@@ -177,7 +194,7 @@ def compute_roofline_data(
 
     Returns:
         List of roofline data dicts, each with:
-        ``id``, ``kernel_name``, ``is_gemm``, ``ai``,
+        ``id``, ``kernel_name``, ``is_library_mediated``, ``ai``,
         ``achieved_gflops``, ``bound``, ``efficiency_pct``,
         ``frequency`` (invocations per inference, for marker sizing).
     """
@@ -199,7 +216,9 @@ def compute_roofline_data(
             continue
 
         kid = entry["id"]
-        is_gemm = entry["classification"]["is_gemm"]
+        is_lib_mediated = entry["classification"].get(
+            "is_library_mediated", entry["classification"].get("is_gemm", False)
+        )
         duration_us = entry.get("kernel_duration_us", 0)
         if duration_us <= 0:
             continue
@@ -211,14 +230,14 @@ def compute_roofline_data(
 
         # Compute achieved GFLOP/s
         flops = None
-        if is_gemm:
+        if is_lib_mediated:
             flops = compute_gemm_flops(aten_op_name, input_dims)
 
         if flops is not None:
             achieved_gflops = (flops / duration_s) / 1e9
             ai = flops / total_bytes
         else:
-            # Non-GEMM or FLOPs unavailable: estimate from compute throughput
+            # Framework-native or FLOPs unavailable: estimate from compute throughput
             compute_pct = ncu.get("compute_throughput_pct", 0) or 0
             achieved_gflops = (compute_pct / 100.0) * peak_gflops
             if achieved_gflops <= 0:
@@ -233,7 +252,9 @@ def compute_roofline_data(
         roofline_data.append({
             "id": kid,
             "kernel_name": entry["kernel_name"],
-            "is_gemm": is_gemm,
+            "is_library_mediated": is_lib_mediated,
+            # Backward-compatible alias (deprecated)
+            "is_gemm": is_lib_mediated,
             "ai": round(ai, 4),
             "achieved_gflops": round(achieved_gflops, 2),
             "bound": bound,
@@ -353,8 +374,8 @@ def generate_roofline_plot(
     # -- Kernel data points ------------------------------------
     max_freq = max((d.get("frequency", 1) for d in roofline_data), default=1)
 
-    gemm_pts = [d for d in roofline_data if d["is_gemm"]]
-    non_gemm_pts = [d for d in roofline_data if not d["is_gemm"]]
+    lib_mediated_pts = [d for d in roofline_data if d.get("is_library_mediated", d.get("is_gemm", False))]
+    fw_native_pts = [d for d in roofline_data if not d.get("is_library_mediated", d.get("is_gemm", False))]
 
     _COLORS = {"compute": "#e63946", "memory": "#2196f3"}
     _EDGE   = {"compute": "#9b0000", "memory": "#0d47a1"}
@@ -373,8 +394,8 @@ def generate_roofline_plot(
                 edgecolors=edge, linewidths=0.8, alpha=0.88,
             )
 
-    _plot_group(gemm_pts, "^", "GEMM")
-    _plot_group(non_gemm_pts, "o", "Non-GEMM")
+    _plot_group(lib_mediated_pts, "^", "Library-mediated")
+    _plot_group(fw_native_pts, "o", "Framework-native")
 
     # Annotations — alternate y-offsets to reduce overlap
     annotated = sorted(roofline_data, key=lambda d: d["ai"])
@@ -398,9 +419,9 @@ def generate_roofline_plot(
         mpatches.Patch(color=_COLORS["compute"], alpha=0.75, label="Compute-bound"),
         mpatches.Patch(color=_COLORS["memory"],  alpha=0.75, label="Memory-bound"),
         plt.scatter([], [], marker="^", c="#888888", s=80,
-                    edgecolors="#444444", linewidths=0.7, label=f"GEMM ({len(gemm_pts)})"),
+                    edgecolors="#444444", linewidths=0.7, label=f"Library-mediated ({len(lib_mediated_pts)})"),
         plt.scatter([], [], marker="o", c="#888888", s=60,
-                    edgecolors="#444444", linewidths=0.7, label=f"Non-GEMM ({len(non_gemm_pts)})"),
+                    edgecolors="#444444", linewidths=0.7, label=f"Framework-native ({len(fw_native_pts)})"),
     ]
     line_handles, line_labels = ax.get_legend_handles_labels()
     ax.legend(

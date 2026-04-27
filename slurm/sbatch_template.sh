@@ -22,8 +22,8 @@
 #SBATCH --nodes=1   # Number of nodes (adjust if your job requires multiple nodes)
 #SBATCH --ntasks=1  # Number of tasks (usually 1 for single-process jobs)
 #SBATCH --gres=gpu:1               # Number of GPUs (e.g., gpu:2 for multi-GPU)
-#SBATCH --cpus-per-gpu=6     # CPU cores per GPU (adjust based on your workload)
-#SBATCH --mem-per-gpu=64G          # Memory per GPU (adjust based on your model size and batch size)
+#SBATCH --cpus-per-gpu=6     # REQUIRED: 6 CPU cores per GPU (paper Table II §4.1)
+#SBATCH --mem-per-gpu=32G          # REQUIRED: 32 GB per GPU (paper Table II §4.1)
 
 # =============================================================================
 # USER CONFIGURATION — Edit these values for your setup
@@ -94,6 +94,12 @@ else
 fi
 
 cd "$SODA_ROOT"
+source "$SODA_ROOT/slurm/output_paths.sh"
+
+# Default to a per-submission output root so repeated submissions never share
+# caches or overwrite one another. Override SODA_OUTPUT before submission if needed.
+export SODA_OUTPUT="$(soda_make_output_root "slurm-template")"
+mkdir -p "$SODA_OUTPUT"
 
 # Set HuggingFace config
 export HF_HOME="$HF_HOME"
@@ -105,7 +111,7 @@ else
 fi
 
 # Install SODA package
-pip install -e "$SODA_PROJECT_ROOT" --quiet 2>/dev/null
+pip install -e "$SODA_PROJECT_ROOT" --quiet 2>/dev/null || true
 
 # Install extra packages (flash-attn, transformer-engine, etc.)
 if [ -n "$EXTRA_PIP_PACKAGES" ]; then
@@ -336,6 +342,69 @@ echo ""
 # export SODA_SWEEP_CONFIG="debug"
 # python -u "$SODA_ROOT/experiments/sweep/soda_sweep.py" \
 #     2>&1 | tee "$SODA_OUTPUT/debug_sweep.log"
+
+# -----------------------------------------------------------------------------
+# 8b) MoE per-expert-type memory profiling (Stage 3)
+#     Generates op_profile.json: one record per kernel per layer across the
+#     full model, with is_shared_expert=true/false for shared expert kernels.
+#     Also generates moe_profile.json with NCU isolation HBM bytes per expert type.
+#     Requires: kernel_database.json from Stage 1 (--kernel-db)
+#     No model loading or GPU required to run this stage.
+#     Outputs (written to <exp_dir>/moe_profile/):
+#       op_profile.json    — per-kernel per-layer records with is_shared_expert flag
+#       moe_profile.json   — aggregate NCU isolation + optional NVBit reuse metrics
+# -----------------------------------------------------------------------------
+# soda-cli \
+#     --moe-profile \
+#     --kernel-db-path output/Qwen_Qwen1.5-MoE-A2.7B_eager_bfloat16_bs4_sl4096_mt1/kernel_database.json \
+#     2>&1 | tee "$SODA_OUTPUT/moe_profile.log"
+
+# -----------------------------------------------------------------------------
+# 8c) MoE profile — with CLI overrides for model dimensions and layer count
+#     Use when auto-detection of shared_dim/routed_dim/num_layers fails.
+#     --moe-shared-dim:  shared expert intermediate dimension (weight shape[0])
+#     --moe-routed-dim:  routed expert intermediate dimension (weight shape[0])
+#     --moe-num-layers:  number of transformer layers for layer_id expansion
+# -----------------------------------------------------------------------------
+# soda-cli \
+#     --moe-profile \
+#     --kernel-db-path output/Qwen_Qwen1.5-MoE-A2.7B_eager_bfloat16_bs4_sl4096_mt1/kernel_database.json \
+#     --moe-shared-dim 5632 \
+#     --moe-routed-dim 1408 \
+#     --moe-num-layers 24 \
+#     2>&1 | tee "$SODA_OUTPUT/moe_profile.log"
+
+# -----------------------------------------------------------------------------
+# 8d) Full MoE pipeline (Stage 1 then Stage 3 in one job)
+#     Stage 1 profiles the MoE model; Stage 3 classifies and annotates kernels.
+# -----------------------------------------------------------------------------
+# MODEL="Qwen/Qwen1.5-MoE-A2.7B"
+# OUTPUT_DIR="output/"
+# SEQ_LEN=4096
+# BATCH=4
+# PRECISION="bfloat16"
+#
+# # Stage 1: profiled inference + kernel database
+# soda-cli \
+#     --model "$MODEL" \
+#     --output-dir "$OUTPUT_DIR" \
+#     --seq-len "$SEQ_LEN" \
+#     --batch-size "$BATCH" \
+#     --precision "$PRECISION" \
+#     --kernel-db \
+#     2>&1 | tee "$SODA_OUTPUT/stage1.log"
+#
+# # Stage 3: MoE per-expert memory profiling + op_profile.json
+# EXP_DIR=$(ls -td "${OUTPUT_DIR}"/*MoE*_bs${BATCH}_sl${SEQ_LEN}_* 2>/dev/null | head -1)
+# if [ -n "$EXP_DIR" ]; then
+#     soda-cli \
+#         --moe-profile \
+#         --kernel-db-path "$EXP_DIR/kernel_database.json" \
+#         2>&1 | tee "$SODA_OUTPUT/stage3.log"
+# else
+#     echo "Error: could not locate MoE experiment directory under $OUTPUT_DIR"
+#     exit 1
+# fi
 
 # -----------------------------------------------------------------------------
 # 9) Microbenchmark sweep — GEMM kernel analysis (baremetal + PyTorch)

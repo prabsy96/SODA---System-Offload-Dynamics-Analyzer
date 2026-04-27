@@ -70,7 +70,7 @@ def get_null_kernel_sys_tax(dynamic_value: float | None = None) -> float:
 
 
 def load_pytorch_results(pytorch_file: str) -> Dict[str, Any]:
-    """Load PyTorch GEMM sequences."""
+    """Load PyTorch library-mediated sequences."""
     data = utils.load_json(pytorch_file)
     sequences = data["sequences"]
     results = {}
@@ -87,13 +87,14 @@ def load_pytorch_results(pytorch_file: str) -> Dict[str, Any]:
             "launch_tax": sequence["launch_tax"]["avg"],
             "aten_xlat_tax": sequence["aten_xlat_tax"]["avg"],
             "py_tax": sequence["py_tax"]["avg"],
-            "is_gemm": sequence.get("is_gemm", False),
+            "is_library_mediated": sequence.get("is_library_mediated", sequence.get("is_gemm", False)),
+            "is_gemm": sequence.get("is_library_mediated", sequence.get("is_gemm", False)),  # backward compat
         }
     
     return results
 
 def load_all_pytorch_results(pytorch_file: str) -> Dict[str, Any]:
-    """Load ALL PyTorch kernel sequences (GEMM and non-GEMM)."""
+    """Load ALL PyTorch kernel sequences (library-mediated and framework-native)."""
     if not os.path.exists(pytorch_file):
         return {}
     
@@ -113,14 +114,15 @@ def load_all_pytorch_results(pytorch_file: str) -> Dict[str, Any]:
             "launch_tax": sequence["launch_tax"]["avg"],
             "aten_xlat_tax": sequence["aten_xlat_tax"]["avg"],
             "py_tax": sequence["py_tax"]["avg"],
-            "is_gemm": sequence.get("is_gemm", False),
+            "is_library_mediated": sequence.get("is_library_mediated", sequence.get("is_gemm", False)),
+            "is_gemm": sequence.get("is_library_mediated", sequence.get("is_gemm", False)),  # backward compat
         }
     
     return results
 
 
 def load_baremetal_results(baremetal_file: str) -> Dict[str, Any]:
-    """Load baremetal results (GEMM only)."""
+    """Load baremetal results (library-mediated only)."""
     if not os.path.exists(baremetal_file):
         return {}
     
@@ -150,12 +152,12 @@ def generate_framework_summary(show_table: bool = True, include_all_kernels: boo
     def fmt_val(v):
         return None if v is None else f"{v:.2f}"
 
-    # Load GEMM sequences
+    # Load library-mediated sequences
     pytorch_file = utils.get_path("PYTORCH_GEMM_SEQUENCES")
     pytorch_results = {}
     if os.path.exists(pytorch_file):
         pytorch_results = load_pytorch_results(pytorch_file)
-        print(f"Loaded {len(pytorch_results)} PyTorch GEMM sequences")
+        print(f"Loaded {len(pytorch_results)} PyTorch library-mediated sequences")
 
     # Load all kernel sequences if requested
     if include_all_kernels:
@@ -177,10 +179,10 @@ def generate_framework_summary(show_table: bool = True, include_all_kernels: boo
         py_tax = job_result["py_tax"]
         aten_xlat_tax = job_result["aten_xlat_tax"]
         launch_tax = job_result["launch_tax"]
-        is_gemm = job_result.get("is_gemm", False)
+        is_gemm = job_result.get("is_library_mediated", job_result.get("is_gemm", False))
         
         fo = py_tax + aten_xlat_tax + launch_tax
-        kernel_type = "GEMM" if is_gemm else "other"
+        kernel_type = "lib-mediated" if is_gemm else "fw-native"
         kernel_name = job_result["kernel"]
         
         # Increased truncation length from 20 to 40 characters
@@ -209,7 +211,7 @@ def generate_framework_summary(show_table: bool = True, include_all_kernels: boo
             data=framework_summary_table,
         )
         print("Notes:")
-        print(" * Type: GEMM (eligible for baremetal comparison) or other (framework overhead only)")
+        print(" * Type: lib-mediated (eligible for baremetal comparison) or fw-native (framework overhead only)")
         print(" * T_fo: framework overhead; T_py + T_aten_xlat + T_sys")
         print(" * T_py: python tax; torch_op -> aten_op")
         print(" * T_aten_xlat: ATen+cuBLASLt xlat tax; aten_op -> launch")
@@ -224,7 +226,7 @@ def generate_baremetal_summary(show_table: bool = True):
 
     baremetal_file = utils.get_path("BAREMETAL_GEMM_KERNELS")
     if not os.path.exists(baremetal_file):
-        print("No baremetal sequences found (expected for non-GEMM kernels).")
+        print("No baremetal sequences found (expected for framework-native kernels).")
         return
 
     baremetal_results = load_baremetal_results(baremetal_file)
@@ -255,7 +257,7 @@ def generate_final_summary(show_table: bool = True, include_all_kernels: bool = 
     Combined summary across framework and baremetal.
     
     For GEMM kernels: Full T_structural breakdown
-    For non-GEMM kernels: Partial breakdown (framework overhead only)
+    For framework-native kernels: Partial breakdown (framework overhead only)
     """
     def fmt_val(v):
         return None if v is None else f"{v:.2f}"
@@ -290,7 +292,7 @@ def generate_final_summary(show_table: bool = True, include_all_kernels: bool = 
         py = fw["py_tax"] if fw else None
         aten_xlat = fw["aten_xlat_tax"] if fw else None
         sys_fw = fw["launch_tax"] if fw else None
-        is_gemm = fw.get("is_gemm", False) if fw else False
+        is_gemm = fw.get("is_library_mediated", fw.get("is_gemm", False)) if fw else False
 
         # Baremetal fields are None since we disabled dependency
         culib_xlat = None
@@ -313,14 +315,15 @@ def generate_final_summary(show_table: bool = True, include_all_kernels: bool = 
         if all(x is not None for x in (py, aten_xlat, sys_fw)):
             fo_fw = py + aten_xlat + sys_fw
 
-        kernel_type = "GEMM" if is_gemm else "other"
+        kernel_type = "lib-mediated" if is_gemm else "fw-native"
 
         final_summary_data.append({
             "id": job_id,
             "aten_op": aten_op_name,
             "kernel": kernel_name,
             "kernel_type": kernel_type,
-            "is_gemm": is_gemm,
+            "is_library_mediated": is_gemm,
+            "is_gemm": is_gemm,  # backward compat
             "T_fo": fo_fw,
             "T_fo_bm": None,
             "T_fo_fw": fo_fw,
@@ -362,7 +365,7 @@ def generate_final_summary(show_table: bool = True, include_all_kernels: bool = 
             data=final_summary_table,
         )
         print("Notes:")
-        print(" * Type: GEMM or other")
+        print(" * Type: lib-mediated or fw-native")
         print(" * T_fo: framework overhead")
         print(" * T_py: python xlat tax; torch_op -> aten_op")
         print(" * T_aten_xlat: ATen dispatch + potential library overhead")
@@ -375,30 +378,30 @@ def plot_per_kernel_taxbreak(final_summary_data: List[Dict], title_suffix: str):
     """Plot stacked bar chart for all kernels."""
     output_path = utils.get_path("TAX_BREAK_PLOT")
 
-    # PyTorch-only components (non-GEMM or fallback)
+    # PyTorch-only components (framework-native or fallback)
     pytorch_components = [
         ("T_py", "#4e79a7"),
         ("T_aten_xlat", "#59a14f"),
         ("T_sys_fw", "#af7aa1"),
     ]
 
-    gemm_entries = []
-    non_gemm_entries = []
+    lib_mediated_entries = []
+    fw_native_entries = []
 
     for row in final_summary_data:
         if row.get("kernel") == "__null_kernel__":
             continue
         
-        is_gemm = row.get("is_gemm", False)
+        is_gemm = row.get("is_library_mediated", row.get("is_gemm", False))
         
         vals = [row.get(name) for name, _ in pytorch_components]
         if all(v is not None for v in vals):
             if is_gemm:
-                gemm_entries.append((row["id"], row["kernel"], vals, pytorch_components))
+                lib_mediated_entries.append((row["id"], row["kernel"], vals, pytorch_components))
             else:
-                non_gemm_entries.append((row["id"], row["kernel"], vals, pytorch_components))
+                fw_native_entries.append((row["id"], row["kernel"], vals, pytorch_components))
 
-    all_entries = gemm_entries + non_gemm_entries
+    all_entries = lib_mediated_entries + fw_native_entries
 
     if not all_entries:
         print("No complete per-kernel taxbreak data to plot.")
@@ -407,15 +410,15 @@ def plot_per_kernel_taxbreak(final_summary_data: List[Dict], title_suffix: str):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
     # Create subplots if we have both types
-    if gemm_entries and non_gemm_entries:
+    if lib_mediated_entries and fw_native_entries:
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-        axes_data = [(ax1, gemm_entries, "GEMM Kernels"), (ax2, non_gemm_entries, "Non-GEMM Kernels")]
-    elif gemm_entries:
+        axes_data = [(ax1, lib_mediated_entries, "Library-mediated Kernels"), (ax2, fw_native_entries, "Framework-native Kernels")]
+    elif lib_mediated_entries:
         fig, ax1 = plt.subplots(figsize=(8, 4))
-        axes_data = [(ax1, gemm_entries, "GEMM Kernels")]
+        axes_data = [(ax1, lib_mediated_entries, "Library-mediated Kernels")]
     else:
         fig, ax1 = plt.subplots(figsize=(8, 4))
-        axes_data = [(ax1, non_gemm_entries, "Non-GEMM Kernels")]
+        axes_data = [(ax1, fw_native_entries, "Framework-native Kernels")]
 
     for ax, entries, subtitle in axes_data:
         if not entries:
@@ -449,23 +452,23 @@ def plot_per_kernel_taxbreak(final_summary_data: List[Dict], title_suffix: str):
 
 def get_derived_aten_baseline(final_summary_data: List[Dict[str, Any]]) -> float:
     """
-    Derive baseline ATen dispatch cost (T_aten_base) from non-GEMM kernels.
-    Non-GEMM kernels (elementwise, etc.) represent pure dispatch without library overhead.
+    Derive baseline ATen dispatch cost (T_aten_base) from framework-native kernels.
+    Framework-native kernels (elementwise, etc.) represent pure dispatch without library overhead.
     We use the median T_aten_xlat of these kernels as the baseline.
     """
-    non_gemm_vals = []
+    fw_native_vals = []
     for row in final_summary_data:
-        # Filter for non-GEMM kernels that have valid timing data
-        if (not row.get("is_gemm", False) and 
+        # Filter for framework-native kernels that have valid timing data
+        if (not row.get("is_library_mediated", row.get("is_gemm", False)) and 
             row.get("T_aten_xlat") is not None and 
             row.get("T_aten_xlat") > 0.1):
-            non_gemm_vals.append(row["T_aten_xlat"])
+            fw_native_vals.append(row["T_aten_xlat"])
     
-    if not non_gemm_vals:
-        # Fallback if no non-GEMM kernels found (unlikely in real models)
+    if not fw_native_vals:
+        # Fallback if no framework-native kernels found (unlikely in real models)
         return 2.0 
         
-    return statistics.median(non_gemm_vals)
+    return statistics.median(fw_native_vals)
 
 
 def summarize(model: str, precision: str, include_all_kernels: bool = False):
@@ -488,7 +491,7 @@ def summarize(model: str, precision: str, include_all_kernels: bool = False):
     
     print(f"GPU Architecture: {gpu_arch}")
     print(f"Null kernel T_sys baseline: {t_sys_null:.3f} μs (hardcoded)")
-    print(f"Derived T_aten_base:        {t_aten_base:.3f} μs (median of non-GEMM T_aten_xlat)")
+    print(f"Derived T_aten_base:        {t_aten_base:.3f} μs (median of framework-native T_aten_xlat)")
 
     # --- Step 2: Calculate Total Structural Overhead with Breakdown ---
     total_structural_overhead_us = 0.0
@@ -498,8 +501,8 @@ def summarize(model: str, precision: str, include_all_kernels: bool = False):
     total_CudaT_us = 0.0   # CUDA Translation Tax (Calculated)
     total_LibT_us = 0.0    # Library overhead (placeholder)
     total_invocations = 0
-    gemm_invocations = 0
-    non_gemm_invocations = 0
+    lib_mediated_invocations = 0
+    fw_native_invocations = 0
     
     for row in final_summary_data:
         freq = row.get("freq")
@@ -514,21 +517,21 @@ def summarize(model: str, precision: str, include_all_kernels: bool = False):
         t_sys = row.get("T_sys") or row.get("T_sys_fw") or 0.0
         t_aten_xlat = row.get("T_aten_xlat") or 0.0
         
-        is_gemm = row.get("is_gemm", False)
+        is_gemm = row.get("is_library_mediated", row.get("is_gemm", False))
         
         # --- Step 3: Apply Subtraction Formula ---
         if is_gemm:
-            # GEMM Kernel: Calculate T_cuda
+            # Library-mediated Kernel: Calculate T_cuda
             # T_cuda = T_aten_xlat - T_aten_base
             raw_cuda = t_aten_xlat - t_aten_base
             t_cuda = max(0.0, raw_cuda)
             t_ct = t_aten_base
-            gemm_invocations += freq
+            lib_mediated_invocations += freq
         else:
-            # Non-GEMM: Pure dispatch, no library overhead
+            # Framework-native: Pure dispatch, no library overhead
             t_cuda = 0.0
             t_ct = t_aten_xlat
-            non_gemm_invocations += freq
+            fw_native_invocations += freq
         
         # Store calculated T_cuda back to row
         row["T_cuda"] = t_cuda
@@ -559,13 +562,13 @@ def summarize(model: str, precision: str, include_all_kernels: bool = False):
     print(f"  (Aggregated over {total_invocations} kernel invocations)")
     print()
     print("Calculation Method (No Baremetal):")
-    print(f"  1. T_aten_base = Median(T_aten_xlat of non-GEMM kernels) = {t_aten_base:.3f} μs")
-    print(f"  2. GEMM:     T_cuda = max(0, T_aten_xlat - T_aten_base)")
-    print(f"  3. Non-GEMM: T_cuda = 0.0")
+    print(f"  1. T_aten_base = Median(T_aten_xlat of framework-native kernels) = {t_aten_base:.3f} μs")
+    print(f"  2. Library-mediated: T_cuda = max(0, T_aten_xlat - T_aten_base)")
+    print(f"  3. Framework-native: T_cuda = 0.0")
     print()
     print("Kernel Breakdown:")
-    print(f"  * GEMM invocations:     {gemm_invocations}")
-    print(f"  * Non-GEMM invocations: {non_gemm_invocations}")
+    print(f"  * Library-mediated invocations: {lib_mediated_invocations}")
+    print(f"  * Framework-native invocations: {fw_native_invocations}")
     
     # Save to JSON
     summary_path = utils.get_path("TAX_BREAK_SUMMARY")
@@ -580,14 +583,17 @@ def summarize(model: str, precision: str, include_all_kernels: bool = False):
             "KT_kernel_launch_ms": total_KT_ms,
         },
         "formula": {
-            "T_cuda_gemm": "max(0, T_aten_xlat - T_aten_base)",
-            "T_cuda_non_gemm": "0.0",
-            "T_aten_base": "Median(Non-GEMM T_aten_xlat)"
+            "T_cuda_lib_mediated": "max(0, T_aten_xlat - T_aten_base)",
+            "T_cuda_fw_native": "0.0",
+            "T_aten_base": "Median(Framework-native T_aten_xlat)"
         },
         "invocations": {
             "total": total_invocations,
-            "gemm": gemm_invocations,
-            "non_gemm": non_gemm_invocations,
+            "library_mediated": lib_mediated_invocations,
+            "framework_native": fw_native_invocations,
+            # backward compat
+            "gemm": lib_mediated_invocations,
+            "non_gemm": fw_native_invocations,
         },
         "per_kernel": final_summary_data,
     }
@@ -655,7 +661,7 @@ def summarize_from_trace_directly(
         t_sys = t_sys_null
         
         freq = seq.get("freq", 1)
-        is_gemm = seq.get("is_gemm", False)
+        is_gemm = seq.get("is_library_mediated", seq.get("is_gemm", False))
         
         # Handle nested dict for kernel/aten_op names
         kernel = seq.get("kernel", {})
@@ -670,8 +676,9 @@ def summarize_from_trace_directly(
             "id": job_id,
             "aten_op": aten_op_name,
             "kernel": kernel_name,
-            "kernel_type": "GEMM" if is_gemm else "other",
-            "is_gemm": is_gemm,
+            "kernel_type": "lib-mediated" if is_gemm else "fw-native",
+            "is_library_mediated": is_gemm,
+            "is_gemm": is_gemm,  # backward compat
             "T_fo": t_fo,
             "T_py": t_py,
             "T_aten_xlat": t_aten_xlat,
@@ -681,16 +688,16 @@ def summarize_from_trace_directly(
             "freq": freq,
         })
     
-    # Derive T_aten_base from non-GEMM kernels
-    non_gemm_vals = [
+    # Derive T_aten_base from framework-native kernels
+    fw_native_vals = [
         row["T_aten_xlat"] for row in summary_data 
-        if not row.get("is_gemm", False) and row.get("T_aten_xlat", 0) > 0.1
+        if not row.get("is_library_mediated", row.get("is_gemm", False)) and row.get("T_aten_xlat", 0) > 0.1
     ]
-    t_aten_base = statistics.median(non_gemm_vals) if non_gemm_vals else 2.0
+    t_aten_base = statistics.median(fw_native_vals) if fw_native_vals else 2.0
     
     print(f"GPU Architecture: {gpu_arch}")
     print(f"Null kernel T_sys baseline: {t_sys_null:.3f} μs (hardcoded, used for T_fo)")
-    print(f"Derived T_aten_base:        {t_aten_base:.3f} μs (median non-GEMM T_aten_xlat from trace)")
+    print(f"Derived T_aten_base:        {t_aten_base:.3f} μs (median framework-native T_aten_xlat from trace)")
     
     # Print table (show first 100 rows max to avoid spam)
     def fmt_val(v):

@@ -1,16 +1,18 @@
 # Each config declares the model to test and the BS/SL sweeps to run.
 
 # Soda Analyzer
-INFERENCE_WARMUP = "5" # Default; inference time can be in seconds so 5x = 5 seconds
+INFERENCE_WARMUP = "10"
+INFERENCE_RUNS = "10"
 
 # Soda Microbench
 MICROBENCH_WARMUP = "1000"
 MICROBENCH_RUNS = "5000"
 
 # Debug mode
-DEBUG = True
+DEBUG = False
 if DEBUG:
     INFERENCE_WARMUP = "1"
+    INFERENCE_RUNS = "1"
     MICROBENCH_WARMUP = "1"
     MICROBENCH_RUNS = "1"
 
@@ -19,6 +21,7 @@ PARAMS = {
     "precision": "bfloat16",
     "device": "cuda",
     "inference_warmup": INFERENCE_WARMUP,
+    "inference_runs": INFERENCE_RUNS,
     "microbench_warmup": MICROBENCH_WARMUP,
     "microbench_runs": MICROBENCH_RUNS,
 }
@@ -33,6 +36,12 @@ PREF_SWEEP_CONFIG = {
     },
     "llama_3.2_1b_short_ctx": {
         "model_name": "meta-llama/Llama-3.2-1B",
+        "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
+        "seq_lens": sorted([512, 1024, 2048, 4096, 8192], reverse=True),
+        "max_new_toks": [1],
+    },
+    "llama_3.2_3b_short_ctx": {
+        "model_name": "meta-llama/Llama-3.2-3B",
         "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
         "seq_lens": sorted([512, 1024, 2048, 4096, 8192], reverse=True),
         "max_new_toks": [1],
@@ -73,6 +82,12 @@ PREF_SWEEP_CONFIG = {
         "seq_lens": sorted([512, 1024, 2048, 4096, 8192], reverse=True),
         "max_new_toks": [1],
     },
+    "deepseek_moe_16b": {
+        "model_name": "deepseek-ai/deepseek-moe-16b-base",
+        "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
+        "seq_lens": sorted([512, 1024, 2048, 4096, 8192], reverse=True),
+        "max_new_toks": [1],
+    },
 }
 
 ## DECODE (max_new_tokens=10+)
@@ -85,6 +100,12 @@ DEC_SWEEP_CONFIG = {
     },
     "llama_3.2_1b_short_ctx": {
         "model_name": "meta-llama/Llama-3.2-1B",
+        "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
+        "seq_lens": sorted([512, 1024, 2048, 4096, 8192], reverse=True),
+        "max_new_toks": [10],
+    },
+    "llama_3.2_3b_short_ctx": {
+        "model_name": "meta-llama/Llama-3.2-3B",
         "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
         "seq_lens": sorted([512, 1024, 2048, 4096, 8192], reverse=True),
         "max_new_toks": [10],
@@ -112,6 +133,12 @@ DEC_SWEEP_CONFIG = {
         "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
         "seq_lens": sorted([32000, 160000, 480000], reverse=True),
         "max_new_toks": [50],
+    },
+    "deepseek_moe_16b": {
+        "model_name": "deepseek-ai/deepseek-moe-16b-base",
+        "batch_sizes": sorted([1, 2, 4, 8, 16], reverse=True),
+        "seq_lens": sorted([512, 1024, 2048, 4096, 8192], reverse=True),
+        "max_new_toks": [10],
     },
 }
 

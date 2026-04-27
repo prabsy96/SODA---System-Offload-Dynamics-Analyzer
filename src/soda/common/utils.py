@@ -3,6 +3,7 @@ SODA utility functions
 """
 
 import argparse
+import bisect
 import json
 import os
 import sys
@@ -77,71 +78,105 @@ def report_gpu_clocks(device_id: int = 0, context: str = "") -> None:
               f"memory={info['memory_clock_mhz']}/{info['max_memory_clock_mhz']} MHz")
 
 
-def is_gemm_op(aten_op_name: str) -> bool:
-    """Check if an ATen op is a GEMM operation."""
-    gemm_ops = [
+def is_library_mediated_op(aten_op_name: str) -> bool:
+    """Check if an ATen op typically routes through a vendor library (cuBLAS/cuDNN).
+
+    Paper terminology: library-mediated (I_lib=1) vs framework-native (I_lib=0).
+    These ATen ops *typically* dispatch to vendor libraries, though specific
+    backends (nvjet, wgmma) may bypass them.
+    """
+    library_ops = [
         "aten::mm",
-        "aten::bmm", 
+        "aten::bmm",
         "aten::addmm",
         "aten::matmul",
         "aten::linear",
         "aten::_scaled_mm",
         "aten::_scaled_dot_product",
     ]
-    return any(op in aten_op_name for op in gemm_ops)
+    return any(op in aten_op_name for op in library_ops)
 
 
-def is_gemm_kernel(kernel_name: str) -> bool:
-    """Check if a kernel name indicates a GEMM kernel (cuBLAS, Cutlass, internal)."""
-    gemm_patterns = [
-        # cuBLAS patterns
+# Backward-compatible alias (deprecated — use is_library_mediated_op).
+is_gemm_op = is_library_mediated_op
+
+
+def is_library_mediated_kernel(kernel_name: str) -> bool:
+    """Check if a kernel name indicates a vendor-library-mediated kernel.
+
+    Paper terminology: library-mediated (I_lib=1) kernels are dispatched
+    through cuBLAS, cuBLASLt, cuDNN, Cutlass, or similar vendor libraries.
+    Framework-native (I_lib=0) kernels (e.g. nvjet, wgmma, elementwise)
+    are dispatched directly by ATen/Inductor without a library front-end.
+    """
+    library_patterns = [
+        # cuBLAS / cuBLASLt
         "cublas",
         "cublasLt",
-        # Cutlass patterns
+        # Cutlass (vendor library)
         "cutlass",
-        # PyTorch internal GEMM patterns (H100/Hopper)
-        "nvjet",
-        "wgmma",
-        "s884gemm",
+        # cuDNN
+        "cudnn",
+        # Generic GEMM indicators (often library-dispatched)
         "gemm",
         "Gemm",
         "GEMM",
-        # Flash attention (also GEMM-like)
+        # Flash attention libraries
         "flash",
         "fmha",
     ]
-    return any(pattern in kernel_name for pattern in gemm_patterns)
+    # Framework-native patterns: dispatched directly by ATen/Inductor,
+    # NOT through a vendor library, even if their names contain "gemm".
+    framework_native_patterns = [
+        "nvjet",
+        "wgmma",
+        "s884gemm",
+    ]
+    lower = kernel_name.lower()
+    is_fw_native = any(p in lower for p in framework_native_patterns)
+    if is_fw_native:
+        return False
+    return any(pattern in kernel_name for pattern in library_patterns)
+
+
+# Backward-compatible alias (deprecated — use is_library_mediated_kernel).
+is_gemm_kernel = is_library_mediated_kernel
 
 
 def filter_kernel_sequences(sequences: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Filter for sequences that have both a kernel and aten_op.
-    Marks each sequence with is_gemm classification using both op name AND kernel name.
-    
+    Marks each sequence with ``is_library_mediated`` classification
+    (paper terminology: library-mediated I_lib=1 vs framework-native I_lib=0).
+
     Args:
         sequences: List of event sequences
-    
+
     Returns:
-        Filtered sequences with is_gemm field added
+        Filtered sequences with ``is_library_mediated`` field added.
+        The legacy ``is_gemm`` alias is also set for backward compatibility.
     """
     kernel_sequences = []
     for seq in sequences:
         kernel = seq.get("kernel")
         aten_op = seq.get("aten_op")
         cuda_launch = seq.get("cuda_launch")
-        
+
         # Must have kernel, aten_op, and cuda_launch
         if not kernel or not aten_op or not cuda_launch:
             continue
-        
+
         # Get names safely
         aten_name = aten_op.get("name", "") if isinstance(aten_op, dict) else ""
         kernel_name = kernel.get("name", "") if isinstance(kernel, dict) else ""
-        
-        # Check BOTH ATen op name AND kernel name for GEMM classification
-        # This catches PyTorch internal GEMM kernels (nvjet, cutlass, wgmma) on H100
-        seq["is_gemm"] = is_gemm_op(aten_name) or is_gemm_kernel(kernel_name)
-        
+
+        # Library-mediated: either the ATen op or the GPU kernel name
+        # indicates routing through a vendor library (cuBLAS, cuDNN, Cutlass).
+        lib_mediated = is_library_mediated_op(aten_name) or is_library_mediated_kernel(kernel_name)
+        seq["is_library_mediated"] = lib_mediated
+        # Backward-compatible alias (deprecated)
+        seq["is_gemm"] = lib_mediated
+
         kernel_sequences.append(seq)
 
     return kernel_sequences
@@ -546,75 +581,6 @@ def filter_gemm_sequences(sequences: List[Dict[str, Any]]) -> List[Dict[str, Any
     validate_sequences(gemm_sequences)
     return gemm_sequences
 
-def calculate_hsb_metrics(
-    inference_time_us: float,
-    gpu_busy_time_us: float,
-    sequences: List[Dict[str, Any]],
-    taxbreak_lut: Dict[str, float],
-) -> Dict[str, float]:
-    """
-    Calculate HSB (Hardware-Software Inversion) metrics.
-    
-    HSB = 1 - (T_Exposed / T_Structural)
-    
-    Args:
-        inference_time_us: Total inference time in microseconds
-        gpu_busy_time_us: GPU busy time in microseconds
-        sequences: List of kernel sequences
-        taxbreak_lut: Lookup table mapping kernel_name -> T_fo
-    
-    Returns:
-        Dictionary with HSB metrics:
-        - t_exposed_us: Exposed framework overhead (GPU idle time)
-        - t_structural_us: Structural framework overhead (sum of T_fo)
-        - hsb: Hardware-Software Inversion metric
-        - hsb_classification: Human-readable classification
-    """
-    # Calculate T_Exposed (GPU idle time)
-    t_exposed = max(0.0, inference_time_us - gpu_busy_time_us)
-    
-    # Calculate T_Structural (sum of per-kernel framework overheads)
-    t_structural = 0.0
-    
-    if taxbreak_lut:
-        avg_t_fo = sum(taxbreak_lut.values()) / len(taxbreak_lut)
-    else:
-        avg_t_fo = 0.0
-    
-    for seq in sequences:
-        kernel = seq.get("kernel", {})
-        kernel_name = kernel.get("name", "") if isinstance(kernel, dict) else ""
-        
-        if kernel_name in taxbreak_lut:
-            t_fo = taxbreak_lut[kernel_name]
-        else:
-            t_fo = avg_t_fo
-        
-        freq = seq.get("freq", 1) or 1
-        t_structural += t_fo * freq
-    
-     # Calculate HSB
-    epsilon = 1e-6
-    if t_structural < epsilon:
-        hsb = 1.0 if t_exposed < epsilon else -10.0
-    else:
-        hsb = 1.0 - (t_exposed / t_structural)
-    
-    # Classify HSB
-    if hsb >= 0.5:
-        classification = "hardware-bound"
-    elif hsb >= 0:
-        classification = "balanced"
-    else:
-        classification = "framework-bound"
-    
-    return {
-        "t_exposed_us": t_exposed,
-        "t_structural_us": t_structural,
-        "hsb": hsb,
-        "hsb_classification": classification,
-    }
-
 def to_hashable(obj: Any) -> Any:
     """
     Recursively convert an object to a hashable type.
@@ -877,7 +843,7 @@ def get_args_parser() -> argparse.ArgumentParser:
         dest="num_gpus",
         type=int,
         default=1,
-        help="Number of GPUs to use for inference via model parallelism "
+        help="Number of GPUs to use for inference for desired model parallelism "
              "(device_map=\"balanced\"). Default: 1 (single GPU). "
              "Values > available GPUs are clamped to available count.",
     )
@@ -885,6 +851,74 @@ def get_args_parser() -> argparse.ArgumentParser:
         "--vllm",
         action="store_true",
         help="Run inference using vLLM."
+    parser.add_argument(
+        "--parallelism",
+        dest="parallelism",
+        default="tp",
+        choices=["dp", "ep", "fsdp", "tp"],
+        help="Desired form of multi-GPU parallelism. "
+             "Choose from data parallelism (dp), expert parallelism (ep), "
+             "fully-sharded data parallelism (fsdp), or tensor parallelism (tp)",
+    )
+    parser.add_argument(
+        "--no-global-cache",
+        dest="no_global_cache",
+        action="store_true",
+        default=False,
+        help="Disable the cross-experiment global kernel replay cache. "
+             "Each TaxBreak run will profile all kernels independently.",
+    )
+    parser.add_argument(
+        "--global-cache-dir",
+        dest="global_cache_dir",
+        type=str,
+        default=None,
+        help="Override the auto-resolved global kernel cache directory. "
+             "Default: <output_root>/.global_kernel_cache/<gpu_slug>/",
+    )
+
+    # --- MoE per-operator memory profiling via CUPTI ---
+    parser.add_argument(
+        "--moe-profile",
+        dest="moe_profile",
+        action="store_true",
+        default=False,
+        help="Run standalone MoE per-operator memory profiling using PyTorch "
+             "Profiler with CUPTI hardware counters (dram bytes, L2 traffic). "
+             "Requires -m/--model. Uses curated benchmark prompts from "
+             "soda.moe.prompts. Outputs per-prompt and aggregated op_profile.json.",
+    )
+    parser.add_argument(
+        "--moe-prompts",
+        dest="moe_prompts",
+        nargs="*",
+        default=None,
+        help="Specific prompt names to profile (default: 7 representative prompts). "
+             "See soda.moe.prompts.MOE_BENCHMARK_PROMPTS for available names.",
+    )
+    parser.add_argument(
+        "--moe-categories",
+        dest="moe_categories",
+        nargs="*",
+        default=None,
+        help="Prompt categories to profile (e.g., code science legal). "
+             "Overridden by --moe-prompts if both specified.",
+    )
+    parser.add_argument(
+        "--moe-warmup",
+        dest="moe_warmup",
+        type=int,
+        default=2,
+        help="Number of warmup iterations before CUPTI profiling (default: 2).",
+    )
+    parser.add_argument(
+        "--max-seq-len",
+        dest="max_seq_len",
+        type=int,
+        default=4096,
+        help="Safety truncation cap for MoE CUPTI profiling (default: 4096). "
+             "Prompts are tokenized at natural length; this only truncates "
+             "prompts that exceed the limit.",
     )
 
     return parser
@@ -895,8 +929,11 @@ def parse_and_validate_args(args=None) -> argparse.Namespace:
     parsed_args = parser.parse_args(args)
     
     # Validate arguments
-    # --model is required unless running in --taxbreak mode (Stage 2)
-    if not getattr(parsed_args, "taxbreak", False) and not parsed_args.model:
+    # --model is required unless running in --taxbreak mode
+    _no_model_modes = (
+        getattr(parsed_args, "taxbreak", False)
+    )
+    if not _no_model_modes and not parsed_args.model:
         parser.error("the following arguments are required: -m/--model")
 
     if parsed_args.device == "cpu" and parsed_args.precision in ["float16", "float8_e4m3fn", "float8_e5m2", "bfloat16"]:
@@ -1116,6 +1153,7 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
                 "grid": args.get("grid", [0, 0, 0]),
                 "block": args.get("block", [0, 0, 0]),
                 "shared_memory": args.get("shared memory", 0),
+                "registers_per_thread": args.get("registers per thread", None),
                 "stream": args.get("stream"),   # CUDA stream ID (Fix A)
                 "device": args.get("device"),   # GPU device index (Fix A)
             })
@@ -1133,8 +1171,13 @@ def collect_events(trace: Dict[str, Any]) -> Dict[str, Any]:
                 "device": args.get("device"),   # Fix A
             })
         
-        # CUDA launch events (CPU side)
-        elif cat == "cuda_runtime" and "LaunchKernel" in name:
+        # CUDA launch events (CPU side).
+        # cuBLAS/Cutlass kernels are dispatched via the CUDA Driver API
+        # (cat="cuda_driver", name="cuLaunchKernel") rather than the runtime API
+        # (cat="cuda_runtime", name="cudaLaunchKernel").  Both must be collected
+        # or GEMM kernels will never find a matching launch event and will be
+        # silently dropped from all sequence-linked analysis.
+        elif (cat in ("cuda_runtime", "cuda_driver")) and "LaunchKernel" in name:
             corr = event.get("args", {}).get("correlation")
             if corr:
                 cuda_launch_events_by_corr[corr] = {
@@ -1207,6 +1250,12 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
     sequences = []
     orphan_kernels = []
 
+    # Pre-build a time-sorted list of torch_ops for O(log n) fallback lookup.
+    # When a kernel has no direct external_id match we binary-search for the
+    # most-recent torch_op whose interval [ts, ts+dur) encloses the ATen ts.
+    _sorted_tops = sorted(torch_ops.values(), key=lambda o: o["ts"])
+    _sorted_starts = [o["ts"] for o in _sorted_tops]
+
     for kernel in kernel_events:
         corr = kernel.get("correlation")
         ext_id = kernel.get("external_id")
@@ -1217,16 +1266,19 @@ def link_sequences(events: Dict[str, Any]) -> List[Dict]:
         # Try to find torch_op by external_id
         torch_op = torch_ops.get(ext_id)
         
-        # If no direct match, try to find enclosing torch_op by timestamp
+        # If no direct match, binary-search for the enclosing torch_op by timestamp.
+        # O(log n + k) vs the previous O(n) linear scan, where k is the number of
+        # candidate ops that started before aten_ts but ended before it (typically 0).
         if torch_op is None and aten_op is not None:
             aten_ts = aten_op["ts"]
-            # Find torch_op that started before aten_op and is still active
-            for tid, t_op in torch_ops.items():
-                t_start = t_op["ts"]
-                t_end = t_start + t_op.get("dur", 0)
-                if t_start <= aten_ts <= t_end:
-                    torch_op = t_op
+            idx = bisect.bisect_right(_sorted_starts, aten_ts) - 1
+            while idx >= 0:
+                candidate = _sorted_tops[idx]
+                t_end = candidate["ts"] + candidate.get("dur", 0)
+                if t_end >= aten_ts:
+                    torch_op = candidate
                     break
+                idx -= 1  # candidate ended before aten_ts; try earlier (longer-duration) ops
         
         if cuda_launch and aten_op:
             sequences.append({
@@ -1258,7 +1310,8 @@ def calculate_tklqt(sequences: List[Dict[str, Any]]) -> Dict[str, float]:
         Dictionary with total, avg, min, max TKLQT in microseconds.
     """
     tklqt_values = []
-    
+    _dropped_count = 0
+
     for seq in sequences:
         kernel = seq.get("kernel")
         cuda_launch = seq.get("cuda_launch")
@@ -1284,7 +1337,18 @@ def calculate_tklqt(sequences: List[Dict[str, Any]]) -> Dict[str, float]:
                 tklqt_values.append(lqt)
             elif lqt > -10:  # Small negative values are measurement noise, clamp to 0
                 tklqt_values.append(0.0)
+            # else: lqt <= -10 µs — deep-queue GPU artifact; sample discarded
+            else:
+                _dropped_count += 1
     
+    if _dropped_count > 0:
+        print(
+            f"Warning: calculate_tklqt dropped {_dropped_count} sample(s) with "
+            f"lqt ≤ -10 µs (deep-queue GPU artifact, common on H100 bs=1). "
+            f"Use --taxbreak isolation replay for accurate per-kernel KT measurement.",
+            file=sys.stderr,
+        )
+
     if not tklqt_values:
         return {"total": 0.0, "avg": 0.0, "min": 0.0, "max": 0.0, "count": 0}
     
@@ -1296,67 +1360,16 @@ def calculate_tklqt(sequences: List[Dict[str, Any]]) -> Dict[str, float]:
         "count": len(tklqt_values),
     }
 
-def calculate_t_orchestrator(sequences: List[Dict[str, Any]]) -> Dict[str, float]:
-    """
-    Calculate T_orchestrator (total CPU-side dispatch overhead).
-    
-    Per TaxBreak paper:
-        T_orchestrator = Σ (T_py + T_aten + T_lib + T_sys) for all kernels
-    
-    Where for each kernel invocation:
-        - T_py: Python dispatch overhead
-        - T_aten: ATen translation overhead  
-        - T_lib: Library (cuBLAS etc) overhead
-        - T_sys: System/launch overhead (includes TKLQT)
-    
-    For kernels without microbench breakdown, we use:
-        T_orchestrator ≈ launch_tax + aten_xlat_tax
-    
-    Args:
-        sequences: List of event sequences with timing metrics.
-    
-    Returns:
-        Dictionary with total, avg T_orchestrator in microseconds.
-    """
-    t_orch_values = []
-    
-    for seq in sequences:
-        # Try to get detailed breakdown first
-        launch_tax = seq.get("launch_tax", 0)
-        aten_xlat_tax = seq.get("aten_xlat_tax", 0)
-        
-        # Handle dict format (from aggregated sequences)
-        if isinstance(launch_tax, dict):
-            launch_tax = launch_tax.get("avg", 0)
-        if isinstance(aten_xlat_tax, dict):
-            aten_xlat_tax = aten_xlat_tax.get("avg", 0)
-        
-        # Ensure non-negative (clamp measurement noise)
-        launch_tax = max(0.0, float(launch_tax or 0))
-        aten_xlat_tax = max(0.0, float(aten_xlat_tax or 0))
-        
-        # T_orchestrator for this kernel = launch_tax + aten_xlat_tax
-        t_orch = launch_tax + aten_xlat_tax
-        
-        if t_orch > 0:
-            t_orch_values.append(t_orch)
-    
-    if not t_orch_values:
-        return {"total": 0.0, "avg": 0.0, "count": 0}
-    
-    return {
-        "total": sum(t_orch_values),
-        "avg": sum(t_orch_values) / len(t_orch_values),
-        "count": len(t_orch_values),
-    }
-
 def calculate_sequence_metrics(sequences: List[Dict], metrics: List[str]) -> List[Dict]:
     """
-    Calculates per-sequence metrics (e.g., launch_tax, aten_xlat_tax) and adds them to the sequence dict.
+    Calculates per-sequence tax metrics using paper notation and adds them to the sequence dict.
 
     Args:
         sequences: List of event sequence dictionaries.
-        metrics: Metrics to compute (e.g., ["launch_tax", "aten_xlat_tax", "py_tax"])
+        metrics: Metrics to compute using paper notation:
+            - ``"T_launch"``  — T_launch: time from cuda_launch start to kernel start
+            - ``"T_dispatch"`` — T_dispatch: time from aten_op start to cuda_launch start
+            - ``"T_Py"``      — T_Py: time from torch_op start to aten_op start
 
     Returns:
         Modified event sequences with requested metric keys added to each.
@@ -1371,24 +1384,21 @@ def calculate_sequence_metrics(sequences: List[Dict], metrics: List[str]) -> Lis
         if not kernel or not cuda_launch or not aten_op:
             continue
         
-        # launch_tax: time from cuda_launch start to kernel start
-        if "launch_tax" in metrics:
-            launch_tax = kernel["ts"] - cuda_launch["ts"]
-            seq["launch_tax"] = launch_tax
+        # T_launch: time from cuda_launch start to kernel start (paper notation)
+        if "T_launch" in metrics:
+            seq["T_launch"] = kernel["ts"] - cuda_launch["ts"]
         
-        # aten_xlat_tax: time from aten_op start to cuda_launch start
-        if "aten_xlat_tax" in metrics:
-            aten_xlat_tax = cuda_launch["ts"] - aten_op["ts"]
-            seq["aten_xlat_tax"] = aten_xlat_tax
+        # T_dispatch: time from aten_op start to cuda_launch start (paper notation)
+        if "T_dispatch" in metrics:
+            seq["T_dispatch"] = cuda_launch["ts"] - aten_op["ts"]
         
-        # py_tax: time from torch_op start to aten_op start (requires torch_op)
-        if "py_tax" in metrics:
+        # T_Py: time from torch_op start to aten_op start (paper notation, requires torch_op)
+        if "T_Py" in metrics:
             if torch_op is not None and "ts" in torch_op:
-                py_tax = aten_op["ts"] - torch_op["ts"]
-                seq["py_tax"] = py_tax
+                seq["T_Py"] = aten_op["ts"] - torch_op["ts"]
             else:
-                # Fallback: set py_tax to 0 if torch_op not available
-                seq["py_tax"] = 0.0
+                # Fallback: set T_Py to 0 if torch_op not available
+                seq["T_Py"] = 0.0
 
     return sequences
 
@@ -1436,7 +1446,10 @@ def aggregate_sequences(grouped_sequences, metrics: List[str], event_types: List
             else:
                 aggregated[metric] = {"avg": 0.0, "min": 0.0, "max": 0.0, "count": 0, "all": []}
         
-        # Preserve is_gemm if present
+        # Preserve classification flags if present
+        if "is_library_mediated" in first_seq:
+            aggregated["is_library_mediated"] = first_seq["is_library_mediated"]
+        # Backward-compatible alias
         if "is_gemm" in first_seq:
             aggregated["is_gemm"] = first_seq["is_gemm"]
         
@@ -1446,33 +1459,34 @@ def aggregate_sequences(grouped_sequences, metrics: List[str], event_types: List
     validate_sequences(unique_sequences)
     return unique_sequences
 
-def calculate_total_tax(sequences: List[Dict], tax_type: str) -> float:
+def calculate_total_tax(sequences: List[Dict], metric_key: str) -> float:
     """
-    Calculates total for a given sequence-level tax metric (e.g., launch or xlat).
+    Calculates total for a given sequence-level tax metric using the exact key name.
 
     Args:
         sequences: List of event sequence dictionaries with the metric key.
-        tax_type: Metric type without or with the "_tax" suffix (e.g., "launch", "launch_tax").
+        metric_key: Exact key name using paper notation (e.g., ``"T_launch"``,
+            ``"T_dispatch"``, ``"T_Py"``).
 
     Returns:
         Total tax in microseconds.
     """
-    metric_key = tax_type if tax_type.endswith("_tax") else f"{tax_type}_tax"
     total_tax = 0.0
     for seq in sequences:
-        tax_value = seq[metric_key]
+        tax_value = seq.get(metric_key)  # .get() avoids KeyError when a sequence lacks this metric
         if tax_value is not None:
             total_tax += tax_value
     return total_tax
 
 
-def calculate_avg_tax(sequences: List[Dict], tax_type: str) -> float:
+def calculate_avg_tax(sequences: List[Dict], metric_key: str) -> float:
     """
     Calculates average for a given sequence-level tax metric across all sequences.
 
     Args:
         sequences: List of event sequence dictionaries with the metric key.
-        tax_type: Metric type without or with the "_tax" suffix (e.g., "launch", "launch_tax").
+        metric_key: Exact key name using paper notation (e.g., ``"T_launch"``,
+            ``"T_dispatch"``, ``"T_Py"``).
 
     Returns:
         Average tax in microseconds.
@@ -1480,7 +1494,7 @@ def calculate_avg_tax(sequences: List[Dict], tax_type: str) -> float:
     if not sequences:
         return 0.0
     
-    total_tax = calculate_total_tax(sequences, tax_type)
+    total_tax = calculate_total_tax(sequences, metric_key)
     num_kernels = len(sequences)
     return total_tax / num_kernels if num_kernels > 0 else 0.0
 
@@ -1682,7 +1696,13 @@ def calculate_total_gpu_time_span(events: Dict[str, Any]) -> float:
     """
     Calculates the end-to-end GPU time span by finding min start and max end
     across GPU execution events (kernel, gpu_memcpy, gpu_memset).
-    
+
+    .. deprecated::
+        Single-GPU only.  For multi-GPU traces this function merges events across
+        all devices and produces incorrect utilization ratios.  Use
+        ``calculate_gpu_metrics()`` instead — it groups events by device and
+        returns per-device breakdowns as well as a correct aggregate.
+
     Measures the extreme time window of GPU execution (from first to last GPU event).
     Excludes cu(da)LaunchKernel (CPU-side calls).
         
@@ -1735,7 +1755,12 @@ def calculate_kernel_exec_time(events: Dict[str, Any]) -> Dict[str, float]:
 def calculate_true_gpu_busy_time(events: Dict[str, Any]) -> float:
     """
     Calculates GPU busy time by merging overlapping GPU event intervals.
-    
+
+    .. deprecated::
+        Single-GPU only.  On multi-GPU traces this merges events across ALL
+        devices, so simultaneous work on different GPUs is undercounted.
+        Use ``calculate_gpu_metrics()`` instead.
+
     Accounts for concurrent GPU execution across all streams by merging
     overlapping time intervals. Includes kernel, gpu_memcpy, and gpu_memset
     events. If events run concurrently on different streams, their overlapping 
@@ -1785,7 +1810,11 @@ def calculate_true_gpu_busy_time(events: Dict[str, Any]) -> float:
 def calculate_gpu_utilization(events: Dict[str, Any]) -> float:
     """
     Calculates GPU utilization percentage.
-        
+
+    .. deprecated::
+        Single-GPU only.  On multi-GPU traces the flat interval merge gives
+        incorrect results.  Use ``calculate_gpu_metrics()`` instead.
+
     Args:
         events: Dictionary with hierarchical structure from collect_events.
         
@@ -1913,7 +1942,6 @@ def calculate_framework_tax(
         - T_exposed_ms: Exposed framework tax in milliseconds
         - T_exposed_percent: T_exposed as a percentage of T_total
         - T_gpu_busy_percent: T_gpu_busy as a percentage of T_total
-        - is_framework_bound: Boolean flag (True if T_exposed > 50%)
     """
     # T_exposed = T_total - T_gpu_busy
     # Clamp to 0 to handle potential measurement noise where GPU time > CPU time slightly
@@ -1926,84 +1954,73 @@ def calculate_framework_tax(
     else:
         t_exposed_percent = 0.0
         t_gpu_busy_percent = 0.0
-        
-    # Heuristic: If exposed tax > 50%, we are framework bound
-    is_framework_bound = t_exposed_percent > 50.0
 
     return {
         "T_exposed": t_exposed_us,
         "T_exposed_ms": us_to_ms(t_exposed_us),
         "T_exposed_percent": t_exposed_percent,
         "T_gpu_busy_percent": t_gpu_busy_percent,
-    #    "is_framework_bound": is_framework_bound
     }
 
 
 def calculate_hdbi(
     total_kernel_exec_time_ms: float,
-    total_xlat_tax_ms: float,
+    t_orchestrate_excl_kt_ms: float,
     num_total_kernels: int,
     t_sys_us: float = T_FLOOR_SYS_MS * 1000.0,
 ) -> Dict[str, Any]:
     """
-    Calculate HDBI (Host-Device Balance Index) per TaxBreak paper Eq. 6.
+    Calculate HDBI (Host-Device Balance Index) per TaxBreak paper Eq. 3.
 
     HDBI = T_DeviceActive / (T_DeviceActive + T_Orchestrate)
 
     Where:
         T_DeviceActive = Σ(t_k) = sum of kernel execution times
-        T_Orchestrate = Σ(ΔFT + I_lib·ΔCT + ΔKT)
-                      = total_xlat_tax + (num_kernels × t_sys)
+        T_Orchestrate  = t_orchestrate_excl_kt_ms + ΔKT(T_sys)
+                       = (ΔFT + I_lib·ΔCT) + (num_kernels × T_sys)
 
-    Classification:
-        HDBI ≥ 0.5: device-bound (GPU compute dominates)
-        0.2 ≤ HDBI < 0.5: balanced
-        HDBI < 0.2: host-bound (CPU overhead dominates)
+    HDBI → 0: host-bound (orchestration overhead dominates)
+    HDBI → 1: device-bound (GPU compute dominates)
+    No numeric classification thresholds are defined in the paper.
 
     Args:
         total_kernel_exec_time_ms: Sum of kernel durations (T_DeviceActive)
-        total_xlat_tax_ms: Sum of translation overhead (ΔFT + ΔCT)
+        t_orchestrate_excl_kt_ms: Total non-ΔKT structural overhead in ms:
+            ΔFT + I_lib·ΔCT (all components except the hardware launch floor
+            ΔKT).  In TaxBreak mode this comes from the isolation replay
+            decomposition; in standard mode it equals total_T_dispatch.
         num_total_kernels: Number of kernel invocations (for ΔKT calculation)
         t_sys_us: System floor in microseconds from dynamic null-kernel measurement.
                   Defaults to the H100 hardcoded value (T_FLOOR_SYS_MS × 1000).
                   Always pass the dynamically-measured value from TaxBreak pipeline.
 
     Returns:
-        Dictionary containing HDBI metrics and classification.
+        Dictionary containing HDBI metrics (paper notation keys).
     """
     # T_DeviceActive = sum of kernel execution times
-    t_device_active = total_kernel_exec_time_ms
+    T_DeviceActive = total_kernel_exec_time_ms
 
     # ΔKT = num_kernels × T_sys (using dynamically-measured floor)
-    delta_kt = num_total_kernels * (t_sys_us / 1000.0)
+    delta_KT = num_total_kernels * (t_sys_us / 1000.0)
 
-    # T_Orchestrate = xlat_tax (ΔFT + ΔCT) + ΔKT
-    t_orchestrate = total_xlat_tax_ms + delta_kt
+    # T_Orchestrate = (ΔFT + I_lib·ΔCT) + ΔKT
+    T_Orchestrate = t_orchestrate_excl_kt_ms + delta_KT
 
     # HDBI = T_DeviceActive / (T_DeviceActive + T_Orchestrate)
-    denominator = t_device_active + t_orchestrate
+    denominator = T_DeviceActive + T_Orchestrate
     if denominator > 0:
-        hdbi_value = t_device_active / denominator
+        hdbi_value = T_DeviceActive / denominator
     else:
         hdbi_value = 0.0
 
     # Clamp to valid range [0, 1]
     hdbi_value = max(0.0, min(1.0, hdbi_value))
 
-    # Classification per TaxBreak paper
-    if hdbi_value >= 0.5:
-        classification = "device-bound"
-    elif hdbi_value >= 0.2:
-        classification = "balanced"
-    else:
-        classification = "host-bound"
-
     return {
         "hdbi_value": hdbi_value,
-        "hdbi_classification": classification,
-        "t_device_active_ms": t_device_active,
-        "t_orchestrate_ms": t_orchestrate,
-        "delta_kt_ms": delta_kt,
+        "T_DeviceActive_ms": T_DeviceActive,
+        "T_Orchestrate_ms": T_Orchestrate,
+        "delta_KT_ms": delta_KT,
     }
 
 

@@ -24,6 +24,7 @@ def nsys_profile(
     timeout: Optional[int] = None,
     cleanup: bool = False,
     extra_env: Optional[dict] = None,
+    trace_apis: str = "cuda,osrt,nvtx",
 ) -> Tuple[bool, Optional[str], str]:
     """
     Run `nsys profile` followed by `nsys export` to sqlite.
@@ -53,26 +54,29 @@ def nsys_profile(
     args = [
         "nsys",
         "profile",
-        "--trace=cuda,osrt,nvtx",
+        f"--trace={trace_apis}",
         "--output",
         str(trace_file),
         "--force-overwrite=true",
     ] + list(args)
 
     # Run nsys profile
-    result = subprocess.run(
-        args,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=extra_env,
-    )
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=extra_env,
+        )
+    except subprocess.TimeoutExpired:
+        return False, None, f"TIMEOUT: nsys profile timed out after {timeout}s"
 
     # Check if nsys profile was successful
     success = result.returncode == 0
     if success:
         utils.ensure_file(trace_file_rep)
-    else: 
+    else:
         return False, None, result.stderr or result.stdout
 
     # Build args for nsys export and run
@@ -86,12 +90,15 @@ def nsys_profile(
         str(trace_file_rep),
     ]
 
-    result = subprocess.run(
-        args,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, None, f"TIMEOUT: nsys export timed out after {timeout}s"
 
     # Clean up trace file if requested
     ALWAYS = True
@@ -219,7 +226,12 @@ def extract_launches_sql(trace_file_sql):
         cursor.execute("""
             SELECT start, end, correlationId
             FROM CUPTI_ACTIVITY_KIND_RUNTIME
-            WHERE nameId IN (SELECT id FROM StringIds WHERE value LIKE 'cudaLaunchKernel%')
+            WHERE nameId IN (
+                SELECT id FROM StringIds
+                WHERE value LIKE 'cudaLaunchKernel%'
+                   OR value LIKE 'cuLaunchKernel%'
+                   OR value LIKE 'cudaLaunchCooperativeKernel%'
+            )
         """)
         
         for row in cursor.fetchall():
@@ -253,6 +265,8 @@ def extract_culib_markers_sql(trace_file_sql):
             SELECT start, end, text
             FROM NVTX_EVENTS
             WHERE text IS NOT NULL
+              AND start IS NOT NULL
+              AND end IS NOT NULL
             """
         )
         for start_ns, end_ns, name in cursor.fetchall():
@@ -269,6 +283,104 @@ def extract_culib_markers_sql(trace_file_sql):
         return []
 
     return ranges
+
+
+def detect_vendor_library_events(trace_file_sql: str) -> Optional[bool]:
+    """Return True/False/None based on cuBLAS or cuDNN API call presence.
+
+    Supports two nsys schema generations:
+
+    **Old nsys (< 2024.x):** creates ``CUBLAS_EVENTS`` / ``CUDNN_EVENTS`` tables
+    when ``--trace=cublas,cudnn`` is active.  A row in either table → ``True``.
+
+    **New nsys (≥ 2024.x):** no longer creates dedicated vendor tables.  Instead,
+    cuBLAS/cuDNN API calls appear in ``CUPTI_ACTIVITY_KIND_RUNTIME`` alongside the
+    regular CUDA runtime API calls (function names resolved via ``StringIds``).
+    Additionally, ``META_DATA_CAPTURE`` records a
+    ``('CAPTURE_EVENT_TYPE', 'CuBLAS')`` row for every trace that was collected
+    with ``--trace=cublas``.
+
+    Detection algorithm (short-circuit on first positive):
+      1. ``CUBLAS_EVENTS`` / ``CUDNN_EVENTS`` table has rows → ``True``  (old nsys)
+         Tables exist but empty → vendor tracing confirmed active (old-nsys path),
+         skip META_DATA_CAPTURE check.
+      2. ``META_DATA_CAPTURE`` has no ``CuBLAS``/``CuDNN`` capture-event row AND no
+         legacy vendor table was found → vendor tracing was not active → ``None``
+         (inconclusive; caller falls back to Phase-1 DB heuristic).
+      3. ``CUPTI_ACTIVITY_KIND_RUNTIME`` JOIN ``StringIds`` finds a ``cublas%``,
+         ``cublaslt%``, or ``cudnn%`` function name → ``True``  (new nsys,
+         cuBLAS/cuBLASLt/cuDNN API called)
+      4. All checks passed but no vendor API found → ``False``  (confirmed absent;
+         tracing was active and produced GPU activity but no cuBLAS/cuDNN calls)
+
+    Return values:
+      - ``True``  — vendor API calls confirmed in trace; kernel is library-mediated.
+      - ``False`` — vendor tracing was active but no API calls found; confirmed NOT
+                    library-mediated (overrides Phase-1 DB heuristic).
+      - ``None``  — cannot determine (file unreadable, or vendor tracing was not
+                    active); caller should fall back to the Phase-1 DB heuristic.
+    """
+    try:
+        conn = sqlite3.connect(trace_file_sql)
+        cursor = conn.cursor()
+
+        # --- Step 1: legacy CUBLAS_EVENTS / CUDNN_EVENTS (old nsys) ---
+        # Track if the tables existed at all: even empty tables in old nsys proves
+        # vendor tracing was active (equivalent to META_DATA_CAPTURE for new nsys).
+        legacy_table_found = False
+        for table in ("CUBLAS_EVENTS", "CUDNN_EVENTS"):
+            try:
+                cursor.execute(f"SELECT 1 FROM {table} LIMIT 1")
+                legacy_table_found = True  # table exists (old nsys vendor tracing)
+                if cursor.fetchone() is not None:
+                    conn.close()
+                    return True  # old nsys with active cuBLAS/cuDNN events
+            except sqlite3.OperationalError:
+                continue  # table absent — expected for nsys ≥ 2024.x
+
+        # --- Step 2: confirm vendor tracing was active ---
+        # Old nsys: legacy_table_found is sufficient evidence.
+        # New nsys: check META_DATA_CAPTURE for CuBLAS/CuDNN capture type.
+        if not legacy_table_found:
+            vendor_tracing_active = False
+            try:
+                cursor.execute(
+                    "SELECT 1 FROM META_DATA_CAPTURE "
+                    "WHERE name='CAPTURE_EVENT_TYPE' AND value IN ('CuBLAS', 'CuDNN') "
+                    "LIMIT 1"
+                )
+                vendor_tracing_active = cursor.fetchone() is not None
+            except sqlite3.OperationalError:
+                pass  # META_DATA_CAPTURE absent → very old nsys or minimal trace
+
+            if not vendor_tracing_active:
+                conn.close()
+                return None  # inconclusive: vendor tracing was not enabled
+
+        # --- Step 3: new nsys — cuBLAS/cuBLASLt/cuDNN calls land in CUPTI_ACTIVITY_KIND_RUNTIME ---
+        try:
+            cursor.execute(
+                "SELECT 1 FROM CUPTI_ACTIVITY_KIND_RUNTIME r "
+                "JOIN StringIds s ON r.nameId = s.id "
+                "WHERE s.value LIKE 'cublas%' OR s.value LIKE 'cublaslt%' "
+                "OR s.value LIKE 'cudnn%' "
+                "LIMIT 1"
+            )
+            if cursor.fetchone() is not None:
+                conn.close()
+                return True  # cuBLAS/cuBLASLt/cuDNN API was called
+        except sqlite3.OperationalError:
+            pass  # table absent — fall through to confirmed-negative
+
+        conn.close()
+        # Step 4: vendor tracing was confirmed active but no API calls found.
+        # This is a confirmed negative (e.g. PyTorch 2.6+ bypasses cuBLAS C API).
+        return False
+
+    except Exception:
+        pass
+    # File unreadable or catastrophic error → inconclusive.
+    return None
 
 
 def build_base_args(job):

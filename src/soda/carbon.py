@@ -24,16 +24,31 @@ GPU_TDP_W: Dict[str, float] = {
     "H100 SXM":  700.0,
     "H100 PCIe": 350.0,
     "H200 SXM":  700.0,
+    "H200 NVL":  700.0,   # PCIe form-factor, 96 GB HBM3e; same per-card TDP as SXM
     "A100 SXM":  400.0,
     "A100 PCIe": 300.0,
     "V100 SXM2": 300.0,
     "A6000":     300.0,
     "L40S":      350.0,
+    # Blackwell workstation — RTX 6000 Blackwell (96 GB GDDR7)
+    "RTX 6000 Blackwell": 600.0,
+    # Blackwell data-center — B200 SXM5 / GB200 NVL (per-GPU)
+    "B200 SXM":  1000.0,
+    "GB200 NVL": 1000.0,
 }
 
 # Fuzzy match patterns — same order / logic as roofline.py _GPU_PATTERNS
 _TDP_PATTERNS = [
-    (re.compile(r"H200.*SXM|H200", re.IGNORECASE), "H200 SXM"),
+    # Blackwell — match before any generic H/A patterns
+    (re.compile(r"RTX\s*6000.*Blackwell", re.IGNORECASE), "RTX 6000 Blackwell"),
+    (re.compile(r"RTX\s*PRO\s*6000.*_?B\b", re.IGNORECASE), "RTX 6000 Blackwell"),
+    (re.compile(r"GB200.*NVL|NVL.*GB200", re.IGNORECASE), "GB200 NVL"),
+    (re.compile(r"B200.*SXM|B200", re.IGNORECASE), "B200 SXM"),
+    # Hopper
+    (re.compile(r"H200.*NVL", re.IGNORECASE), "H200 NVL"),
+    (re.compile(r"H200.*SXM", re.IGNORECASE), "H200 SXM"),
+    # H200 without variant qualifier — default to SXM (most common data-centre config)
+    (re.compile(r"H200", re.IGNORECASE), "H200 SXM"),
     (re.compile(r"H100.*SXM", re.IGNORECASE), "H100 SXM"),
     (re.compile(r"H100.*PCIe|H100.*PCI", re.IGNORECASE), "H100 PCIe"),
     (re.compile(r"A100.*SXM", re.IGNORECASE), "A100 SXM"),

@@ -7,7 +7,7 @@ from soda.common import utils
 
 def plot_pytorch_gemm_sequences(pytorch_gemm_sequences: Dict[str, Any]) -> None:
     """
-    Plot launch tax graphs from profiled PyTorch GEMM sequences.
+    Plot launch tax graphs from profiled PyTorch library-mediated sequences.
     """
     def plot_launch_tax(values: List[float], title: str, output_file: str) -> None:
         plt.figure(figsize=(8, 4))

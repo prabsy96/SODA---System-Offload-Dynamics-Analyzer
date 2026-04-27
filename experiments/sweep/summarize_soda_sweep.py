@@ -435,6 +435,7 @@ def short_model_name(name: Optional[str]) -> str:
     if not name:
         return "unknown_model"
     tokens = [part for part in name.split("/") if part]
+    # Drop the org prefix (e.g. "meta-llama/") — just keep the model slug
     return tokens[-1] if tokens else name
 
 
@@ -468,21 +469,14 @@ def transpose_grid(grid: List[List]) -> List[List]:
 
 
 def prepare_grids(section: Dict, metric_key: str = "values") -> Tuple[bool, List, List, List[List], List[List]]:
-    """Prepare grids for plotting. Supports both inference_time and t_exposed."""
+    """Prepare grids for plotting. x=batch_size, y=seq_len always."""
     bs = section["batch_sizes"]
     sl = section["seq_lens"]
-    rotate_axes = len(bs) != len(sl)
-    if rotate_axes:
-        x_labels = sl
-        y_labels = bs
-        value_grid = transpose_grid(section[metric_key])
-        status_grid = transpose_grid(section["statuses"])
-    else:
-        x_labels = bs
-        y_labels = sl
-        value_grid = section[metric_key]
-        status_grid = section["statuses"]
-    return rotate_axes, x_labels, y_labels, value_grid, status_grid
+    x_labels = bs
+    y_labels = sl
+    value_grid = section[metric_key]
+    status_grid = section["statuses"]
+    return False, x_labels, y_labels, value_grid, status_grid
 
 
 def compute_figsize(x_labels: List, y_labels: List, rotate_axes: bool) -> Tuple[float, float]:
@@ -526,9 +520,9 @@ def annotate_cells(ax, x_labels: List, y_labels: List, value_grid: List[List], s
             if status == "oom":
                 ax.text(j, i, "OOM", ha="center", va="center", color="red", fontsize=6, fontweight="bold")
             elif is_number:
-                ax.text(j, i, f"{float(value):.0f}", ha="center", va="center", color="white", fontsize=6)
+                ax.text(j, i, f"{float(value):.0f}", ha="center", va="center", color="black", fontsize=7, fontweight="bold")
             else:
-                ax.text(j, i, "DNH", ha="center", va="center", color="#9e9e9e", fontsize=6, fontweight="bold")
+                ax.text(j, i, "DNH", ha="center", va="center", color="#9e9e9e", fontsize=7, fontweight="bold")
 
 
 def plot_heatmap(section: Dict, out_paths: List[Path], metric_key: str = "values", metric_label: str = METRIC_LABEL) -> None:
@@ -569,24 +563,28 @@ def plot_heatmap(section: Dict, out_paths: List[Path], metric_key: str = "values
 
     fig, ax = plt.subplots(figsize=(IEEE_COL_WIDTH, fig_height))
 
-    im = ax.imshow(data, aspect="auto", cmap="viridis")
+    im = ax.imshow(data, aspect="auto", cmap="RdYlGn_r")
     
     ax.set_xticks(range(len(x_labels)))
     ax.set_xticklabels(x_labels, rotation=45, ha="right", rotation_mode="anchor")
     ax.set_yticks(range(len(y_labels)))
     ax.set_yticklabels(y_labels)
-    
-    ax.set_xlabel("Batch Size")
-    ax.set_ylabel("Sequence Length")
-    
-    metric_title = metric_label[:1].upper() + metric_label[1:]
-    model_label = format_model_label(section.get("model_name"))
-    precision_label = section.get("precision") or "unknown_precision"
-    gpu_short = short_gpu_name(section.get("gpu_name"))
-    title_str = f"{metric_title}\n{model_label} ({precision_label})"
-    if gpu_short:
-        title_str += f" [{gpu_short}]"
-    ax.set_title(title_str, pad=8)
+
+    ax.set_xlabel("Batch Size", fontsize=8, fontweight="bold")
+    ax.set_ylabel("Seq Len (tokens)", fontsize=8, fontweight="bold")
+
+    # Single-line title: ModelName · precision · GPU · (unit)
+    import re
+    model_short   = short_model_name(section.get("model_name"))
+    precision_str = section.get("precision") or ""
+    gpu_short     = short_gpu_name(section.get("gpu_name") or "")
+    unit_match    = re.search(r"\(.*?\)", metric_label)
+    unit_str      = unit_match.group(0) if unit_match else ""
+
+    title_parts = [p for p in [model_short, precision_str, gpu_short, unit_str] if p]
+    title_str   = " · ".join(title_parts)
+
+    ax.set_title(title_str, fontsize=8, pad=3, fontweight="bold")
 
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="5%", pad=0.08)

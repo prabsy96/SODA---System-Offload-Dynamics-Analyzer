@@ -54,6 +54,7 @@ def main() -> None:
     precision = PARAMS["precision"]
     device = PARAMS["device"]
     warmup = PARAMS["inference_warmup"]
+    runs = PARAMS.get("inference_runs", "150")
 
     # Custom model override: pass any HF model ID via SODA_CUSTOM_MODEL
     # with optional SODA_BATCH_SIZES, SODA_SEQ_LENS, SODA_MAX_NEW_TOKENS
@@ -166,6 +167,7 @@ def main() -> None:
                 "--compile-type", compile_type,
                 "--device", device,
                 "--warmup", warmup,
+                "--runs", runs,
             ]
             args = utils.parse_and_validate_args(cli_args)
 

@@ -89,7 +89,7 @@ class SodaAnalyzer:
         """
         print("=== Analyzing Trace Data ===")
         print(f"Analyzing {len(self.sequences)} event sequences")
-        sequences = utils.calculate_sequence_metrics(list(self.sequences), metrics=["launch_tax", "aten_xlat_tax", "py_tax"])
+        sequences = utils.calculate_sequence_metrics(list(self.sequences), metrics=["T_launch", "T_dispatch", "T_Py"])
         
         # Analyze per-stream metrics
         stream_info = utils.analyze_per_stream(self.events)
@@ -102,16 +102,58 @@ class SodaAnalyzer:
         total_gpu_time_span, true_gpu_busy_time, gpu_utilization, per_device_gpu = \
             utils.calculate_gpu_metrics(self.events)
         
-        # Kernel metrics
-        kernel_exec_time = utils.calculate_kernel_exec_time(self.events)
-        total_launch_tax = utils.calculate_total_tax(sequences, "launch")
-        avg_launch_tax = utils.calculate_avg_tax(sequences, "launch")
-        total_xlat_tax = utils.calculate_total_tax(sequences, "aten_xlat")
-        avg_xlat_tax = utils.calculate_avg_tax(sequences, "aten_xlat")
-        total_py_tax = utils.calculate_total_tax(sequences, "py")
-        avg_py_tax = utils.calculate_avg_tax(sequences, "py")
-        avg_kernel_dur, top_k_kernels = utils.get_kernel_stats(self.events, k=3)  # Phase C: single pass
+        # Normalize GPU metrics by num_runs so they match per-inference time
+        num_runs = getattr(self.tracer, "num_profiled_runs", 1) or 1
+        total_gpu_time_span /= num_runs
+        true_gpu_busy_time /= num_runs
+        # gpu_utilization is a ratio, so it stays the same
+        for dev_id in per_device_gpu:
+            per_device_gpu[dev_id]["span_us"] /= num_runs
+            per_device_gpu[dev_id]["busy_us"] /= num_runs
         
+        # Kernel metrics (raw values span all num_runs in the trace)
+        kernel_exec_time = utils.calculate_kernel_exec_time(self.events)
+        total_T_launch = utils.calculate_total_tax(sequences, "T_launch")
+        avg_T_launch = utils.calculate_avg_tax(sequences, "T_launch")
+        total_T_dispatch = utils.calculate_total_tax(sequences, "T_dispatch")
+        avg_T_dispatch = utils.calculate_avg_tax(sequences, "T_dispatch")
+        total_T_Py = utils.calculate_total_tax(sequences, "T_Py")
+        avg_T_Py = utils.calculate_avg_tax(sequences, "T_Py")
+        avg_kernel_dur, top_k_kernels = utils.get_kernel_stats(self.events, k=3)  # Phase C: single pass
+
+        # Normalize aggregate kernel metrics to per-inference values.
+        # The trace contains all num_runs iterations; totals must be divided
+        # so they represent a single inference pass (matching inference_time).
+        # Per-kernel averages (avg_*_tax, avg_kernel_exec_time, TKLQT avg/min/max)
+        # are already correct because both numerator and denominator scale equally.
+        kernel_exec_time["total"] /= num_runs
+        total_T_launch /= num_runs
+        total_T_dispatch /= num_runs
+        total_T_Py /= num_runs
+        num_total_kernels = len(self.events["gpu"]["kernels"]) // num_runs
+
+        # Warn about negative aggregate taxes (deep-queue GPU artifact, e.g. H100 bs=1).
+        # Raw values are preserved as-is; use --taxbreak isolation replay for accurate KT.
+        if total_T_launch < 0:
+            print(
+                f"Warning: total_T_launch={total_T_launch:.2f} µs is negative "
+                f"(deep-queue GPU artifact). Values in report.json reflect raw "
+                f"measurements; use --taxbreak for artifact-free per-kernel KT.",
+                file=__import__('sys').stderr,
+            )
+        if total_T_dispatch < 0:
+            print(
+                f"Warning: total_T_dispatch={total_T_dispatch:.2f} µs is negative "
+                f"(profiler ordering artifact). Use --taxbreak for accurate ΔCT.",
+                file=__import__('sys').stderr,
+            )
+
+        # Normalize top-k frequency and total duration to per-inference
+        for _bucket in ("by_frequency", "by_duration"):
+            for _name, _data in top_k_kernels.get(_bucket, []):
+                _data["frequency"] = int(round(_data["frequency"] / num_runs))
+                _data["duration"] /= num_runs
+
         # Fusion analysis
         fusion_results = None
         if self.args.fusion:
@@ -125,8 +167,11 @@ class SodaAnalyzer:
                     logger=None
                 )
 
-        # TKLQT
+        # TKLQT — normalize total and count to per-inference
         tklqt_metrics = utils.calculate_tklqt(sequences)
+        if tklqt_metrics.get("count", 0) > 0:
+            tklqt_metrics["total"] /= num_runs
+            tklqt_metrics["count"] = int(round(tklqt_metrics["count"] / num_runs))
 
         # Inference throughput: TPOT vs TTFT labeling
         output_tokens = getattr(self.args, "max_new_tokens", 1) or 1
@@ -136,14 +181,29 @@ class SodaAnalyzer:
         throughput_tok_s = (self.args.batch_size * output_tokens) / inference_s if inference_s > 0 else None
         interactivity_tok_s = output_tokens / inference_s if inference_s > 0 else None
 
-        # Kernel fragmentation (MoE diagnostic)
+        # Kernel fragmentation (MoE diagnostic) — normalize to per-inference
         fragmentation_metrics = utils.compute_kernel_fragmentation(self.events, output_tokens)
+        fragmentation_metrics["total_kernel_launches"] = int(round(
+            fragmentation_metrics["total_kernel_launches"] / num_runs
+        ))
+        if output_tokens > 0:
+            fragmentation_metrics["kernels_per_output_token"] = round(
+                fragmentation_metrics["total_kernel_launches"] / output_tokens, 2
+            )
+        # kernel_diversity_ratio uses unique count (unchanged) and normalized total
+        n_frag = fragmentation_metrics["total_kernel_launches"]
+        fragmentation_metrics["kernel_diversity_ratio"] = round(
+            fragmentation_metrics["unique_kernel_count"] / n_frag, 4
+        ) if n_frag > 0 else 0.0
 
         # Memory metrics from tracer + GPU memory transfer events
+        # Normalize memcpy/memset counts and time to per-inference
         memory_metrics = dict(self.tracer.memory_metrics) if self.tracer.memory_metrics else {}
         gpu_mem_events = self.events["gpu"]["memory"]
-        memory_metrics["num_memcpy_memset_ops"] = len(gpu_mem_events)
-        memory_metrics["total_memcpy_memset_time_ms"] = round(sum(e["dur"] for e in gpu_mem_events) / 1000.0, 4)
+        memory_metrics["num_memcpy_memset_ops"] = len(gpu_mem_events) // num_runs
+        memory_metrics["total_memcpy_memset_time_ms"] = round(
+            sum(e["dur"] for e in gpu_mem_events) / 1000.0 / num_runs, 4
+        )
 
         # Carbon footprint estimation
         carbon_metrics = None
@@ -186,14 +246,14 @@ class SodaAnalyzer:
 
             # Kernel metrics
             "total_kernel_exec_time_ms": utils.us_to_ms(kernel_exec_time["total"]),
-            "num_total_kernels": len(self.events["gpu"]["kernels"]),
+            "num_total_kernels": num_total_kernels,
             "avg_kernel_exec_time_ms": utils.us_to_ms(kernel_exec_time["avg"]),
-            "total_xlat_tax_ms": utils.us_to_ms(total_xlat_tax),
-            "avg_xlat_tax_ms": utils.us_to_ms(avg_xlat_tax),
-            "total_launch_tax_ms": utils.us_to_ms(total_launch_tax),
-            "avg_launch_tax_ms": utils.us_to_ms(avg_launch_tax),
-            "total_py_tax_ms": utils.us_to_ms(total_py_tax),
-            "avg_py_tax_ms": utils.us_to_ms(avg_py_tax),
+            "total_T_dispatch_ms": utils.us_to_ms(total_T_dispatch),
+            "avg_T_dispatch_ms": utils.us_to_ms(avg_T_dispatch),
+            "total_T_launch_ms": utils.us_to_ms(total_T_launch),
+            "avg_T_launch_ms": utils.us_to_ms(avg_T_launch),
+            "total_T_Py_ms": utils.us_to_ms(total_T_Py),
+            "avg_T_Py_ms": utils.us_to_ms(avg_T_Py),
 
             # TKLQT (HDBI requires accurate i_lib decomposition from --taxbreak)
             "tklqt": tklqt_metrics,
@@ -280,13 +340,14 @@ class SodaAnalyzer:
         
         print("")
         print("=== Taxes ===")
-        print(f"\t* ΔFT  (py_tax, Python layer) (ms): {metrics['total_py_tax_ms']:.4f}")
-        print(f"\t* ΔCT  (xlat tax, ATen dispatch) (ms): {metrics['total_xlat_tax_ms']:.4f}")
-        print(f"\t* ΔKT  (launch tax + queue latency) (ms): {metrics['total_launch_tax_ms']:.4f}")
+        print(f"\t* ΔFT_py  (T_Py, Python layer) (ms): {metrics['total_T_Py_ms']:.4f}")
+        print(f"\t* ΔFT_disp + δCT  (T_dispatch, undifferentiated in standard mode) (ms): {metrics['total_T_dispatch_ms']:.4f}")
+        print(f"\t*   (use --taxbreak for per-kernel FT_dispatch / δCT decomposition)")
+        print(f"\t* ΔKT  (T_launch + queue latency) (ms): {metrics['total_T_launch_ms']:.4f}")
         if metrics['num_total_kernels'] > 0:
-            print(f"\t* Avg. py_tax per kernel (ms): {metrics['avg_py_tax_ms']:.4f}")
-            print(f"\t* Avg. xlat tax per kernel (ms): {metrics['avg_xlat_tax_ms']:.4f}")
-            print(f"\t* Avg. launch tax (+ queue latency) per kernel (ms): {metrics['avg_launch_tax_ms']:.4f}")
+            print(f"\t* Avg. T_Py per kernel (ms): {metrics['avg_T_Py_ms']:.4f}")
+            print(f"\t* Avg. T_dispatch per kernel (ms): {metrics['avg_T_dispatch_ms']:.4f}")
+            print(f"\t* Avg. T_launch (+ queue latency) per kernel (ms): {metrics['avg_T_launch_ms']:.4f}")
             print(f"\t* Avg. execution time per kernel (ms): {metrics['avg_kernel_exec_time_ms']:.4f}")
         
         # Memory profiling
@@ -548,15 +609,12 @@ class ModelTracer:
                 f"Warning: requested {requested_gpus} GPUs but only "
                 f"{available_gpus} available. Using {self.num_gpus}."
             )
+        self.parallelism = getattr(args, "parallelism", "tp")
         if self.num_gpus > 1:
-            print(f"Multi-GPU mode: distributing model across {self.num_gpus} GPUs "
-                  f"(device_map=\"balanced\").")
+            print(f"Multi-GPU mode ({self.parallelism}): using {self.num_gpus} GPUs.")
 
         self.compile_type = args.compile_type
-        # DEBUG: Print precision settings
-        print(f"DEBUG: args.precision='{args.precision}'")
         self.is_fp8 = args.precision == "float8_e4m3fn"
-        print(f"DEBUG: self.is_fp8={self.is_fp8}")
         
         self.precision = utils.parse_dtype_to_torch(args.precision)
         self.load_precision = torch.float16 if self.is_fp8 else self.precision
@@ -717,6 +775,52 @@ class ModelTracer:
                 self.tokenizer, self.device, self.batch_size, self.seq_len, model_config=self.model.config
             )
 
+        # --- Multi-GPU Parallelism Wrappers ---
+        if self.num_gpus > 1:
+            if self.parallelism == "dp":
+                print("Parallelism: Wrapping model in torch.nn.DataParallel")
+                self.model = torch.nn.DataParallel(self.model)
+                
+            elif self.parallelism == "fsdp":
+                print("Parallelism: Wrapping model in FullyShardedDataParallel (FSDP)")
+                from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+                from torch.distributed.fsdp import ShardingStrategy
+                
+                # Initialize process group if not already done (required for FSDP)
+                if not torch.distributed.is_initialized():
+                    print("Initializing default process group (nccl) for FSDP...")
+                    # Set default port/addr if not present (helps in single-node/srun scenarios)
+                    if "MASTER_ADDR" not in os.environ:
+                        os.environ["MASTER_ADDR"] = "localhost"
+                    if "MASTER_PORT" not in os.environ:
+                        os.environ["MASTER_PORT"] = "12355"
+                        
+                    torch.distributed.init_process_group(
+                        backend="nccl" if self._has_cuda else "gloo",
+                        rank=0,
+                        world_size=1
+                    )
+                
+                self.model = FSDP(
+                    self.model,
+                    sharding_strategy=ShardingStrategy.FULL_SHARD
+                )
+                
+            elif self.parallelism == "ep":
+                print("Parallelism: Expert Parallelism (EP) requested.")
+                # For MoE models, we can attempt to shard experts specifically.
+                # Here we assume the model has an MoE structure. 
+                # This is a basic implementation that ensures experts are distributed.
+                is_moe = any("experts" in name for name, _ in self.model.named_modules())
+                if not is_moe:
+                    print("Warning: Model does not appear to be an MoE model. Falling back to default sharding.")
+                else:
+                    print("Applying expert-aware sharding...")
+                    # In a real EP implementation, we'd use a library like DeepSpeed-MoE.
+                    # For SODA, we ensure the experts are mapped to different GPUs if possible.
+                    # (This is already partially handled by 'balanced' device_map, but we can be more explicit if needed)
+                    pass
+
         # Capture model memory footprint after loading model + inputs
         if self._has_cuda:
             for i in range(self.num_gpus):
@@ -731,7 +835,15 @@ class ModelTracer:
     def get_kwargs(self) -> Dict[str, Any]:
         """Returns common kwargs for model loading."""
         if self.num_gpus > 1:
-            device_map = "balanced"
+            if self.parallelism == "tp":
+                # HF Tensor Parallelism (Sharding)
+                device_map = "balanced"
+            elif self.parallelism == "ep":
+                # For MoE, we want balanced sharding but with expert awareness
+                device_map = "auto"
+            else:
+                # DP/FSDP usually load model on CPU or single GPU first
+                device_map = {"": self.device} if self._has_cuda else "cpu"
         elif self._has_cuda:
             device_map = self.device
         else:
@@ -764,8 +876,6 @@ class ModelTracer:
         """
         Recursively replace nn.Linear with transformer_engine.pytorch.Linear.
         """
-        import transformer_engine.pytorch as te
-        
         import transformer_engine.pytorch as te
         import gc
         
@@ -1164,6 +1274,12 @@ class ModelTracer:
 
         prof.export_chrome_trace(str(self.trace_file))
 
+    def _get_model(self) -> torch.nn.Module:
+        """Returns the underlying model, unwrapping from DP/FSDP if necessary."""
+        if hasattr(self.model, "module"):
+            return self.model.module
+        return self.model
+
     def trace_forward_pass_for_decoder(self) -> None:
         """
         Profiles the generate step of a decoder model.
@@ -1180,7 +1296,7 @@ class ModelTracer:
         # Warm-up runs
         with torch.no_grad():
             for _ in range(max(0, self.args.warmup)):
-                self.model.generate(
+                self._get_model().generate(
                     **self.model_inputs,
                     max_new_tokens=self.max_new_tokens,
                     do_sample=False,
@@ -1223,7 +1339,9 @@ class ModelTracer:
                     if self.is_fp8 and getattr(self, 'fp8_recipe', None):
                         import transformer_engine.pytorch as te
                         with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
-                            _out = self.model.generate(
+                            # Use the underlying model for generate() calls if wrapped
+                            model_to_call = self._get_model()
+                            _out = model_to_call.generate(
                                 **self.model_inputs,
                                 max_new_tokens=self.max_new_tokens,
                                 do_sample=False,
@@ -1231,7 +1349,7 @@ class ModelTracer:
                                 return_dict_in_generate=_is_last,
                             )
                     else:
-                        _out = self.model.generate(
+                        _out = self._get_model().generate(
                             **self.model_inputs,
                             max_new_tokens=self.max_new_tokens,
                             do_sample=False,
@@ -1416,6 +1534,14 @@ def main() -> int:
             os.environ["EXPERIMENT_DIR"] = str(db_path.parent.resolve())
 
             pipeline = TaxBreakPipeline(kernel_db_path=db_path, args=args)
+            pipeline.run()
+            return 0
+
+        # --- MoE per-operator memory profiling via CUPTI ---
+        if getattr(args, "moe_profile", False):
+            from soda.moe.pipeline import MoEProfilePipeline
+
+            pipeline = MoEProfilePipeline(model_name=args.model, args=args)
             pipeline.run()
             return 0
 

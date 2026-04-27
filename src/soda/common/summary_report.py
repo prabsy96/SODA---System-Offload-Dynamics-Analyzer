@@ -715,14 +715,16 @@ def render_taxbreak_analysis(report: dict, args, output_dir: Path) -> str:
 
     agg = report.get("aggregate", {})
     breakdown = agg.get("breakdown_mean", {})
-    t_structural_ms = agg.get("T_structural_mean_ms", 0.0)
-    py_ms = breakdown.get("FT_python_ms", 0.0)
-    xlat_ms = breakdown.get("CT_dispatch_ms", 0.0)
-    launch_ms = breakdown.get("KT_launch_ms", 0.0)
+    t_structural_ms = agg.get("T_host_observed_ms", 0.0)
+    py_ms = breakdown.get("delta_FT_py_ms", 0.0)
+    ft_disp_ms = breakdown.get("delta_FT_dispatch_ms", 0.0)
+    delta_ct_ms = breakdown.get("delta_CT_ms", 0.0)
+    launch_ms = breakdown.get("T_launch_raw_ms", 0.0)
     components = [
-        {"name": "Python (FT)", "ms": py_ms},
-        {"name": "ATen dispatch (CT)", "ms": xlat_ms},
-        {"name": "Kernel launch (KT)", "ms": launch_ms},
+        {"name": "Python layer (\u0394FT_py)", "ms": py_ms},
+        {"name": "ATen dispatch (\u0394FT_disp)", "ms": ft_disp_ms},
+        {"name": "CUDA lib overhead (\u0394CT)", "ms": delta_ct_ms},
+        {"name": "Kernel launch (\u0394KT)", "ms": launch_ms},
     ]
     if t_structural_ms > 0:
         _console.print(_build_overhead_table(

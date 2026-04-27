@@ -1,0 +1,14 @@
+SODA — System Offload Dynamics Analyzer
+Copyright 2025 Prabhu Vellaisamy, Carnegie Mellon University
+
+This product implements the TaxBreak methodology for decomposing
+host-side overhead in LLM inference workloads on CPU-GPU architectures.
+
+If you use this software in academic or industry work, you must cite:
+
+  Vellaisamy, P., Tripathi, S., Natarajan, V., Thenarasu, S.S., Blanton, S. and Shen, J.P., 2026. TaxBreak: Unmasking the Hidden Costs of LLM Inference Through Overhead Decomposition. arXiv preprint arXiv:2603.12465
+
+  P. Vellaisamy, T. Labonte, S. Chakraborty, M. Turner, S. Sury,
+  and J. P. Shen, "Characterizing and Optimizing LLM Inference
+  Workloads on CPU-GPU Coupled Architectures," in Proc. IEEE ISPASS,
+  2025, pp. 49-61. DOI: 10.1109/ISPASS64960.2025.00015

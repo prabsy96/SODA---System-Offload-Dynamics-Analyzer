@@ -100,8 +100,8 @@ def _measure_floor_on_device(
 
 
 def measure_system_floor(
-    warmup: int = 50,
-    runs: int = 200,
+    warmup: int = 20,
+    runs: int = 50,
     num_gpus: int = 1,
 ) -> Dict[str, float]:
     """
@@ -132,68 +132,17 @@ def measure_system_floor(
     build_binary()
 
     if num_gpus <= 1:
-        # Single-GPU path (original behaviour, no CUDA_VISIBLE_DEVICES override)
-        binary_path = utils.get_path("BAREMETAL_BINARY")
-        binary_args = [
-            str(binary_path),
-            "--null_kernel",
-            "--warmup", str(warmup),
-            "--runs", str(runs),
-        ]
-        trace_name = "null_kernel_floor"
-        success, trace_sql, msg = nsys_profile(
-            trace_file_name=trace_name,
-            args=binary_args,
-            timeout=120,
-        )
-        if not success:
-            raise RuntimeError(f"nsys profiling of null kernel failed: {msg}")
-
-        kernels = extract_kernels_sql(trace_sql, filter_gemm_only=False)
-        launches = extract_launches_sql(trace_sql)
-
-        if not kernels:
-            raise RuntimeError("No null kernels found in nsys trace")
-
-        launch_taxes: List[float] = []
-        for kernel in kernels:
-            corr_id = kernel.correlation
-            if corr_id in launches:
-                launch = launches[corr_id]
-                tax = kernel.ts - launch["ts"]
-                launch_taxes.append(tax)
-
-        if not launch_taxes:
+        # Single-GPU path — delegate to the shared helper (gpu_id=0).
+        r = _measure_floor_on_device(0, warmup, runs)
+        if r is None:
             raise RuntimeError(
-                "Could not match any null kernel to its launch event"
+                "nsys profiling of null kernel failed on GPU 0. "
+                "Check nsys availability and baremetal binary path."
             )
-
-        if len(launch_taxes) > runs:
-            launch_taxes = launch_taxes[-runs:]
-
-        avg = sum(launch_taxes) / len(launch_taxes)
-        min_val = min(launch_taxes)
-        max_val = max(launch_taxes)
-
-        if len(launch_taxes) > 1:
-            variance = sum((x - avg) ** 2 for x in launch_taxes) / (len(launch_taxes) - 1)
-            std = math.sqrt(variance)
-        else:
-            std = 0.0
-
-        result: Dict[str, object] = {
-            "avg_us": round(avg, 4),
-            "min_us": round(min_val, 4),
-            "max_us": round(max_val, 4),
-            "std_us": round(std, 4),
-            "samples": len(launch_taxes),
-            "method": "dynamic",
-        }
-
+        result: Dict[str, object] = {**r, "method": "dynamic"}
         print(f"System floor (null kernel): avg={result['avg_us']:.2f} us, "
               f"min={result['min_us']:.2f} us, max={result['max_us']:.2f} us, "
               f"std={result['std_us']:.2f} us ({result['samples']} samples)")
-
         return result
 
     # Multi-GPU path: measure each device, return minimum avg (conservative floor)
