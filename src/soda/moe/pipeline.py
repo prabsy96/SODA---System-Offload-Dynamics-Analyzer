@@ -139,11 +139,21 @@ class MoEProfilePipeline:
         print(f"[MoE CUPTI Profile] Loading model: {self.model_name}")
         dtype = getattr(torch, self.precision, torch.bfloat16)
         tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        parallelism = getattr(self.args, "parallelism", "tp")
+        if parallelism == "tp":
+            device_map = "auto"
+        else:
+            # DP/FSDP/EP usually load on a single device first
+            device_map = None 
+
         model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             torch_dtype=dtype,
-            device_map="auto",
+            device_map=device_map,
         )
+        if device_map is None:
+            model.to("cuda" if torch.cuda.is_available() else "cpu")
+
         model.eval()
         # Resolve "auto" / unknown precision strings to the actual model dtype so
         # that _dtype_bytes() and create_input_tensors() use the correct byte width.

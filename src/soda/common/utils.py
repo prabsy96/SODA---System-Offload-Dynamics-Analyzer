@@ -843,9 +843,18 @@ def get_args_parser() -> argparse.ArgumentParser:
         dest="num_gpus",
         type=int,
         default=1,
-        help="Number of GPUs to use for inference via model parallelism "
+        help="Number of GPUs to use for inference for desired model parallelism "
              "(device_map=\"balanced\"). Default: 1 (single GPU). "
              "Values > available GPUs are clamped to available count.",
+    )
+    parser.add_argument(
+        "--parallelism",
+        dest="parallelism",
+        default="tp",
+        choices=["dp", "ep", "fsdp", "tp"],
+        help="Desired form of multi-GPU parallelism. "
+             "Choose from data parallelism (dp), expert parallelism (ep), "
+             "fully-sharded data parallelism (fsdp), or tensor parallelism (tp)",
     )
     parser.add_argument(
         "--no-global-cache",
