@@ -14,13 +14,17 @@ except ImportError:
     print("cerebras.pytorch or modelzoo not found. Ensure you are in the Cerebras environment.")
     sys.exit(1)
 
+from pathlib import Path
+
 from soda.cerebras.tracer import CerebrasTracer
 
 def main():
+    default_out = Path(__file__).parent.parent.resolve() / "soda_cerebras_output"
     parser = argparse.ArgumentParser(description="SODA Cerebras Inference Runner")
     parser.add_argument("--model", type=str, required=True, help="Model name or path")
-    parser.add_argument("--output-dir", type=str, default="soda_cerebras_output", help="Output directory for traces")
+    parser.add_argument("--output-dir", type=str, default=str(default_out), help="Output directory for traces")
     parser.add_argument("--steps", type=int, default=10, help="Number of steps to trace")
+
     
     # We parse known args so we can pass the rest to ModelZooCLI if needed
     args, unknown = parser.parse_known_args()

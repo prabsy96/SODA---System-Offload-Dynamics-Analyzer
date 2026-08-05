@@ -36,6 +36,7 @@ class CerebrasAnalyzer:
                 self.compile_data = json.load(f)
                 
         self.generate_report()
+        self.export_markdown_report()
         
     def generate_report(self):
         """
@@ -72,3 +73,55 @@ class CerebrasAnalyzer:
                     print(f"... and {len(modules) - 10} more modules.")
         
         print("\nReport generation complete.")
+
+    def export_markdown_report(self) -> Path:
+        """
+        Generates and saves a Markdown performance report.
+        """
+        output_dir = self.trace_file.parent
+        report_path = output_dir / "soda_cerebras_report.md"
+        
+        model_name = self.metrics_data.get("model", "Unknown")
+        step_metrics = self.metrics_data.get("metrics", [])
+        
+        lines = [
+            f"# SODA Cerebras Stage 1 Performance Report",
+            f"",
+            f"**Model:** `{model_name}`  ",
+            f"**Architecture:** Cerebras CS-3 Wafer-Scale Engine  ",
+            f"",
+            f"## Execution Metrics",
+            f"",
+        ]
+        
+        if step_metrics:
+            avg_rate = sum(m.get("data_pumping_rate_tok_s", 0) for m in step_metrics) / len(step_metrics)
+            avg_latency = sum(m.get("step_latency_s", 0) for m in step_metrics) / len(step_metrics)
+            lines.extend([
+                f"- **Average Throughput (Data Pumping Rate):** `{avg_rate:.2f} tok/s`",
+                f"- **Average Step Latency:** `{avg_latency:.4f} s` (`{avg_latency * 1000:.2f} ms`)",
+                f"- **Total Profiled Steps:** `{len(step_metrics)}`",
+                f"",
+            ])
+        
+        if self.compile_data:
+            modules = self.compile_data.get("module_timings", [])
+            lines.extend([
+                f"## Wafer-Side Module Compilation Timings",
+                f"",
+                f"| Module Name | Op Type | Latency (µs) | PEs Used |",
+                f"| :--- | :--- | :--- | :--- |",
+            ])
+            modules.sort(key=lambda x: x.get("estimated_latency_us", 0), reverse=True)
+            for mod in modules:
+                lines.append(
+                    f"| `{mod.get('module_name')}` | `{mod.get('op_type')}` | `{mod.get('estimated_latency_us'):.2f}` | `{mod.get('wafer_area_pe')}` |"
+                )
+            lines.append("")
+            
+        with open(report_path, "w") as f:
+            f.write("\n".join(lines))
+            
+        LOGGER.info(f"Exported Cerebras Markdown report to {report_path}")
+        return report_path
+
