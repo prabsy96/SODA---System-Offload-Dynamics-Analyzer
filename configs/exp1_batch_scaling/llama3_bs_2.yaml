@@ -45,8 +45,8 @@ trainer:
       embedding_layer_norm: false
       extra_attention_params:
         num_kv_groups: 8
-      filter_size: 14336
-      hidden_size: 4096
+      filter_size: 8192
+      hidden_size: 2048
       initializer_range: 0.02
       layer_norm_epsilon: 1.0e-05
       loss_scaling: num_tokens
@@ -56,7 +56,7 @@ trainer:
       nonlinearity: swiglu
       norm_type: rmsnorm
       num_heads: 32
-      num_hidden_layers: 2
+      num_hidden_layers: 16
       pos_scaling_extra_args:
         high_freq_factor: 4.0
         low_freq_factor: 1.0
