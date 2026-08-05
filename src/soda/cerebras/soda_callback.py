@@ -24,14 +24,13 @@ class SodaCallback(Callback):
     """
     def __init__(self):
         super().__init__()
-        # We will initialize the tracer when the fit starts, so we can access trainer config.
         self.tracer = None
+        self.rate_tracker = None
 
     def on_enter_fit(self, trainer, stack, train_dataloader, val_dataloader, loop):
         """
         Called when the fit method is entered. We initialize our CerebrasTracer here.
         """
-        # We can extract the model_dir or output_dir from trainer
         class MockArgs:
             def __init__(self, output_dir, model_name):
                 self.output_dir = output_dir
@@ -42,8 +41,23 @@ class SodaCallback(Callback):
         
         args = MockArgs(output_dir=str(output_dir), model_name=model_name)
         self.tracer = CerebrasTracer(args)
+        if cstorch:
+            self.rate_tracker = cstorch.utils.tracker.RateTracker()
         
         LOGGER.info(f"Initialized SodaCallback for Cerebras ModelZoo. Output dir: {output_dir}")
+
+    @cstorch.step_closure
+    def _log_metrics_step(self, current_step, batch_size):
+        if self.rate_tracker:
+            if batch_size:
+                self.rate_tracker.add(batch_size)
+            rate = self.rate_tracker.rate()
+            global_rate = self.rate_tracker.global_rate()
+        else:
+            rate, global_rate = 0.0, 0.0
+            
+        if self.tracer:
+            self.tracer.log_step_metrics(current_step, 0.0, rate, global_rate)
 
     def on_train_batch_start(self, trainer, model, batch, batch_idx):
         """
@@ -53,19 +67,20 @@ class SodaCallback(Callback):
         if cstorch is None or not self.tracer:
             return
             
-        @cstorch.step_closure
-        def log_soda_metrics(current_step):
-            # Access the backend executor directly to pull the rates
-            executor = cstorch.backend().executor
-            if executor and hasattr(executor, 'profiler'):
-                rate = executor.profiler.rate()
-                global_rate = executor.profiler.global_rate()
-                # Dummy loss extraction since step_closure might not have access to loss here trivially
-                loss_val = 0.0 
-                self.tracer.log_step_metrics(current_step, loss_val, rate, global_rate)
+        if trainer.is_first_iteration and self.rate_tracker:
+            self.rate_tracker.reset()
 
-        # We pass the current step into the closure
-        log_soda_metrics(batch_idx)
+        # Infer batch size safely from batch dict/tensor
+        batch_size = 16
+        if isinstance(batch, dict):
+            for v in batch.values():
+                if hasattr(v, "shape") and len(v.shape) > 0:
+                    batch_size = v.shape[0]
+                    break
+        elif hasattr(batch, "shape") and len(batch.shape) > 0:
+            batch_size = batch.shape[0]
+
+        self._log_metrics_step(batch_idx, batch_size)
 
     def on_fit_end(self, trainer, loop):
         """

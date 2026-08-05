@@ -46,9 +46,8 @@ def main():
     _patch_trainer()
     
     # Run the standard ModelZoo CLI
-    # It will parse sys.argv just like `cszoo` does.
-    cli = ModelZooCLI()
-    cli.run()
+    # It will parse sys.argv and execute the action inside __init__
+    ModelZooCLI()
 
 if __name__ == "__main__":
     main()
