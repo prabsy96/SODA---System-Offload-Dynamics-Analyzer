@@ -17,7 +17,7 @@ BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64]
 import math
 import statistics
 
-def parse_trace_file(trace_path: Path):
+def parse_trace_file(trace_path: Path, batch_size: int):
     if not trace_path.exists():
         return None
     try:
@@ -31,7 +31,10 @@ def parse_trace_file(trace_path: Path):
         valid_steps = metrics[1:] if len(metrics) > 1 else metrics
         
         rates = [m.get("data_pumping_rate_tok_s", 0) for m in valid_steps]
-        latencies_ms = [m.get("step_latency_s", 0) * 1000.0 for m in valid_steps]
+        # step_latency_s in tracer is per-sample latency (1.0 / rate)
+        per_sample_latencies_ms = [m.get("step_latency_s", 0) * 1000.0 for m in valid_steps]
+        # Total batch step time as shown in Figure 11(a) = per-sample latency * batch_size
+        batch_execution_times_ms = [l * batch_size for l in per_sample_latencies_ms]
         host_idle_ms = [m.get("host_sync_idle_s", 0) * 1000.0 for m in valid_steps]
         
         n = len(valid_steps)
@@ -39,9 +42,10 @@ def parse_trace_file(trace_path: Path):
         rate_std = statistics.stdev(rates) if n > 1 else 0.0
         rate_moe = 1.96 * (rate_std / math.sqrt(n)) if n > 1 else 0.0
 
-        avg_latency_ms = statistics.mean(latencies_ms)
-        latency_std = statistics.stdev(latencies_ms) if n > 1 else 0.0
-        latency_moe = 1.96 * (latency_std / math.sqrt(n)) if n > 1 else 0.0
+        avg_per_sample_ms = statistics.mean(per_sample_latencies_ms)
+        avg_batch_time_ms = statistics.mean(batch_execution_times_ms)
+        batch_time_std = statistics.stdev(batch_execution_times_ms) if n > 1 else 0.0
+        batch_time_moe = 1.96 * (batch_time_std / math.sqrt(n)) if n > 1 else 0.0
 
         avg_host_idle_ms = statistics.mean(host_idle_ms) if host_idle_ms else 0.0
 
@@ -49,11 +53,10 @@ def parse_trace_file(trace_path: Path):
             "num_steps": n,
             "avg_rate": avg_rate,
             "rate_moe": rate_moe,
-            "avg_latency_ms": avg_latency_ms,
-            "latency_moe": latency_moe,
-            "avg_host_idle_ms": avg_host_idle_ms,
-            "min_latency_ms": min(latencies_ms),
-            "max_latency_ms": max(latencies_ms)
+            "avg_per_sample_ms": avg_per_sample_ms,
+            "avg_batch_time_ms": avg_batch_time_ms,
+            "batch_time_moe": batch_time_moe,
+            "avg_host_idle_ms": avg_host_idle_ms
         }
     except Exception as e:
         print(f"Error reading {trace_path}: {e}")
@@ -72,10 +75,10 @@ def analyze_sweep():
             trace_files = list(run_dir.rglob("*_trace.json"))
             
             if trace_files:
-                parsed = parse_trace_file(trace_files[0])
+                parsed = parse_trace_file(trace_files[0], bs)
                 if parsed:
                     results[model][bs] = parsed
-                    print(f"Parsed {model.upper()} BS={bs}: Throughput={parsed['avg_rate']:.2f} tok/s, InferenceTime={parsed['avg_latency_ms']:.2f} ms, HostIdle={parsed['avg_host_idle_ms']:.2f} ms")
+                    print(f"Parsed {model.upper()} BS={bs}: Throughput={parsed['avg_rate']:.2f} tok/s, TotalBatchTime={parsed['avg_batch_time_ms']:.2f} ms, PerSampleLatency={parsed['avg_per_sample_ms']:.2f} ms, HostIdle={parsed['avg_host_idle_ms']:.2f} ms")
 
     # Generate Markdown Report
     lines = [
@@ -83,13 +86,16 @@ def analyze_sweep():
         "",
         "**Target Hardware:** Cerebras CS-3 Wafer-Scale Engine (CSX)",
         "**Benchmark Suite:** `Llama3` (1.2B Scale) and `GPT-2` (137M Scale) at Sequence Length 512",
-        "**GPU Reference Baseline (2504.11750v1 Figure 11):** PCIe H100 Inflection at BS=8, GH200 Inflection at BS=32.",
+        "**GPU/System Baseline (SODA Paper arXiv:2504.11750v1 Figure 11 Mappings):**",
+        "- **Fig. 11(a):** `Inference Time (ms)` (Batch Step Latency)",
+        "- **Fig. 11(b):** `GPU / Wafer Idle Time (ms)`",
+        "- **Fig. 11(c):** `CPU / Host Idle Time (ms)`",
         "**Statistical Rigor:** All reported metrics represent Mean ± 95% Confidence Interval (Margin of Error) across profiled non-warmup evaluation steps.",
         "",
         "## 1. Summary Performance Table",
         "",
-        "| Model | Batch Size (BS) | Throughput (tok/s) | Inference Time (ms) | Host Sync Idle Time (ms) | Steps | Status |",
-        "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
+        "| Model | Batch Size (BS) | Inference Time (ms)<br>*(Fig. 11a)* | CPU / Host Idle Time (ms)<br>*(Fig. 11c)* | Throughput (tok/s) | Per-Sample Latency (ms) | Steps | Status |",
+        "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
     ]
 
     for model in MODELS:
@@ -97,9 +103,11 @@ def analyze_sweep():
             if bs in results[model]:
                 r = results[model][bs]
                 lines.append(
-                    f"| `{model.upper()}` | `{bs}` | `{r['avg_rate']:.2f} ± {r['rate_moe']:.2f}` | "
-                    f"`{r['avg_latency_ms']:.2f} ± {r['latency_moe']:.2f}` | "
-                    f"`{r['avg_host_idle_ms']:.2f}` | `{r['num_steps']}` | Completed |"
+                    f"| `{model.upper()}` | `{bs}` | "
+                    f"`{r['avg_batch_time_ms']:.2f} ± {r['batch_time_moe']:.2f}` | "
+                    f"`{r['avg_host_idle_ms']:.2f}` | "
+                    f"`{r['avg_rate']:.2f} ± {r['rate_moe']:.2f}` | "
+                    f"`{r['avg_per_sample_ms']:.2f}` | `{r['num_steps']}` | Completed |"
                 )
             else:
                 lines.append(f"| `{model.upper()}` | `{bs}` | N/A | N/A | N/A | 0 | Pending/Queue |")
