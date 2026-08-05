@@ -36,9 +36,15 @@ class SodaCallback(Callback):
                 self.output_dir = output_dir
                 self.model = model_name
                 
-        output_dir = trainer.model_dir / "soda_output"
-        model_name = getattr(trainer, "model_name", "unknown_model")
-        
+        model_name = "unknown_model"
+        if hasattr(trainer, "model") and trainer.model is not None:
+            if hasattr(trainer.model, "__class__"):
+                model_name = trainer.model.__class__.__name__
+            elif callable(trainer.model):
+                model_name = getattr(trainer.model, "__name__", str(trainer.model))
+        elif hasattr(trainer, "model_name"):
+            model_name = trainer.model_name
+            
         args = MockArgs(output_dir=str(output_dir), model_name=model_name)
         self.tracer = CerebrasTracer(args)
         if cstorch:
