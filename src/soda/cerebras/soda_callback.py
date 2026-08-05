@@ -36,6 +36,7 @@ class SodaCallback(Callback):
                 self.output_dir = output_dir
                 self.model = model_name
                 
+        output_dir = trainer.model_dir / "soda_output"
         model_name = "unknown_model"
         if hasattr(trainer, "model") and trainer.model is not None:
             if hasattr(trainer.model, "__class__"):
