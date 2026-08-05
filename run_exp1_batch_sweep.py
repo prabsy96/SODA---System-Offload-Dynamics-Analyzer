@@ -42,7 +42,7 @@ def run_single_experiment(model: str, bs: int, idx: int, total: int):
     cmd = (
         f"source {VENV_ACTIVATE} && "
         f"export PYTHONPATH=/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/src:$PYTHONPATH && "
-        f"python3 src/soda/cerebras/soda_cszoo.py fit {cfg_path} --disable_version_check -o {run_out_dir}"
+        f"python3 src/soda/cerebras/soda_inference.py CSX --params {cfg_path} --disable_version_check -o {run_out_dir}"
     )
 
     log_message(f"Executing command:\n  {cmd}")

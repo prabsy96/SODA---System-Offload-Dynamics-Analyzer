@@ -32,6 +32,7 @@ def parse_trace_file(trace_path: Path):
         
         rates = [m.get("data_pumping_rate_tok_s", 0) for m in valid_steps]
         latencies_ms = [m.get("step_latency_s", 0) * 1000.0 for m in valid_steps]
+        host_idle_ms = [m.get("host_sync_idle_s", 0) * 1000.0 for m in valid_steps]
         
         n = len(valid_steps)
         avg_rate = statistics.mean(rates)
@@ -42,14 +43,15 @@ def parse_trace_file(trace_path: Path):
         latency_std = statistics.stdev(latencies_ms) if n > 1 else 0.0
         latency_moe = 1.96 * (latency_std / math.sqrt(n)) if n > 1 else 0.0
 
+        avg_host_idle_ms = statistics.mean(host_idle_ms) if host_idle_ms else 0.0
+
         return {
             "num_steps": n,
             "avg_rate": avg_rate,
-            "rate_std": rate_std,
             "rate_moe": rate_moe,
             "avg_latency_ms": avg_latency_ms,
-            "latency_std": latency_std,
             "latency_moe": latency_moe,
+            "avg_host_idle_ms": avg_host_idle_ms,
             "min_latency_ms": min(latencies_ms),
             "max_latency_ms": max(latencies_ms)
         }
@@ -59,7 +61,7 @@ def parse_trace_file(trace_path: Path):
 
 def analyze_sweep():
     print("=" * 70)
-    print(" Experiment 1: Batch Scaling & Inflection Point Analysis ")
+    print(" Experiment 1: Batch Scaling & Inflection Point Analysis (Pure Inference) ")
     print("=" * 70)
 
     results = {}
@@ -73,20 +75,20 @@ def analyze_sweep():
                 parsed = parse_trace_file(trace_files[0])
                 if parsed:
                     results[model][bs] = parsed
-                    print(f"Parsed {model.upper()} BS={bs}: Throughput={parsed['avg_rate']:.2f} ± {parsed['rate_moe']:.2f} tok/s, Latency={parsed['avg_latency_ms']:.2f} ± {parsed['latency_moe']:.2f} ms")
+                    print(f"Parsed {model.upper()} BS={bs}: Throughput={parsed['avg_rate']:.2f} tok/s, InferenceTime={parsed['avg_latency_ms']:.2f} ms, HostIdle={parsed['avg_host_idle_ms']:.2f} ms")
 
     # Generate Markdown Report
     lines = [
         "# Experiment 1: Multi-Model Batch Scaling & Inflection Point Report",
         "",
         "**Target Hardware:** Cerebras CS-3 Wafer-Scale Engine (CSX)",
-        "**Benchmark Suite:** `Llama3` (1.2B Scale) and `GPT-2` (137M Scale)",
-        "**GPU Reference Baseline (2504.11750v1):** PCIe H100 Inflection at BS=8, GH200 Inflection at BS=32.",
-        "**Statistical Rigor:** All reported metrics represent Mean ± 95% Confidence Interval (Margin of Error) across profiled non-warmup steps.",
+        "**Benchmark Suite:** `Llama3` (1.2B Scale) and `GPT-2` (137M Scale) at Sequence Length 512",
+        "**GPU Reference Baseline (2504.11750v1 Figure 11):** PCIe H100 Inflection at BS=8, GH200 Inflection at BS=32.",
+        "**Statistical Rigor:** All reported metrics represent Mean ± 95% Confidence Interval (Margin of Error) across profiled non-warmup evaluation steps.",
         "",
         "## 1. Summary Performance Table",
         "",
-        "| Model | Batch Size (BS) | Throughput (tok/s, 95% CI) | Step Latency (ms, 95% CI) | Min - Max Latency (ms) | Steps | Status |",
+        "| Model | Batch Size (BS) | Throughput (tok/s) | Inference Time (ms) | Host Sync Idle Time (ms) | Steps | Status |",
         "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
     ]
 
@@ -97,7 +99,7 @@ def analyze_sweep():
                 lines.append(
                     f"| `{model.upper()}` | `{bs}` | `{r['avg_rate']:.2f} ± {r['rate_moe']:.2f}` | "
                     f"`{r['avg_latency_ms']:.2f} ± {r['latency_moe']:.2f}` | "
-                    f"`{r['min_latency_ms']:.2f} - {r['max_latency_ms']:.2f}` | `{r['num_steps']}` | Completed |"
+                    f"`{r['avg_host_idle_ms']:.2f}` | `{r['num_steps']}` | Completed |"
                 )
             else:
                 lines.append(f"| `{model.upper()}` | `{bs}` | N/A | N/A | N/A | 0 | Pending/Queue |")
