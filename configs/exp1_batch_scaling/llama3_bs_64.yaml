@@ -65,7 +65,7 @@ trainer:
       pos_scaling_type: llama3
       position_embedding_type: rotary
       rope_theta: 500000.0
-      rotary_dim: 128
+      rotary_dim: 64
       share_embedding_weights: false
       use_bias_in_output: false
       use_ffn_bias: false
