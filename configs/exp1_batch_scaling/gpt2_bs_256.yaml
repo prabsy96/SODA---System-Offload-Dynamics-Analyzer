@@ -1,0 +1,24 @@
+inference_input:
+  batch_size: 256
+  data_dir: /cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/dummy_data_msl512
+  data_processor: GptHDF5MapDataProcessor
+  drop_last: false
+  micro_batch_size: 256
+model:
+  fp16_type: cbfloat16
+  hidden_size: 768
+  layer_norm_epsilon: 1.0e-05
+  max_position_embeddings: 512
+  name: gpt2
+  nonlinearity: gelu
+  num_heads: 12
+  num_hidden_layers: 12
+  start_token: 1
+  vocab_size: 50257
+optimizer:
+  log_summaries: false
+  loss_scaling_factor: 1.0
+runconfig:
+  inference_steps: 10
+  log_steps: 1
+  precision_opt_level: 1
