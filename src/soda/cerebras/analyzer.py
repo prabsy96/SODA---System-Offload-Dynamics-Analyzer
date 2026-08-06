@@ -19,6 +19,7 @@ class CerebrasAnalyzer:
         
         self.metrics_data: Dict[str, Any] = {}
         self.compile_data: Dict[str, Any] = {}
+        self.performance_data: Dict[str, Any] = {}
         
     def run(self):
         """
@@ -30,6 +31,11 @@ class CerebrasAnalyzer:
             
         with open(self.trace_file, "r") as f:
             self.metrics_data = json.load(f)
+
+        performance_file = self.trace_file.parent / "performance.json"
+        if performance_file.exists():
+            with open(performance_file, "r", encoding="utf-8") as f:
+                self.performance_data = json.load(f)
             
         if self.compile_summary_file and self.compile_summary_file.exists():
             with open(self.compile_summary_file, "r") as f:
@@ -46,12 +52,44 @@ class CerebrasAnalyzer:
         
         model_name = self.metrics_data.get("model", "Unknown")
         print(f"Model: {model_name}\n")
+        workload = self.metrics_data.get("workload", {})
+        if workload:
+            print(
+                "Workload: "
+                f"{workload.get('mode')} "
+                f"({workload.get('prompt_tokens_per_sample')} input / "
+                f"{workload.get('output_tokens_per_sample')} output tokens)"
+            )
+
+        if self.performance_data.get("schema_version", 0) >= 2:
+            print(
+                "Benchmark Valid: "
+                f"{self.performance_data.get('benchmark_valid', False)}"
+            )
+            if workload.get("mode") == "prefill":
+                print(
+                    "Prefill + First-Token Batch Latency: "
+                    f"{(self.performance_data.get('batch_execution_time_ms') or 0):.2f} ms"
+                )
+            else:
+                print(
+                    "Measured Output Throughput: "
+                    f"{self.performance_data.get('output_tokens_per_sec', 0):.2f} tokens/s"
+                )
+            print(
+                "Measured Window: "
+                f"{self.performance_data.get('measured_samples', 0)} samples in "
+                f"{self.performance_data.get('measured_time_s', 0):.4f} s"
+            )
         
         step_metrics = self.metrics_data.get("metrics", [])
         if step_metrics:
-            avg_rate = sum(m.get("data_pumping_rate_tok_s", 0) for m in step_metrics) / len(step_metrics)
+            avg_rate = sum(
+                m.get("rate_samples_s", m.get("data_pumping_rate_tok_s", 0))
+                for m in step_metrics
+            ) / len(step_metrics)
             avg_latency = sum(m.get("step_latency_s", 0) for m in step_metrics) / len(step_metrics)
-            print(f"Average Data Pumping Rate : {avg_rate:.2f} tokens/s")
+            print(f"Average Data Pumping Rate : {avg_rate:.2f} samples/s")
             print(f"Average Step Latency      : {avg_latency:.4f} s")
             print(f"Total Steps Traced        : {len(step_metrics)}")
         else:
@@ -83,22 +121,49 @@ class CerebrasAnalyzer:
         
         model_name = self.metrics_data.get("model", "Unknown")
         step_metrics = self.metrics_data.get("metrics", [])
+        workload = self.metrics_data.get("workload", {})
         
         lines = [
             f"# SODA Cerebras Stage 1 Performance Report",
             f"",
             f"**Model:** `{model_name}`  ",
             f"**Architecture:** Cerebras CS-3 Wafer-Scale Engine  ",
+            f"**Workload:** `{workload.get('mode', 'legacy')}` — "
+            f"`{workload.get('prompt_tokens_per_sample', 'unknown')}` input / "
+            f"`{workload.get('output_tokens_per_sample', 'unknown')}` output tokens  ",
             f"",
             f"## Execution Metrics",
             f"",
         ]
+
+        if self.performance_data.get("schema_version", 0) >= 2:
+            primary_line = (
+                f"- **Prefill + first-token batch latency:** "
+                f"`{(self.performance_data.get('batch_execution_time_ms') or 0):.2f} ms`"
+                if workload.get("mode") == "prefill"
+                else f"- **Warmup-excluded output throughput:** "
+                f"`{self.performance_data.get('output_tokens_per_sec', 0):.2f} tokens/s`"
+            )
+            lines.extend([
+                primary_line,
+                f"- **Measured samples:** `{self.performance_data.get('measured_samples', 0)}`",
+                f"- **Measured execution time:** "
+                f"`{self.performance_data.get('measured_time_s', 0):.4f} s`",
+                f"- **Generation length verified:** "
+                f"`{self.performance_data.get('generation_verified', False)}`",
+                f"- **Benchmark valid:** "
+                f"`{self.performance_data.get('benchmark_valid', False)}`",
+                f"",
+            ])
         
         if step_metrics:
-            avg_rate = sum(m.get("data_pumping_rate_tok_s", 0) for m in step_metrics) / len(step_metrics)
+            avg_rate = sum(
+                m.get("rate_samples_s", m.get("data_pumping_rate_tok_s", 0))
+                for m in step_metrics
+            ) / len(step_metrics)
             avg_latency = sum(m.get("step_latency_s", 0) for m in step_metrics) / len(step_metrics)
             lines.extend([
-                f"- **Average Throughput (Data Pumping Rate):** `{avg_rate:.2f} tok/s`",
+                f"- **Average Throughput (Data Pumping Rate):** `{avg_rate:.2f} samples/s`",
                 f"- **Average Step Latency:** `{avg_latency:.4f} s` (`{avg_latency * 1000:.2f} ms`)",
                 f"- **Total Profiled Steps:** `{len(step_metrics)}`",
                 f"",
@@ -124,4 +189,3 @@ class CerebrasAnalyzer:
             
         LOGGER.info(f"Exported Cerebras Markdown report to {report_path}")
         return report_path
-

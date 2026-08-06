@@ -8,8 +8,12 @@ import os
 import json
 from pathlib import Path
 
-OUTPUT_BASE_DIR = Path("/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output")
-REPORT_PATH = OUTPUT_BASE_DIR / "exp1_inflection_report.md"
+REPO_ROOT = Path(__file__).resolve().parent
+OUTPUT_BASE_DIR = REPO_ROOT / "model_dir" / "soda_output"
+BENCHMARK_MODE = os.environ.get("SODA_BENCHMARK_MODE", "decode").lower()
+if BENCHMARK_MODE not in {"decode", "prefill"}:
+    raise ValueError("SODA_BENCHMARK_MODE must be decode or prefill")
+REPORT_PATH = OUTPUT_BASE_DIR / f"exp1_{BENCHMARK_MODE}_report.md"
 
 MODELS = ["llama3", "gpt2"]
 BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
@@ -27,8 +31,20 @@ def parse_trace_file(trace_path: Path, batch_size: int):
         if not metrics:
             return None
 
-        # Filter out step 0 (warmup) if multiple steps exist
-        valid_steps = metrics[1:] if len(metrics) > 1 else metrics
+        performance_path = trace_path.parent / "performance.json"
+        performance = (
+            json.loads(performance_path.read_text())
+            if performance_path.exists()
+            else {}
+        )
+
+        workload = performance.get("workload", data.get("workload", {}))
+        warmup_steps = int(workload.get("warmup_steps", 1))
+        valid_steps = [
+            metric for metric in metrics if int(metric.get("step", 0)) > warmup_steps
+        ]
+        if not valid_steps:
+            return None
         
         rates = [m.get("data_pumping_rate_tok_s", 0) for m in valid_steps]
         # step_latency_s in tracer is per-sample latency (1.0 / rate)
@@ -48,6 +64,11 @@ def parse_trace_file(trace_path: Path, batch_size: int):
         batch_time_moe = 1.96 * (batch_time_std / math.sqrt(n)) if n > 1 else 0.0
 
         avg_host_idle_ms = statistics.mean(host_idle_ms) if host_idle_ms else 0.0
+        output_tokens_per_sec = performance.get("output_tokens_per_sec")
+        if output_tokens_per_sec is None:
+            output_tokens_per_sec = avg_rate * int(
+                workload.get("output_tokens_per_sample", 1)
+            )
 
         return {
             "num_steps": n,
@@ -56,7 +77,11 @@ def parse_trace_file(trace_path: Path, batch_size: int):
             "avg_per_sample_ms": avg_per_sample_ms,
             "avg_batch_time_ms": avg_batch_time_ms,
             "batch_time_moe": batch_time_moe,
-            "avg_host_idle_ms": avg_host_idle_ms
+            "avg_host_idle_ms": avg_host_idle_ms,
+            "output_tokens_per_sec": output_tokens_per_sec,
+            "generation_verified": performance.get("generation_verified", False),
+            "benchmark_valid": performance.get("benchmark_valid", False),
+            "workload": workload,
         }
     except Exception as e:
         print(f"Error reading {trace_path}: {e}")
@@ -71,14 +96,14 @@ def analyze_sweep():
     for model in MODELS:
         results[model] = {}
         for bs in BATCH_SIZES:
-            run_dir = OUTPUT_BASE_DIR / f"exp1_{model}_bs_{bs}"
+            run_dir = OUTPUT_BASE_DIR / f"exp1_{model}_{BENCHMARK_MODE}_bs_{bs}"
             trace_files = list(run_dir.rglob("*_trace.json"))
             
             if trace_files:
                 parsed = parse_trace_file(trace_files[0], bs)
                 if parsed:
                     results[model][bs] = parsed
-                    print(f"Parsed {model.upper()} BS={bs}: Throughput={parsed['avg_rate']:.2f} tok/s, TotalBatchTime={parsed['avg_batch_time_ms']:.2f} ms, PerSampleLatency={parsed['avg_per_sample_ms']:.2f} ms, HostIdle={parsed['avg_host_idle_ms']:.2f} ms")
+                    print(f"Parsed {model.upper()} {BENCHMARK_MODE} BS={bs}: OutputThroughput={parsed['output_tokens_per_sec']} tok/s, TotalBatchTime={parsed['avg_batch_time_ms']:.2f} ms, Verified={parsed['generation_verified']}")
 
     # Generate Markdown Report
     lines = [
@@ -94,7 +119,7 @@ def analyze_sweep():
         "",
         "## 1. Summary Performance Table",
         "",
-        "| Model | Batch Size (BS) | Inference Time (ms)<br>*(Fig. 11a)* | CPU / Host Idle Time (ms)<br>*(Fig. 11c)* | Throughput (tok/s) | Per-Sample Latency (ms) | Steps | Status |",
+        "| Model | Batch Size (BS) | Inference Time (ms)<br>*(Fig. 11a)* | CPU / Host Idle Time (ms)<br>*(Fig. 11c)* | Output Throughput (tok/s) | Per-Sample Latency (ms) | Steps | Status |",
         "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |"
     ]
 
@@ -106,8 +131,9 @@ def analyze_sweep():
                     f"| `{model.upper()}` | `{bs}` | "
                     f"`{r['avg_batch_time_ms']:.2f} ± {r['batch_time_moe']:.2f}` | "
                     f"`{r['avg_host_idle_ms']:.2f}` | "
-                    f"`{r['avg_rate']:.2f} ± {r['rate_moe']:.2f}` | "
-                    f"`{r['avg_per_sample_ms']:.2f}` | `{r['num_steps']}` | Completed |"
+                    f"`{r['output_tokens_per_sec']:.2f}` | "
+                    f"`{r['avg_per_sample_ms']:.2f}` | `{r['num_steps']}` | "
+                    f"{'Verified' if r['benchmark_valid'] else 'Invalid'} |"
                 )
             else:
                 lines.append(f"| `{model.upper()}` | `{bs}` | N/A | N/A | N/A | 0 | Pending/Queue |")
