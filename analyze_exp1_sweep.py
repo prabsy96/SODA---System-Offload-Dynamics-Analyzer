@@ -12,7 +12,7 @@ OUTPUT_BASE_DIR = Path("/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Ana
 REPORT_PATH = OUTPUT_BASE_DIR / "exp1_inflection_report.md"
 
 MODELS = ["llama3", "gpt2"]
-BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64]
+BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 
 import math
 import statistics

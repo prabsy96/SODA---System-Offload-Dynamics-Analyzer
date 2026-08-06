@@ -19,8 +19,8 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # GPU baseline batch sizes (from paper Figure 11)
 GPU_BS = [1, 2, 4, 8, 16]
-# Full Cerebras batch sizes up to BS=64
-CEREBRAS_BS = [1, 2, 4, 8, 16, 32, 64]
+# Full Cerebras batch sizes up to BS=256
+CEREBRAS_BS = [1, 2, 4, 8, 16, 32, 64, 128, 256]
 
 # Digitized baseline values from Figure 11 of SODA paper (arXiv:2504.11750v1)
 # --- Llama-3 (1.2B) ---

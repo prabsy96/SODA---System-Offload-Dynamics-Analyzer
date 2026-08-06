@@ -15,20 +15,20 @@ This report extracts the data points from **Figure 11(a) Inference Time** and **
 ### A. `Llama-3.2-1B` (1.2B Model)
 
 #### Figure 11(a): Inference Time (ms)
-| System Architecture | BS=1 | BS=2 | BS=4 | BS=8 | BS=16 | BS=32 | BS=64 |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **AMD EPYC + A100** (Loosely-Coupled) | $45.0\text{ ms}$ | $55.0\text{ ms}$ | $110.0\text{ ms}$ | $210.0\text{ ms}$ | $400.0\text{ ms}$ | N/A | N/A |
-| **Intel Xeon + H100** (Loosely-Coupled) | $45.0\text{ ms}$ | $55.0\text{ ms}$ | $90.0\text{ ms}$ | $180.0\text{ ms}$ | $380.0\text{ ms}$ | N/A | N/A |
-| **NVIDIA GH200** (Closely-Coupled) | $45.0\text{ ms}$ | $50.0\text{ ms}$ | $70.0\text{ ms}$ | $140.0\text{ ms}$ | $275.0\text{ ms}$ | N/A | N/A |
-| **Cerebras CS-3** (Wafer-Scale) | **$49.62 \pm 2.89\text{ ms}$** | **$47.56 \pm 3.92\text{ ms}$** | **$51.87 \pm 0.33\text{ ms}$** | **$50.71 \pm 1.58\text{ ms}$** | **$52.34 \pm 0.49\text{ ms}$** | **$52.64 \pm 1.50\text{ ms}$** | **$69.95 \pm 1.05\text{ ms}$** |
+| System Architecture | BS=1 | BS=2 | BS=4 | BS=8 | BS=16 | BS=32 | BS=64 | BS=128 | BS=256 |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **AMD EPYC + A100** (Loosely-Coupled) | $45.0\text{ ms}$ | $55.0\text{ ms}$ | $110.0\text{ ms}$ | $210.0\text{ ms}$ | $400.0\text{ ms}$ | N/A | N/A | N/A | N/A |
+| **Intel Xeon + H100** (Loosely-Coupled) | $45.0\text{ ms}$ | $55.0\text{ ms}$ | $90.0\text{ ms}$ | $180.0\text{ ms}$ | $380.0\text{ ms}$ | N/A | N/A | N/A | N/A |
+| **NVIDIA GH200** (Closely-Coupled) | $45.0\text{ ms}$ | $50.0\text{ ms}$ | $70.0\text{ ms}$ | $140.0\text{ ms}$ | $275.0\text{ ms}$ | N/A | N/A | N/A | N/A |
+| **Cerebras CS-3** (Wafer-Scale) | **$49.62 \pm 2.89\text{ ms}$** | **$47.56 \pm 3.92\text{ ms}$** | **$51.87 \pm 0.33\text{ ms}$** | **$50.71 \pm 1.58\text{ ms}$** | **$52.34 \pm 0.49\text{ ms}$** | **$52.64 \pm 1.50\text{ ms}$** | **$69.95 \pm 1.05\text{ ms}$** | **$69.93 \pm 1.15\text{ ms}$** | **$123.28 \pm 2.05\text{ ms}$** |
 
 #### Figure 11(c): CPU / Host Idle Time (ms)
-| System Architecture | BS=1 | BS=2 | BS=4 | BS=8 | BS=16 | BS=32 | BS=64 |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **AMD EPYC + A100** | $0.0\text{ ms}$ | $5.0\text{ ms}$ | $80.0\text{ ms}$ | $190.0\text{ ms}$ | $380.0\text{ ms}$ | N/A | N/A |
-| **Intel Xeon + H100** | $0.0\text{ ms}$ | $2.0\text{ ms}$ | $60.0\text{ ms}$ | $170.0\text{ ms}$ | $360.0\text{ ms}$ | N/A | N/A |
-| **NVIDIA GH200** | $0.0\text{ ms}$ | $0.0\text{ ms}$ | $25.0\text{ ms}$ | $50.0\text{ ms}$ | $140.0\text{ ms}$ | N/A | N/A |
-| **Cerebras CS-3** | **$1.27 \pm 1.71\text{ ms}$** | **$23.90 \pm 1.61\text{ ms}$** | **$35.14 \pm 0.78\text{ ms}$** | **$41.98 \pm 0.62\text{ ms}$** | **$45.20 \pm 0.83\text{ ms}$** | **$48.21 \pm 0.74\text{ ms}$** | **$65.19 \pm 0.53\text{ ms}$** |
+| System Architecture | BS=1 | BS=2 | BS=4 | BS=8 | BS=16 | BS=32 | BS=64 | BS=128 | BS=256 |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **AMD EPYC + A100** | $0.0\text{ ms}$ | $5.0\text{ ms}$ | $80.0\text{ ms}$ | $190.0\text{ ms}$ | $380.0\text{ ms}$ | N/A | N/A | N/A | N/A |
+| **Intel Xeon + H100** | $0.0\text{ ms}$ | $2.0\text{ ms}$ | $60.0\text{ ms}$ | $170.0\text{ ms}$ | $360.0\text{ ms}$ | N/A | N/A | N/A | N/A |
+| **NVIDIA GH200** | $0.0\text{ ms}$ | $0.0\text{ ms}$ | $25.0\text{ ms}$ | $50.0\text{ ms}$ | $140.0\text{ ms}$ | N/A | N/A | N/A | N/A |
+| **Cerebras CS-3** | **$1.27 \pm 1.71\text{ ms}$** | **$23.90 \pm 1.61\text{ ms}$** | **$35.14 \pm 0.78\text{ ms}$** | **$41.98 \pm 0.62\text{ ms}$** | **$45.20 \pm 0.83\text{ ms}$** | **$48.21 \pm 0.74\text{ ms}$** | **$65.19 \pm 0.53\text{ ms}$** | **$63.79 \pm 0.77\text{ ms}$** | **$117.24 \pm 1.41\text{ ms}$** |
 
 ---
 
