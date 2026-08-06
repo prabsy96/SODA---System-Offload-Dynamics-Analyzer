@@ -70,6 +70,61 @@ soda-cli --taxbreak --kernel-db-path output/gpt2_.../kernel_database.json --powe
 
 Full CLI reference, pipelines, SLURM, and Docker: **[docs/USER_MANUAL.md](docs/USER_MANUAL.md)**
 
+## Cerebras CSX inference telemetry
+
+On the ByteBoost host, use the SDK-pinned Model Zoo environment without
+installing SODA's GPU dependency set over it:
+
+```bash
+source env.sh
+activate_cerebras_env
+soda_cerebras_inference CSX --params path/to/inference.yaml
+```
+
+Override `SODA_CEREBRAS_VENV` when the Model Zoo environment is elsewhere.
+Sourcing `env.sh` adds SODA's source tree to `PYTHONPATH`; no editable install
+or change to the SDK-pinned Torch version is required.
+
+The Cerebras inference runner writes DataExecutor telemetry to
+`<model_dir>/soda_output/performance.json`: samples, elapsed time, local/global
+throughput, and compiler-derived FLOP utilization. FLOP utilization is model
+MFU, not PE occupancy.
+
+Cross-model throughput runs use a fixed synthetic prompt from
+`/cra-1684/cerebras-inference/pvellaisamy/SODA---System-Offload-Dynamics-Analyzer/dummy_data_msl512`
+(the configs use the repo-relative `dummy_data_msl512`) and an explicit benchmark contract:
+
+```yaml
+soda_benchmark:
+  mode: decode       # decode or prefill
+  prompt_tokens: 512
+  output_tokens: 128 # prefill requires 1
+  warmup_steps: 5
+  measured_steps: 30
+  save_final_prediction: true
+```
+
+SODA reserves exactly `output_tokens` generation slots, disables early stopping
+with a non-generatable sentinel, and verifies the final output. Decode
+`output_tokens_per_sec` is computed from warmup-excluded DataExecutor sample and
+time deltas. Prefill configs use 512 input tokens plus one output token and
+should be interpreted as prefill/first-token latency, not sustained decode.
+Use a result only when `performance.json` reports both
+`generation_verified: true` and `benchmark_valid: true`; queued, interrupted,
+or partially executed jobs are explicitly invalid. The artifact also records
+the absolute dataset path and SHA-256 digest.
+The default decode configs retain names such as `gpt2_bs_1.yaml`; matching
+prefill configs use names such as `gpt2_bs_1_prefill.yaml`.
+
+Set `SODA_CSTORCH_OP_PROFILE=1` to additionally export a Chrome trace and, when
+provided by the runtime, an appliance summary. Use
+`SODA_CSTORCH_PROFILE_START_STEP` and `SODA_CSTORCH_PROFILE_END_STEP` to select
+the steady-state window (defaults: 2 and the final inference step).
+
+These artifacts contain executor throughput, elapsed time, compiler-derived
+MFU, and runtime-provided operation traces. They do not expose hardware PE
+occupancy, SRAM/fabric counters, or WSE-only energy.
+
 ## Citation
 
 If you use SODA in your research or product, **cite both papers**:

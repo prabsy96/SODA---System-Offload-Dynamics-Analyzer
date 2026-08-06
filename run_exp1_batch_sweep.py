@@ -8,10 +8,18 @@ import subprocess
 import time
 from pathlib import Path
 
-CONFIG_DIR = Path("/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/configs/exp1_batch_scaling")
-OUTPUT_BASE_DIR = Path("/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output")
-LOG_FILE = Path("/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/exp1_sweep_status.log")
-VENV_ACTIVATE = "/cra-1684/tutorial/igormolybog/venvs/r2.10/bin/activate"
+REPO_ROOT = Path(__file__).resolve().parent
+CONFIG_DIR = REPO_ROOT / "configs" / "exp1_batch_scaling"
+OUTPUT_BASE_DIR = REPO_ROOT / "model_dir" / "soda_output"
+LOG_FILE = REPO_ROOT / "exp1_sweep_status.log"
+CEREBRAS_VENV = Path(
+    os.environ.get(
+        "SODA_CEREBRAS_VENV", "/cra-1684/tutorial/pvellaisamy/venvs/r2.10"
+    )
+)
+BENCHMARK_MODE = os.environ.get("SODA_BENCHMARK_MODE", "decode").lower()
+if BENCHMARK_MODE not in {"decode", "prefill"}:
+    raise ValueError("SODA_BENCHMARK_MODE must be decode or prefill")
 
 # Queue up Llama3.2-1B batch sizes 128 through 1024
 MODELS = ["llama3"]
@@ -25,7 +33,8 @@ def log_message(msg: str):
         f.write(formatted + "\n")
 
 def run_single_experiment(model: str, bs: int, idx: int, total: int):
-    cfg_path = CONFIG_DIR / f"{model}_bs_{bs}.yaml"
+    suffix = "" if BENCHMARK_MODE == "decode" else "_prefill"
+    cfg_path = CONFIG_DIR / f"{model}_bs_{bs}{suffix}.yaml"
     if not cfg_path.exists():
         log_message(f"ERROR: Configuration {cfg_path} not found. Skipping.")
         return False
@@ -36,35 +45,48 @@ def run_single_experiment(model: str, bs: int, idx: int, total: int):
     log_message("=" * 70)
 
     # Prepare specific output directory
-    run_out_dir = OUTPUT_BASE_DIR / f"exp1_{model}_bs_{bs}"
+    run_out_dir = OUTPUT_BASE_DIR / f"exp1_{model}_{BENCHMARK_MODE}_bs_{bs}"
     run_out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Check if run already has a complete 10-step trace file
+    # A valid completed benchmark must include verified fixed-length generation.
     trace_file = run_out_dir / "soda_output" / f"{'llama' if 'llama' in model else 'gpt'}_cerebras_trace.json"
-    if trace_file.exists():
+    performance_file = run_out_dir / "soda_output" / "performance.json"
+    if trace_file.exists() and performance_file.exists():
         try:
             import json
-            data = json.loads(trace_file.read_text())
-            if len(data.get("metrics", [])) >= 10:
-                log_message(f"SKIP: {model.upper()} BS={bs} already has valid 10-step trace ({len(data['metrics'])} steps). Skipping.")
+            performance = json.loads(performance_file.read_text())
+            if (
+                performance.get("benchmark_valid")
+                and performance.get("workload", {}).get("mode") == BENCHMARK_MODE
+            ):
+                log_message(f"SKIP: {model.upper()} {BENCHMARK_MODE} BS={bs} already has a valid result.")
                 return True
         except Exception:
             pass
 
-    cmd = (
-        f"source {VENV_ACTIVATE} && "
-        f"export PYTHONPATH=/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/src:$PYTHONPATH && "
-        f"python3 src/soda/cerebras/soda_inference.py CSX --params {cfg_path} --disable_version_check -o {run_out_dir}"
-    )
+    cmd = [
+        str(CEREBRAS_VENV / "bin" / "python"),
+        str(REPO_ROOT / "src" / "soda" / "cerebras" / "soda_inference.py"),
+        "CSX",
+        "--params",
+        str(cfg_path),
+        "--disable_version_check",
+        "-o",
+        str(run_out_dir),
+    ]
 
-    log_message(f"Executing command:\n  {cmd}")
+    log_message(f"Executing command:\n  {' '.join(cmd)}")
 
     start_time = time.time()
     try:
         process = subprocess.Popen(
             cmd,
-            shell=True,
-            executable="/bin/bash",
+            cwd=REPO_ROOT,
+            env={
+                **os.environ,
+                "PATH": f"{CEREBRAS_VENV / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}",
+                "PYTHONPATH": f"{REPO_ROOT / 'src'}{os.pathsep}{os.environ.get('PYTHONPATH', '')}",
+            },
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,

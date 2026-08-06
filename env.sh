@@ -37,6 +37,8 @@ export BAREMETAL_BINARY="$BAREMETAL_BUILD/main_gemm_bm"
 
 # Virtual environment
 export PYTHON_VENV="$SODA_ROOT/.venv"
+# Cerebras/ByteBoost environment. Override this on other installations.
+export SODA_CEREBRAS_VENV="${SODA_CEREBRAS_VENV:-${BYTEBOOST_VENV:-/cra-1684/tutorial/pvellaisamy/venvs/r2.10}}"
 
 # Environment metadata file
 export ENV_METADATA="env_metadata.json"
@@ -94,16 +96,57 @@ export ASSERT_LOG="microbench/assert.log"
 
 # Helper function to activate Python environment (supports conda or venv)
 activate_env() {
-    if [ -n "$CONDA_DEFAULT_ENV" ] && [ "$CONDA_DEFAULT_ENV" != "base" ]; then
+    if [ -n "${VIRTUAL_ENV:-}" ]; then
+        echo "Using active venv: $VIRTUAL_ENV"
+    elif [ -n "${CONDA_DEFAULT_ENV:-}" ] && [ "$CONDA_DEFAULT_ENV" != "base" ]; then
         echo "Using conda environment: $CONDA_DEFAULT_ENV"
     elif [ -d "$PYTHON_VENV" ]; then
         echo "Activating venv at $PYTHON_VENV"
         source "$PYTHON_VENV/bin/activate"
-    elif [ -n "$CONDA_DEFAULT_ENV" ]; then
+    elif [ -n "${CONDA_DEFAULT_ENV:-}" ]; then
         echo "Using conda base environment"
     else
         echo "Warning: No virtual environment found. Using system Python."
     fi
+}
+
+# Activate the Model Zoo environment used by ByteBoost without replacing its
+# SDK-pinned PyTorch dependencies with SODA's GPU dependency set.
+activate_cerebras_env() {
+    if [ ! -x "$SODA_CEREBRAS_VENV/bin/python" ]; then
+        echo "Error: Cerebras venv not found: $SODA_CEREBRAS_VENV" >&2
+        echo "Set SODA_CEREBRAS_VENV to the ByteBoost/Model Zoo venv." >&2
+        return 1
+    fi
+    source "$SODA_CEREBRAS_VENV/bin/activate"
+    check_cerebras_env
+}
+
+check_cerebras_env() {
+    if ! command -v torch-cirh-opt >/dev/null 2>&1; then
+        echo "Error: torch-cirh-opt is not on PATH; activate the complete ByteBoost venv." >&2
+        return 1
+    fi
+    python - <<'PY'
+import sys
+import numpy
+import torch
+import yaml
+import cerebras.pytorch as cstorch
+import cerebras.modelzoo
+
+if tuple(int(part) for part in cstorch.__version__.split(".")[:2]) != (2, 10):
+    raise RuntimeError(f"Expected Cerebras SDK 2.10, found {cstorch.__version__}")
+print(f"Cerebras environment OK: python={sys.version.split()[0]}, "
+      f"cstorch={cstorch.__version__}, torch={torch.__version__}")
+PY
+}
+
+# Run the Cerebras path directly from the source tree. This intentionally avoids
+# pip dependency resolution because SDK 2.10 pins Torch 2.4.
+soda_cerebras_inference() {
+    check_cerebras_env || return 1
+    (cd "$SODA_ROOT" && python "$SODA_ROOT/src/soda/cerebras/soda_inference.py" "$@")
 }
 
 # Helper function to cleanup output directory
@@ -120,7 +163,7 @@ cleanup() {
 # Helper function to reinstall the soda package
 reinstall() {
     echo "Reinstalling soda package"
-    pip install --ignore-installed --force-reinstall --no-deps -e "$SODA_ROOT"
+    python -m pip install --ignore-installed --force-reinstall --no-deps -e "$SODA_ROOT"
     echo "Soda package reinstalled"
 }
 
@@ -188,6 +231,8 @@ if [ -z "${SODA_ENV_QUIET:-}" ]; then
     echo ""
     echo "Get started:"
     echo "  * activate_env     - Activate Python virtual environment"
+    echo "  * activate_cerebras_env - Activate the ByteBoost/Model Zoo venv"
+    echo "  * soda_cerebras_inference - Run CSX inference from the source tree"
     echo "  * cleanup           - Delete output directory ($SODA_OUTPUT)"
     echo "  * build            - Build the baremetal binary"
     echo "  * reinstall    - Reinstall the soda package (use after making changes)"
