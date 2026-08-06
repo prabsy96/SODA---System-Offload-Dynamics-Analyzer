@@ -19,6 +19,6 @@ optimizer:
   log_summaries: false
   loss_scaling_factor: 1.0
 runconfig:
-  inference_steps: 2
+  inference_steps: 10
   log_steps: 1
   precision_opt_level: 1

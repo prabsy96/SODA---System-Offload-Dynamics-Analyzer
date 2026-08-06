@@ -7,7 +7,7 @@ import os
 import yaml
 from pathlib import Path
 
-BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64]
+BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 OUTPUT_DIR = Path("/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/configs/exp1_batch_scaling")
 
 def generate_llama_configs():
@@ -42,7 +42,7 @@ def generate_llama_configs():
             "runconfig": {
                 "precision_opt_level": 1,
                 "log_steps": 1,
-                "inference_steps": 2,
+                "inference_steps": 10,
             },
             "inference_input": {
                 "data_processor": "GptHDF5MapDataProcessor",
@@ -83,7 +83,7 @@ def generate_gpt2_configs():
             "runconfig": {
                 "precision_opt_level": 1,
                 "log_steps": 1,
-                "inference_steps": 2,
+                "inference_steps": 10,
             },
             "inference_input": {
                 "data_processor": "GptHDF5MapDataProcessor",

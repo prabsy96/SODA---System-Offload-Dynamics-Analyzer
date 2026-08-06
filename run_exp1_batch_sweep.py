@@ -13,9 +13,9 @@ OUTPUT_BASE_DIR = Path("/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Ana
 LOG_FILE = Path("/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/exp1_sweep_status.log")
 VENV_ACTIVATE = "/cra-1684/tutorial/igormolybog/venvs/r2.10/bin/activate"
 
-# We run key batch sizes for initial sweep
-MODELS = ["llama3", "gpt2"]
-BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64]
+# Queue up Llama3.2-1B batch sizes 128 through 1024
+MODELS = ["llama3"]
+BATCH_SIZES = [128, 256, 512, 1024]
 
 def log_message(msg: str):
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -38,6 +38,18 @@ def run_single_experiment(model: str, bs: int, idx: int, total: int):
     # Prepare specific output directory
     run_out_dir = OUTPUT_BASE_DIR / f"exp1_{model}_bs_{bs}"
     run_out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check if run already has a complete 10-step trace file
+    trace_file = run_out_dir / "soda_output" / f"{'llama' if 'llama' in model else 'gpt'}_cerebras_trace.json"
+    if trace_file.exists():
+        try:
+            import json
+            data = json.loads(trace_file.read_text())
+            if len(data.get("metrics", [])) >= 10:
+                log_message(f"SKIP: {model.upper()} BS={bs} already has valid 10-step trace ({len(data['metrics'])} steps). Skipping.")
+                return True
+        except Exception:
+            pass
 
     cmd = (
         f"source {VENV_ACTIVATE} && "
@@ -80,8 +92,7 @@ def run_single_experiment(model: str, bs: int, idx: int, total: int):
         return False
 
 def main():
-    LOG_FILE.write_text("") # Clear log
-    log_message("Starting Experiment 1: Multi-Model Batch Scaling Sweep")
+    log_message("Resuming Experiment 1: Multi-Model Batch Scaling Sweep")
     
     total_runs = len(MODELS) * len(BATCH_SIZES)
     current_idx = 1
