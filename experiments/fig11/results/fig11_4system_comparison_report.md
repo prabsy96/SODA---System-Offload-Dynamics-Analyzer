@@ -65,32 +65,17 @@ python3 plot_fig11_parity.py
 
 ## 4. Ahead-of-Time (AOT) Compilation Time Analysis
 
-Unlike GPUs which compile CUDA kernels dynamically or JIT-compile PyTorch graphs, Cerebras CS-3 performs **full spatial Ahead-of-Time (AOT) compilation** prior to execution. The compilation workflow maps the complete computational graph onto the 900,000 AI cores, routing spatial data layout and memory placement.
+Unlike GPUs which compile CUDA kernels dynamically per step, Cerebras CS-3 performs full spatial **Ahead-of-Time (AOT) compilation** prior to execution. 
 
-![AOT Compilation Time Comparison](./compilation_times_comparison.png)
+Because the computational graph layout depends primarily on model architecture and sequence length, **Pure AOT Compile Time is constant across batch sizes**. Outlier total job durations (e.g., 14–22 minutes) were caused by cluster queue scheduling backlog, not compiler work.
 
-### Summary Table: AOT Compilation Duration
+### Summary: Pure AOT Compile Time (Mean $\pm$ 95% CI)
 
-| Model | Batch Size ($BS$) | Pure AOT Compile Time | Cluster Queue Wait Time | Total E2E Time |
-|---|---|---|---|---|
-| **GPT-2 (137M)** | 1 | **3.33 min** (200 s) | 0.33 min (20 s) | 3.67 min |
-| **GPT-2 (137M)** | 2 | **3.00 min** (180 s) | 0.33 min (20 s) | 3.33 min |
-| **GPT-2 (137M)** | 4 | **3.33 min** (200 s) | 0.33 min (20 s) | 3.67 min |
-| **GPT-2 (137M)** | 8 | **3.00 min** (180 s) | 1.17 min (70 s) | 4.17 min |
-| **GPT-2 (137M)** | 16 | **2.83 min** (170 s) | 11.50 min (690 s) | 14.34 min |
-| **GPT-2 (137M)** | 32 | **3.17 min** (190 s) | 0.33 min (20 s) | 3.50 min |
-| **GPT-2 (137M)** | 64 | **3.50 min** (210 s) | 0.33 min (20 s) | 3.83 min |
-| **Llama-3.2-1B** | 1 | **3.33 min** (200 s) | 10.17 min (610 s) | 13.50 min |
-| **Llama-3.2-1B** | 2 | **3.50 min** (210 s) | 0.33 min (20 s) | 3.83 min |
-| **Llama-3.2-1B** | 4 | **3.34 min** (200 s) | 12.83 min (770 s) | 16.17 min |
-| **Llama-3.2-1B** | 8 | **3.50 min** (210 s) | 0.33 min (20 s) | 3.83 min |
-| **Llama-3.2-1B** | 16 | **3.00 min** (180 s) | 0.67 min (40 s) | 3.67 min |
-| **Llama-3.2-1B** | 32 | **3.33 min** (200 s) | 0.33 min (20 s) | 3.67 min |
-| **Llama-3.2-1B** | 64 | **3.33 min** (200 s) | 5.67 min (340 s) | 9.00 min |
-| **Llama-3.2-1B** | 128 | **3.84 min** (230 s) | 18.33 min (1100 s) | 22.17 min |
+| Model | Parameters | Evaluated Batch Sizes ($BS$) | Pure AOT Compile Time (Mean $\pm$ 95% CI) |
+|---|---|---|---|
+| **GPT-2** | 137M | $BS \in \{1, 2, 4, 8, 16, 32, 64\}$ | **$3.17 \pm 0.17\text{ min}$** ($189.9 \pm 10.5\text{ s}$) |
+| **Llama-3.2-1B** | 1.2B | $BS \in \{1, 2, 4, 8, 16, 32, 64, 128\}$ | **$3.40 \pm 0.16\text{ min}$** ($203.8 \pm 9.8\text{ s}$) |
 
-### Key Architectural Takeaways:
-1. **Constant AOT Compilation Overhead:** The actual compiler execution time (**Pure AOT Compile Time**) is essentially **constant at $\approx 3.0 \dots 3.8$ minutes** across all models (`GPT-2` and `Llama3`) and all batch sizes ($BS=1 \dots 128$).
-2. **Queue Contention vs. Compilation:** Large total durations (e.g. 13.5m, 16.2m, or 22.2m) were driven entirely by **cluster queue wait times** (`QueueWait`) on the shared cluster scheduler, not by compiler workload.
-3. **Fixed Hardware Execution Advantage:** Once compiled, execution across arbitrary batch sizes ($BS=2 \dots 32$) yields flat, latency-deterministic step execution times ($\approx 50\text{ ms}$) without GPU launch degradation.
+### Key Architectural Takeaway:
+- **Upfront Spatial Compilation Tradeoff:** Cerebras pays a fixed $\approx 3.2\dots 3.4$-minute AOT spatial compilation cost upfront. In exchange, once compiled, execution across arbitrary batch sizes ($BS=2 \dots 32$) yields flat, deterministic step execution times ($\approx 50\text{ ms}$) without GPU kernel launch overheads.
 
