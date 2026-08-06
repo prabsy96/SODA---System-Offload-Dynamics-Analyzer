@@ -22,6 +22,7 @@ dependencies = [
   "matplotlib",
   "numpy",
   "openpyxl>=3.1",
+  "PyYAML>=6",
   "rich",
   "torch>=2.6.0",
   "transformers>=4.53.0",
@@ -33,6 +34,10 @@ Repository = "https://github.com/prabsy96/SODA---System-Offload-Dynamics-Analyze
 
 [project.scripts]
 soda-cli = "soda:main"
+soda-cerebras-inference = "soda.cerebras.soda_inference:run_soda_gpt_inference"
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
 
 [tool.setuptools]
 package-dir = { "" = "src" }

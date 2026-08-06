@@ -26,6 +26,9 @@ Thumbs.db
 
 # Output directories
 soda_results/
+model_dir/
+cs_out/
+cerebras_logs/
 *.png
 *output*
 *results*
