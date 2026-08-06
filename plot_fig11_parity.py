@@ -14,6 +14,8 @@ import numpy as np
 from pathlib import Path
 
 OUTPUT_DIR = Path("/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output")
+RESULTS_DIR = Path("/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/experiments/fig11/results")
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # GPU baseline batch sizes (from paper Figure 11)
 GPU_BS = [1, 2, 4, 8, 16]
@@ -180,7 +182,9 @@ def plot_comparison():
     plt.tight_layout()
     chart_path = OUTPUT_DIR / "fig11_4system_comparison.png"
     plt.savefig(chart_path, dpi=300)
-    print(f"Saved Log-Log 4-system comparison plot with error bars up to BS=64 to: {chart_path}")
+    res_path = RESULTS_DIR / "fig11_4system_comparison.png"
+    plt.savefig(res_path, dpi=300)
+    print(f"Saved Log-Log 4-system comparison plot with error bars up to BS=64 to: {res_path}")
 
 if __name__ == "__main__":
     plot_comparison()
