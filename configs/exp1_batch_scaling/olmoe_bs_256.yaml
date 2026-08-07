@@ -1,0 +1,41 @@
+soda_benchmark:
+  mode: decode
+  prompt_tokens: 512
+  output_tokens: 10
+  warmup_steps: 2
+  measured_steps: 8
+  save_final_prediction: true
+model:
+  name: llama
+  vocab_size: 50304
+  hidden_size: 2048
+  num_hidden_layers: 16
+  num_heads: 16
+  filter_size: 1024
+  nonlinearity: swiglu
+  norm_type: rmsnorm
+  layer_norm_epsilon: 1.0e-05
+  position_embedding_type: rotary
+  rotary_dim: 64
+  fp16_type: cbfloat16
+  moe:
+    num_experts: 64
+    top_k: 8
+    moe_implementation: experimental
+    routing_algorithm: learned
+  start_token: 50304
+  max_tokens: 10
+  max_position_embeddings: 522
+runconfig:
+  precision_opt_level: 1
+  log_steps: 1
+  inference_steps: 10
+inference_input:
+  data_processor: GptHDF5MapDataProcessor
+  data_dir: dummy_data_msl512
+  batch_size: 256
+  micro_batch_size: 256
+  drop_last: false
+optimizer:
+  loss_scaling_factor: 1.0
+  log_summaries: false

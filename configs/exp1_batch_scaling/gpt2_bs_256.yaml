@@ -1,9 +1,9 @@
 soda_benchmark:
   mode: decode
   prompt_tokens: 512
-  output_tokens: 128
-  warmup_steps: 5
-  measured_steps: 30
+  output_tokens: 10
+  warmup_steps: 2
+  measured_steps: 8
   save_final_prediction: true
 model:
   name: gpt2
@@ -15,12 +15,12 @@ model:
   layer_norm_epsilon: 1.0e-05
   fp16_type: cbfloat16
   start_token: 50257
-  max_tokens: 128
-  max_position_embeddings: 640
+  max_tokens: 10
+  max_position_embeddings: 522
 runconfig:
   precision_opt_level: 1
   log_steps: 1
-  inference_steps: 35
+  inference_steps: 10
 inference_input:
   data_processor: GptHDF5MapDataProcessor
   data_dir: dummy_data_msl512

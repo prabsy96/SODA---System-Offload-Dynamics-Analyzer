@@ -16,6 +16,14 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "../../.."))
 
 from soda.cerebras.tracer import CerebrasTracer
 
+try:
+    import cerebras.modelzoo.trainer as trainer
+    import cerebras.modelzoo.trainer.callbacks.summaries as summaries
+    trainer.summarize_scalar = lambda name, value: None
+    summaries.summarize_scalar = lambda name, value: None
+except Exception:
+    pass
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 class MockArgs:
