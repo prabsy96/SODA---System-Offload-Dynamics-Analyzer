@@ -21,9 +21,8 @@ BENCHMARK_MODE = os.environ.get("SODA_BENCHMARK_MODE", "decode").lower()
 if BENCHMARK_MODE not in {"decode", "prefill"}:
     raise ValueError("SODA_BENCHMARK_MODE must be decode or prefill")
 
-# Queue up Llama3.2-1B batch sizes 128 through 1024
-MODELS = ["llama3"]
-BATCH_SIZES = [128, 256, 512, 1024]
+MODELS = ["llama3", "gpt2", "llama3_3b"]
+BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
 
 def log_message(msg: str):
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -49,7 +48,8 @@ def run_single_experiment(model: str, bs: int, idx: int, total: int):
     run_out_dir.mkdir(parents=True, exist_ok=True)
 
     # A valid completed benchmark must include verified fixed-length generation.
-    trace_file = run_out_dir / "soda_output" / f"{'llama' if 'llama' in model else 'gpt'}_cerebras_trace.json"
+    model_prefix = "olmoe" if "olmoe" in model else ("llama" if "llama" in model else "gpt")
+    trace_file = run_out_dir / "soda_output" / f"{model_prefix}_cerebras_trace.json"
     performance_file = run_out_dir / "soda_output" / "performance.json"
     if trace_file.exists() and performance_file.exists():
         try:
@@ -114,7 +114,7 @@ def run_single_experiment(model: str, bs: int, idx: int, total: int):
         return False
 
 def main():
-    log_message("Resuming Experiment 1: Multi-Model Batch Scaling Sweep")
+    log_message("Resuming Experiment 1 Phase 1: Dense Models Batch Scaling Sweep")
     
     total_runs = len(MODELS) * len(BATCH_SIZES)
     current_idx = 1
@@ -123,12 +123,20 @@ def main():
     failure_count = 0
     
     for model in MODELS:
+        skip_model_larger_bs = False
         for bs in BATCH_SIZES:
+            if skip_model_larger_bs:
+                log_message(f"PRUNING: Skipping {model.upper()} BS={bs} because a smaller batch size failed or overflowed memory.")
+                current_idx += 1
+                continue
+
             success = run_single_experiment(model, bs, current_idx, total_runs)
             if success:
                 success_count += 1
             else:
                 failure_count += 1
+                log_message(f"OVERFLOW PRUNING TRIGGERED: {model.upper()} failed at BS={bs}. Pruning remaining batch sizes for {model.upper()}.")
+                skip_model_larger_bs = True
             current_idx += 1
 
     log_message("=" * 70)

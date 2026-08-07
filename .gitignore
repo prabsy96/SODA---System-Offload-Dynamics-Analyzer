@@ -64,3 +64,6 @@ tools_papers
 # Markdown files — only README.md is tracked
 *.md
 !README.md
+
+!experiments/fig11/results**
+!experiments/fig5/results**

@@ -16,7 +16,7 @@ if BENCHMARK_MODE not in {"decode", "prefill"}:
 REPORT_PATH = OUTPUT_BASE_DIR / f"exp1_{BENCHMARK_MODE}_report.md"
 
 MODELS = ["llama3", "gpt2"]
-BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64]
+BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 
 import math
 import statistics

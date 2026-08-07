@@ -10,7 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 OUTPUT_DIR = REPO_ROOT / "configs" / "exp1_batch_scaling"
 DATA_DIR = "dummy_data_msl512"
 WORKLOADS = {
-    "decode": {"prompt_tokens": 512, "output_tokens": 128},
+    "decode": {"prompt_tokens": 512, "output_tokens": 10},
     "prefill": {"prompt_tokens": 512, "output_tokens": 1},
 }
 
@@ -50,12 +50,31 @@ def _base_config(model: str, batch_size: int, mode: str) -> dict:
             "layer_norm_epsilon": 1.0e-5,
             "fp16_type": "cbfloat16",
         }
+    elif model == "olmoe":
+        model_config = {
+            "name": "llama",
+            "vocab_size": 50304,
+            "hidden_size": 2048,
+            "num_hidden_layers": 16,
+            "num_heads": 16,
+            "filter_size": 1024,
+            "nonlinearity": "swiglu",
+            "norm_type": "rmsnorm",
+            "layer_norm_epsilon": 1.0e-5,
+            "position_embedding_type": "rotary",
+            "rotary_dim": 64,
+            "fp16_type": "cbfloat16",
+            "moe": {
+                "num_experts": 64,
+                "top_k": 8,
+                "moe_implementation": "experimental",
+                "routing_algorithm": "learned",
+            },
+        }
     else:
         raise ValueError(f"Unknown model {model!r}")
 
     workload = WORKLOADS[mode]
-    # Compiler-visible values are emitted for readability and are normalized
-    # to the same values by configure_benchmark at runtime.
     model_config.update(
         {
             "start_token": model_config["vocab_size"],
@@ -69,15 +88,15 @@ def _base_config(model: str, batch_size: int, mode: str) -> dict:
         "soda_benchmark": {
             "mode": mode,
             **workload,
-            "warmup_steps": 5,
-            "measured_steps": 30,
+            "warmup_steps": 2,
+            "measured_steps": 8,
             "save_final_prediction": True,
         },
         "model": model_config,
         "runconfig": {
             "precision_opt_level": 1,
             "log_steps": 1,
-            "inference_steps": 35,
+            "inference_steps": 10,
         },
         "inference_input": {
             "data_processor": "GptHDF5MapDataProcessor",
@@ -120,7 +139,11 @@ def generate_gpt2_configs() -> list[Path]:
     return generate_model_configs("gpt2")
 
 
+def generate_olmoe_configs() -> list[Path]:
+    return generate_model_configs("olmoe")
+
+
 if __name__ == "__main__":
     print("Generating Experiment 1 fixed-workload inference configurations...")
-    paths = generate_llama_configs() + generate_gpt2_configs()
+    paths = generate_llama_configs() + generate_gpt2_configs() + generate_olmoe_configs()
     print(f"Total configurations generated: {len(paths)}")

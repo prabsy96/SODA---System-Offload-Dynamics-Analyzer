@@ -1,0 +1,1148 @@
+{
+  "gpt2": {
+    "prefill": {
+      "1": {
+        "model": "gpt2",
+        "mode": "prefill",
+        "batch_size": 1,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output/exp1_gpt2_bs_1",
+        "trace": {
+          "num_steps": 1,
+          "mean_batch_time_ms": 7.385174062140019,
+          "moe_batch_time_ms": 0.0,
+          "mean_per_sample_ms": 7.385174062140019,
+          "mean_host_idle_ms": 0.0,
+          "mean_rate_tok_s": 135.40642259557356,
+          "output_tokens_per_sec": 135.40642259557356,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "16": {
+        "model": "gpt2",
+        "mode": "prefill",
+        "batch_size": 16,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/gpt2_bs_16_prefill",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 7.653896462152945,
+          "moe_batch_time_ms": 0.9887643229298915,
+          "mean_per_sample_ms": 0.47836852888455905,
+          "mean_host_idle_ms": 5.703557006317467,
+          "mean_rate_tok_s": 2141.3338781809607,
+          "output_tokens_per_sec": 2299.7166030483613,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "2": {
+        "model": "gpt2",
+        "mode": "prefill",
+        "batch_size": 2,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output/exp1_gpt2_bs_2",
+        "trace": {
+          "num_steps": 1,
+          "mean_batch_time_ms": 7.689979913835314,
+          "moe_batch_time_ms": 0.0,
+          "mean_per_sample_ms": 3.844989956917657,
+          "mean_host_idle_ms": 2.793536959586249,
+          "mean_rate_tok_s": 260.07870272869366,
+          "output_tokens_per_sec": 260.07870272869366,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "32": {
+        "model": "gpt2",
+        "mode": "prefill",
+        "batch_size": 32,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/gpt2_bs_32_prefill",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 17.724805116474812,
+          "moe_batch_time_ms": 1.0851584413861386,
+          "mean_per_sample_ms": 0.5539001598898379,
+          "mean_host_idle_ms": 17.37467034906707,
+          "mean_rate_tok_s": 1819.2017185395105,
+          "output_tokens_per_sec": 1706.6278693264373,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "4": {
+        "model": "gpt2",
+        "mode": "prefill",
+        "batch_size": 4,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output/exp1_gpt2_bs_4",
+        "trace": {
+          "num_steps": 1,
+          "mean_batch_time_ms": 9.054536673910256,
+          "moe_batch_time_ms": 0.0,
+          "mean_per_sample_ms": 2.263634168477564,
+          "mean_host_idle_ms": 9.563357866434545,
+          "mean_rate_tok_s": 441.76749667662193,
+          "output_tokens_per_sec": 441.76749667662193,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "64": {
+        "model": "gpt2",
+        "mode": "prefill",
+        "batch_size": 64,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/gpt2_bs_64_prefill",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 14.60154350668839,
+          "moe_batch_time_ms": 3.303811006286567,
+          "mean_per_sample_ms": 0.2281491172920061,
+          "mean_host_idle_ms": 15.067445813356798,
+          "mean_rate_tok_s": 4875.916776694644,
+          "output_tokens_per_sec": 3978.7194460379183,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "8": {
+        "model": "gpt2",
+        "mode": "prefill",
+        "batch_size": 8,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/gpt2_bs_8_prefill",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 11.413763250221406,
+          "moe_batch_time_ms": 3.2124814588567276,
+          "mean_per_sample_ms": 1.4267204062776757,
+          "mean_host_idle_ms": 10.606086467043857,
+          "mean_rate_tok_s": 815.5004587139273,
+          "output_tokens_per_sec": 624.6545916314263,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "128": {
+        "model": "gpt2",
+        "mode": "prefill",
+        "batch_size": 128,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/gpt2_bs_128_prefill",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 17.92289774961554,
+          "moe_batch_time_ms": 5.603341293095082,
+          "mean_per_sample_ms": 0.1400226386688714,
+          "mean_host_idle_ms": 20.706642266879225,
+          "mean_rate_tok_s": 8513.223054943915,
+          "output_tokens_per_sec": 5883.078491567874,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "256": {
+        "model": "gpt2",
+        "mode": "prefill",
+        "batch_size": 256,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/gpt2_bs_256_prefill",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 17.879468555823433,
+          "moe_batch_time_ms": 3.950824221017063,
+          "mean_per_sample_ms": 0.06984167404618528,
+          "mean_host_idle_ms": 18.032655188365315,
+          "mean_rate_tok_s": 15546.741586915226,
+          "output_tokens_per_sec": 13422.649266954584,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "512": {
+        "model": "gpt2",
+        "mode": "prefill",
+        "batch_size": 512,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/gpt2_bs_512_prefill",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 54.75718997114071,
+          "moe_batch_time_ms": 10.588445541117173,
+          "mean_per_sample_ms": 0.1069476366623842,
+          "mean_host_idle_ms": 73.81872632497702,
+          "mean_rate_tok_s": 9801.29236478716,
+          "output_tokens_per_sec": 6818.476903145273,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      }
+    },
+    "decode": {
+      "128": {
+        "model": "gpt2",
+        "mode": "decode",
+        "batch_size": 128,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/gpt2_bs_128",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 211.92487925341078,
+          "moe_batch_time_ms": 4.6237179706436455,
+          "mean_per_sample_ms": 1.6556631191672717,
+          "mean_host_idle_ms": 212.08641423144917,
+          "mean_rate_tok_s": 6045.3799951164765,
+          "output_tokens_per_sec": 5957.23228130789,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "16": {
+        "model": "gpt2",
+        "mode": "decode",
+        "batch_size": 16,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/gpt2_bs_16",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 167.15804579577954,
+          "moe_batch_time_ms": 5.34364186357452,
+          "mean_per_sample_ms": 10.447377862236221,
+          "mean_host_idle_ms": 160.47001391480237,
+          "mean_rate_tok_s": 959.1012700138224,
+          "output_tokens_per_sec": 930.3510244142738,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "256": {
+        "model": "gpt2",
+        "mode": "decode",
+        "batch_size": 256,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/gpt2_bs_256",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 254.3896396674145,
+          "moe_batch_time_ms": 4.2852273058597845,
+          "mean_per_sample_ms": 0.9937095299508379,
+          "mean_host_idle_ms": 255.3485226973746,
+          "mean_rate_tok_s": 10068.672424239665,
+          "output_tokens_per_sec": 9941.57817990577,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "32": {
+        "model": "gpt2",
+        "mode": "decode",
+        "batch_size": 32,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/gpt2_bs_32",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 170.98562173929287,
+          "moe_batch_time_ms": 5.180764585040233,
+          "mean_per_sample_ms": 5.343300679352902,
+          "mean_host_idle_ms": 168.9469689339131,
+          "mean_rate_tok_s": 1874.853953785392,
+          "output_tokens_per_sec": 1825.1715680702082,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "512": {
+        "model": "gpt2",
+        "mode": "decode",
+        "batch_size": 512,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/gpt2_bs_512",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 373.05377637907543,
+          "moe_batch_time_ms": 1.3921617394853056,
+          "mean_per_sample_ms": 0.7286206569903817,
+          "mean_host_idle_ms": 370.1286777171856,
+          "mean_rate_tok_s": 13724.909285225001,
+          "output_tokens_per_sec": 13762.8368770088,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "64": {
+        "model": "gpt2",
+        "mode": "decode",
+        "batch_size": 64,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/gpt2_bs_64",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 185.78183356356902,
+          "moe_batch_time_ms": 1.972719958149917,
+          "mean_per_sample_ms": 2.902841149430766,
+          "mean_host_idle_ms": 183.45322650803993,
+          "mean_rate_tok_s": 3445.621064168544,
+          "output_tokens_per_sec": 3414.7164414631716,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "8": {
+        "model": "gpt2",
+        "mode": "decode",
+        "batch_size": 8,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/gpt2_bs_8",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 165.7948544672471,
+          "moe_batch_time_ms": 3.460803347447882,
+          "mean_per_sample_ms": 20.724356808405886,
+          "mean_host_idle_ms": 147.17191394354722,
+          "mean_rate_tok_s": 482.9249465263566,
+          "output_tokens_per_sec": 473.51190355544475,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      }
+    }
+  },
+  "llama3": {
+    "prefill": {
+      "128": {
+        "model": "llama3",
+        "mode": "prefill",
+        "batch_size": 128,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/llama3_bs_128_prefill",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 69.15593219335634,
+          "moe_batch_time_ms": 0.46632132105525337,
+          "mean_per_sample_ms": 0.5402807202605964,
+          "mean_host_idle_ms": 67.62803159091189,
+          "mean_rate_tok_s": 1851.0424749680017,
+          "output_tokens_per_sec": 1848.3822509079914,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "16": {
+        "model": "llama3",
+        "mode": "prefill",
+        "batch_size": 16,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output/exp1_llama3_bs_16",
+        "trace": {
+          "num_steps": 9,
+          "mean_batch_time_ms": 52.339867880736804,
+          "moe_batch_time_ms": 0.4934099350333079,
+          "mean_per_sample_ms": 3.2712417425460503,
+          "mean_host_idle_ms": 45.204076742290106,
+          "mean_rate_tok_s": 305.75161874142304,
+          "output_tokens_per_sec": 305.75161874142304,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "2": {
+        "model": "llama3",
+        "mode": "prefill",
+        "batch_size": 2,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output/exp1_llama3_bs_2",
+        "trace": {
+          "num_steps": 9,
+          "mean_batch_time_ms": 47.5630908657332,
+          "moe_batch_time_ms": 3.9158568685977806,
+          "mean_per_sample_ms": 23.7815454328666,
+          "mean_host_idle_ms": 23.896421850594226,
+          "mean_rate_tok_s": 42.80743947123794,
+          "output_tokens_per_sec": 42.80743947123794,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "256": {
+        "model": "llama3",
+        "mode": "prefill",
+        "batch_size": 256,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/llama3_bs_256_prefill",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 121.05594503949102,
+          "moe_batch_time_ms": 13.683461272096578,
+          "mean_per_sample_ms": 0.4728747853105118,
+          "mean_host_idle_ms": 129.9012886038954,
+          "mean_rate_tok_s": 2151.9837432829263,
+          "output_tokens_per_sec": 1946.5043594536075,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "32": {
+        "model": "llama3",
+        "mode": "prefill",
+        "batch_size": 32,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/llama3_bs_32_prefill",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 53.2133369995616,
+          "moe_batch_time_ms": 1.3546723909016343,
+          "mean_per_sample_ms": 1.6629167812363,
+          "mean_host_idle_ms": 51.67280947990262,
+          "mean_rate_tok_s": 602.1061097095235,
+          "output_tokens_per_sec": 588.4361006412009,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "4": {
+        "model": "llama3",
+        "mode": "prefill",
+        "batch_size": 4,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output/exp1_llama3_bs_4",
+        "trace": {
+          "num_steps": 9,
+          "mean_batch_time_ms": 51.868025906214854,
+          "moe_batch_time_ms": 0.3321157946454387,
+          "mean_per_sample_ms": 12.967006476553713,
+          "mean_host_idle_ms": 35.14170370648394,
+          "mean_rate_tok_s": 77.125368808754,
+          "output_tokens_per_sec": 77.125368808754,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "512": {
+        "model": "llama3",
+        "mode": "prefill",
+        "batch_size": 512,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/llama3_bs_512_prefill",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 194.43316332998398,
+          "moe_batch_time_ms": 9.653652740272111,
+          "mean_per_sample_ms": 0.37975227212887497,
+          "mean_host_idle_ms": 194.21627009534853,
+          "mean_rate_tok_s": 2643.9758508773148,
+          "output_tokens_per_sec": 2615.3262760447947,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "64": {
+        "model": "llama3",
+        "mode": "prefill",
+        "batch_size": 64,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/llama3_bs_64_prefill",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 69.30297169827557,
+          "moe_batch_time_ms": 0.6617328315681972,
+          "mean_per_sample_ms": 1.0828589327855558,
+          "mean_host_idle_ms": 66.76495920342965,
+          "mean_rate_tok_s": 923.6320524915476,
+          "output_tokens_per_sec": 929.3045958350401,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "8": {
+        "model": "llama3",
+        "mode": "prefill",
+        "batch_size": 8,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output/exp1_llama3_bs_8",
+        "trace": {
+          "num_steps": 9,
+          "mean_batch_time_ms": 50.708958033601846,
+          "moe_batch_time_ms": 1.5765159473035282,
+          "mean_per_sample_ms": 6.338619754200231,
+          "mean_host_idle_ms": 41.9802166698856,
+          "mean_rate_tok_s": 158.10419939294565,
+          "output_tokens_per_sec": 158.10419939294565,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "1": {
+        "model": "llama3",
+        "mode": "prefill",
+        "batch_size": 1,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output/exp1_llama3_prefill_bs_1",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 51.900387397000586,
+          "moe_batch_time_ms": 0.3385860477756013,
+          "mean_per_sample_ms": 51.900387397000586,
+          "mean_host_idle_ms": 0.0330945860437604,
+          "mean_rate_tok_s": 19.26919402444988,
+          "output_tokens_per_sec": 19.173606763345987,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      }
+    },
+    "decode": {
+      "1": {
+        "model": "llama3",
+        "mode": "decode",
+        "batch_size": 1,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output/exp1_llama3_decode_bs_1",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 516.7715278642733,
+          "moe_batch_time_ms": 0.5812681048784797,
+          "mean_per_sample_ms": 516.7715278642733,
+          "mean_host_idle_ms": 0.0,
+          "mean_rate_tok_s": 19.350955860499184,
+          "output_tokens_per_sec": 19.36830700082673,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "128": {
+        "model": "llama3",
+        "mode": "decode",
+        "batch_size": 128,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/llama3_bs_128",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 670.7656551378279,
+          "moe_batch_time_ms": 0.45215109097025385,
+          "mean_per_sample_ms": 5.240356680764281,
+          "mean_host_idle_ms": 664.10716796218,
+          "mean_rate_tok_s": 1908.2686307523525,
+          "output_tokens_per_sec": 1909.0907303509334,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "256": {
+        "model": "llama3",
+        "mode": "decode",
+        "batch_size": 256,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/llama3_bs_256",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 1036.2585101903308,
+          "moe_batch_time_ms": 0.6823388886915285,
+          "mean_per_sample_ms": 4.0478848054309795,
+          "mean_host_idle_ms": 1030.6867219374278,
+          "mean_rate_tok_s": 2470.4279844237994,
+          "output_tokens_per_sec": 2471.2414089576023,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "32": {
+        "model": "llama3",
+        "mode": "decode",
+        "batch_size": 32,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/llama3_bs_32",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 529.3716936613379,
+          "moe_batch_time_ms": 0.671570082222179,
+          "mean_per_sample_ms": 16.54286542691681,
+          "mean_host_idle_ms": 511.6624697133115,
+          "mean_rate_tok_s": 604.4919719755216,
+          "output_tokens_per_sec": 604.516015832673,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "512": {
+        "model": "llama3",
+        "mode": "decode",
+        "batch_size": 512,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/llama3_bs_512",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 1744.6609760765266,
+          "moe_batch_time_ms": 1.3915424966332184,
+          "mean_per_sample_ms": 3.407540968899466,
+          "mean_host_idle_ms": 1738.7479513368562,
+          "mean_rate_tok_s": 2934.6709769986883,
+          "output_tokens_per_sec": 2936.893352089795,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "64": {
+        "model": "llama3",
+        "mode": "decode",
+        "batch_size": 64,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/llama3_bs_64",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 681.5569971817814,
+          "moe_batch_time_ms": 0.1616932299233311,
+          "mean_per_sample_ms": 10.649328080965335,
+          "mean_host_idle_ms": 669.6985019761788,
+          "mean_rate_tok_s": 939.0264765822278,
+          "output_tokens_per_sec": 939.144033594595,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      }
+    }
+  },
+  "llama3_3b": {
+    "prefill": {
+      "128": {
+        "model": "llama3_3b",
+        "mode": "prefill",
+        "batch_size": 128,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/llama3_3b_bs_128_prefill",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 134.226700409743,
+          "moe_batch_time_ms": 1.5932361316553791,
+          "mean_per_sample_ms": 1.048646096951117,
+          "mean_host_idle_ms": 130.3374253466066,
+          "mean_rate_tok_s": 953.8493513229809,
+          "output_tokens_per_sec": 964.2597128032862,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "256": {
+        "model": "llama3_3b",
+        "mode": "prefill",
+        "batch_size": 256,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/llama3_3b_bs_256_prefill",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 234.49504766788397,
+          "moe_batch_time_ms": 1.9944602458024345,
+          "mean_per_sample_ms": 0.9159962799526717,
+          "mean_host_idle_ms": 232.75176480746495,
+          "mean_rate_tok_s": 1091.8480053237715,
+          "output_tokens_per_sec": 1089.2450868533983,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "32": {
+        "model": "llama3_3b",
+        "mode": "prefill",
+        "batch_size": 32,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/llama3_3b_bs_32_prefill",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 100.11728552368125,
+          "moe_batch_time_ms": 2.3033366438619645,
+          "mean_per_sample_ms": 3.128665172615039,
+          "mean_host_idle_ms": 93.84609512134553,
+          "mean_rate_tok_s": 319.9166518762522,
+          "output_tokens_per_sec": 325.43853144032096,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "512": {
+        "model": "llama3_3b",
+        "mode": "prefill",
+        "batch_size": 512,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/llama3_3b_bs_512_prefill",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 434.24315955822897,
+          "moe_batch_time_ms": 2.858615263561024,
+          "mean_per_sample_ms": 0.848131171012166,
+          "mean_host_idle_ms": 434.5339071838615,
+          "mean_rate_tok_s": 1179.155689507118,
+          "output_tokens_per_sec": 1172.2473533417242,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "64": {
+        "model": "llama3_3b",
+        "mode": "prefill",
+        "batch_size": 64,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/llama3_3b_bs_64_prefill",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 131.2731069651743,
+          "moe_batch_time_ms": 2.369863432987392,
+          "mean_per_sample_ms": 2.0511422963308483,
+          "mean_host_idle_ms": 125.8597697405649,
+          "mean_rate_tok_s": 487.8110966111499,
+          "output_tokens_per_sec": 495.12876749063884,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      }
+    },
+    "decode": {
+      "128": {
+        "model": "llama3_3b",
+        "mode": "decode",
+        "batch_size": 128,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/llama3_3b_bs_128",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 1321.0848972905867,
+          "moe_batch_time_ms": 2.377822887302232,
+          "mean_per_sample_ms": 10.320975760082709,
+          "mean_host_idle_ms": 1307.672396918674,
+          "mean_rate_tok_s": 968.9063436695837,
+          "output_tokens_per_sec": 970.1624041916663,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "256": {
+        "model": "llama3_3b",
+        "mode": "decode",
+        "batch_size": 256,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/llama3_3b_bs_256",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 2272.043376468019,
+          "moe_batch_time_ms": 0.896262934914775,
+          "mean_per_sample_ms": 8.875169439328198,
+          "mean_host_idle_ms": 2261.082194166171,
+          "mean_rate_tok_s": 1126.73937127505,
+          "output_tokens_per_sec": 1127.0945815429186,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "32": {
+        "model": "llama3_3b",
+        "mode": "decode",
+        "batch_size": 32,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/llama3_3b_bs_32",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 967.8787875010806,
+          "moe_batch_time_ms": 2.6228122707356043,
+          "mean_per_sample_ms": 30.24621210940877,
+          "mean_host_idle_ms": 933.2651058589597,
+          "mean_rate_tok_s": 330.6243099834262,
+          "output_tokens_per_sec": 331.6278393650942,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "512": {
+        "model": "llama3_3b",
+        "mode": "decode",
+        "batch_size": 512,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/llama3_3b_bs_512",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 4268.734950012591,
+          "moe_batch_time_ms": 1.1144287806806272,
+          "mean_per_sample_ms": 8.337372949243342,
+          "mean_host_idle_ms": 4259.7244735454315,
+          "mean_rate_tok_s": 1199.4187260617434,
+          "output_tokens_per_sec": 1199.2140736021756,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "64": {
+        "model": "llama3_3b",
+        "mode": "decode",
+        "batch_size": 64,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/llama3_3b_bs_64",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 1018.8838780840816,
+          "moe_batch_time_ms": 2.8405880123585985,
+          "mean_per_sample_ms": 15.920060595063775,
+          "mean_host_idle_ms": 998.9166977801041,
+          "mean_rate_tok_s": 628.1471670550401,
+          "output_tokens_per_sec": 629.8044165559221,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      }
+    }
+  },
+  "olmoe": {
+    "prefill": {
+      "32": {
+        "model": "olmoe",
+        "mode": "prefill",
+        "batch_size": 32,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/olmoe_bs_32_prefill",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 1405.0705364363632,
+          "moe_batch_time_ms": 5.290902386413188,
+          "mean_per_sample_ms": 43.90845426363635,
+          "mean_host_idle_ms": 1357.1950422878772,
+          "mean_rate_tok_s": 22.77525096911847,
+          "output_tokens_per_sec": 22.702210607361373,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "64": {
+        "model": "olmoe",
+        "mode": "prefill",
+        "batch_size": 64,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/olmoe_bs_64_prefill",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 1624.321146337485,
+          "moe_batch_time_ms": 5.109794555254109,
+          "mean_per_sample_ms": 25.380017911523204,
+          "mean_host_idle_ms": 1594.938186252982,
+          "mean_rate_tok_s": 39.401791205376526,
+          "output_tokens_per_sec": 39.29364810166984,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "128": {
+        "model": "olmoe",
+        "mode": "prefill",
+        "batch_size": 128,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/olmoe_bs_128_prefill",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 891.8841311044143,
+          "moe_batch_time_ms": 9.98504490438432,
+          "mean_per_sample_ms": 6.967844774253237,
+          "mean_host_idle_ms": 867.8173996906211,
+          "mean_rate_tok_s": 143.54835582029227,
+          "output_tokens_per_sec": 144.9004535299293,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      }
+    },
+    "decode": {
+      "128": {
+        "model": "olmoe",
+        "mode": "decode",
+        "batch_size": 128,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/olmoe_bs_128",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 8699.397428436649,
+          "moe_batch_time_ms": 12.421596333693952,
+          "mean_per_sample_ms": 67.96404240966132,
+          "mean_host_idle_ms": 8611.622159496543,
+          "mean_rate_tok_s": 147.13717243060267,
+          "output_tokens_per_sec": 147.3218121939567,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "32": {
+        "model": "olmoe",
+        "mode": "decode",
+        "batch_size": 32,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/olmoe_bs_32",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 11737.353985284091,
+          "moe_batch_time_ms": 1.5844317219816726,
+          "mean_per_sample_ms": 366.79231204012785,
+          "mean_host_idle_ms": 11360.843399391375,
+          "mean_rate_tok_s": 27.263385855455894,
+          "output_tokens_per_sec": 27.266151682477627,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "64": {
+        "model": "olmoe",
+        "mode": "decode",
+        "batch_size": 64,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/olmoe_bs_64",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 7618.209407142539,
+          "moe_batch_time_ms": 16.747711508897712,
+          "mean_per_sample_ms": 119.03452198660217,
+          "mean_host_idle_ms": 7475.964016507508,
+          "mean_rate_tok_s": 84.00997831364771,
+          "output_tokens_per_sec": 84.1715447193946,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "256": {
+        "model": "olmoe",
+        "mode": "decode",
+        "batch_size": 256,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/olmoe_bs_256",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 10444.085660686162,
+          "moe_batch_time_ms": 6.0160802588322655,
+          "mean_per_sample_ms": 40.79720961205532,
+          "mean_host_idle_ms": 10388.972455390767,
+          "mean_rate_tok_s": 245.1149510697842,
+          "output_tokens_per_sec": 245.24190916556157,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      },
+      "512": {
+        "model": "olmoe",
+        "mode": "decode",
+        "batch_size": 512,
+        "run_dir": "/cra-1684/igormolybog/SODA---System-Offload-Dynamics-Analyzer/model_dir/soda_output_v2/olmoe_bs_512",
+        "trace": {
+          "num_steps": 8,
+          "mean_batch_time_ms": 13040.178646926603,
+          "moe_batch_time_ms": 2.330501392470455,
+          "mean_per_sample_ms": 25.46909891977852,
+          "mean_host_idle_ms": 13008.224214678854,
+          "mean_rate_tok_s": 392.632680633173,
+          "output_tokens_per_sec": 392.586003313416,
+          "benchmark_valid": true,
+          "generation_verified": true
+        },
+        "compilation": {
+          "pure_compile_min": null,
+          "queue_wait_min": null,
+          "cached": false
+        }
+      }
+    }
+  }
+}
