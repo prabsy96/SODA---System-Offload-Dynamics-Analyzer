@@ -524,11 +524,18 @@ def run_soda_gpt_inference():
                 global_step=executor.user_iteration,
             )
 
+    from cerebras.modelzoo.trainer.callbacks.summaries import _GLOBAL_SUMMARIES
+
+    class _NoOpTrainer:
+        def log_metrics(self, **kwargs):
+            pass
+
     try:
-        for batch in executor:
-            start_time = time.time()
-            predictions = inference_step(batch)
-            post_inference_step(predictions, start_time)
+        with _GLOBAL_SUMMARIES._cache_trainer(_NoOpTrainer()):
+            for batch in executor:
+                start_time = time.time()
+                predictions = inference_step(batch)
+                post_inference_step(predictions, start_time)
     finally:
         profile_stack.close()
         tracer.export_metrics()
